@@ -39,7 +39,7 @@ A **single disposable Ubuntu 24.04 container running systemd as PID 1**, with th
 |---|---|---|
 | SSL | **Pebble ACME** (faithful local ACME) | Pebble + challtestsrv sidecars under an opt-in `ssl` compose profile; the ssl-manager's domain-accessibility gate must be bypassed and certbot pointed at Pebble — done via a **patched copy** of the script, not by editing the repo script (see §7). |
 | PHP Manager | **Multi-version** (runtime installs allowed) | Container keeps outbound net at runtime; ondrej PPA pre-added at build; PHP Manager can apt-install/remove extra `php*-fpm` versions. Less air-gapped, accepted. |
-| Tooling location | **Gitignored `local-dev/`** | All Docker/compose/entrypoint/Makefile files live under `local-dev/` (added to `.gitignore`). Keeps the fork's diff vs upstream clean. |
+| Tooling location | **Committed `local-dev/`** (revised 2026-06-25; originally gitignored) | All Docker/compose/entrypoint/Makefile files live under `local-dev/`, tracked in the fork for reproducibility + shareability. Diff stays contained: app code changes only in the three flagged files; everything else is additive under `local-dev/`. |
 | Reverb + queue | **Always-on** | `laranode-reverb` (ws :8080) and `laranode-queue-worker` started as systemd units at boot, like production; enables real-time dashboard testing. |
 
 ## 4. Architecture
@@ -119,13 +119,14 @@ Everything else (apache modules, sysstat enable, templates, ufw allow rules, sys
 - Disposability: container + named volumes removed by `docker compose down -v`; only host artifact is the repo. Rebuild image only when apt packages / Dockerfile change.
 - **Perf note:** Windows-path bind mounts are slower over 9p. Acceptable for dev; if it bites, relocating the repo into the WSL2 filesystem (edited via VS Code WSL remote) is a future optimization — not in scope now.
 
-## 11. In-repo changes (everything else is gitignored `local-dev/`)
+## 11. In-repo changes (tooling is committed under `local-dev/`)
 
-Minimizing the fork's diff vs upstream. Only two files outside `local-dev/`:
+App/config changes are limited to three files; the dev tooling is additive under the committed `local-dev/` dir (decision revised 2026-06-25 — see §3). Three files outside `local-dev/`:
 1. `phpunit.xml` — uncomment the two SQLite env lines. (Genuine test fix.)
-2. `config/laranode.php` — wrap `laranode_bin_path` in `env(..., base_path(...))`. (Prod-safe; **needs your sign-off**. If rejected, use the §6 volume-overlay fallback for zero repo change.)
+2. `config/laranode.php` — wrap `laranode_bin_path` in `env('LARANODE_BIN_PATH', base_path(...))`. (Prod-safe; approved.)
+3. `tests/Feature/Filemanager/CreateFileTest.php` — conditional skip of the two host-dependent happy-path tests (realizes §9).
 
-`.gitignore` gains `/local-dev` (the tooling dir itself is not a code change to the app).
+`local-dev/` is tracked (not gitignored); the fork's diff vs upstream stays contained because app code changes only in the three files above.
 
 ## 12. File inventory (under `local-dev/`)
 
