@@ -26,6 +26,7 @@ test('appendOutput accumulates lines + broadcasts each line', function () {
 
     expect($op->fresh()->output)->toBe("line one\nline two\n");
     Event::assertDispatchedTimes(OperationUpdated::class, 2);
+    Event::assertDispatched(OperationUpdated::class, fn ($e) => $e->kind === 'line' && $e->line === 'line two');
 });
 
 test('markFinished maps exit code to status + broadcasts', function () {
@@ -40,6 +41,7 @@ test('markFinished maps exit code to status + broadcasts', function () {
         ->and($ok->fresh()->exit_code)->toBe(0)
         ->and($ok->fresh()->finished_at)->not->toBeNull()
         ->and($bad->fresh()->status)->toBe('failed');
+    Event::assertDispatchedTimes(OperationUpdated::class, 2);
 });
 
 test('the event carries the agreed payload + channel', function () {
