@@ -54,11 +54,12 @@ Every requested feature — git clone+build, fail2ban log scans, multi-engine in
 ### Phase 4 — Ops payoff (exploit the mature foundation)
 9. **`backups`** — scheduled + on-demand DB dump (per-engine) + file tar to local + S3-compatible storage; retention; restore-to-new-target. Uses scheduler + queue + drivers.
 10. **`cron-tasks`** — per-user crontab CRUD via sudo script + UI.
-11. **`monitoring-alerts`** — surface `failed_jobs`; email/webhook alerts on deploy failure, SSL expiry, fail2ban bans, disk/CPU thresholds (Reverb stats already gathered). *(Can interleave earlier — SSL-expiry/disk alerts don't need deploy.)*
+11. **`notifications`** — a real notification system (added 2026-06-25): in-app **notification center** via Laravel database notifications (bell + unread count in the layout) plus opt-in delivery channels (email, webhook/Slack). Event sources: operation finished/failed (from sub-project #1), deploy success/failure, SSL issued/expiring, fail2ban bans, resource thresholds, backup results. Per-user, with notification preferences. Builds directly on the #1 operations + events + scheduler foundation. *(Plumbing can land early; specific alert sources wire in as their features ship.)*
+12. **`user-analytics`** — user-facing analytics about *their* machine/resources (added 2026-06-25). Today's live CPU/mem/network + sar history are **admin-only**; this surfaces historical, digestible analytics to the user: CPU/memory/disk/bandwidth over time, per-site traffic + disk usage, DB/account resource consumption vs their quotas (`domain_limit`/`database_limit`), SSL/cert status overview. Extends the existing `SarHistory`/`*HistoryService` + Reverb stats stack with user-scoped views + scheduled rollups (uses the #1 scheduler). *(Charts already in the stack: chart.js/react-chartjs-2.)*
 
 ### Phase 5 — Lower-fit engines (last; must not distort the abstraction)
-12. **`cache-redis-memcached`** — separate Cache Services UI (enable/disable, status, host:port, Redis AUTH+flush, Memcached port+memory). Not modeled as relational databases.
-13. **`db-mongodb`** — `MongoDriver` with role-based user flow, `db.stats()` sizing, mongo connection string, install + mongosh sudo script.
+13. **`cache-redis-memcached`** — separate Cache Services UI (enable/disable, status, host:port, Redis AUTH+flush, Memcached port+memory). Not modeled as relational databases.
+14. **`db-mongodb`** — `MongoDriver` with role-based user flow, `db.stats()` sizing, mongo connection string, install + mongosh sudo script.
 
 ## Cross-cutting principles
 
