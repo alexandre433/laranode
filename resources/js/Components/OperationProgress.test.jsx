@@ -10,15 +10,17 @@ vi.mock('@inertiajs/react', () => ({
 beforeEach(() => {
     captured = null;
     window.Echo = {
-        private: () => ({ listen: (_name, cb) => { captured = cb; } }),
+        private: () => ({ listen: (_name, cb) => { captured = cb; }, stopListening: vi.fn() }),
         leave: vi.fn(),
     };
 });
 
 test('renders streamed lines and the terminal status', () => {
-    render(<OperationProgress operationId={5} onDone={vi.fn()} />);
+    const onDone = vi.fn();
+    render(<OperationProgress operationId={5} onDone={onDone} />);
     act(() => captured({ operationId: 5, kind: 'line', line: 'building...' }));
     act(() => captured({ operationId: 5, kind: 'status', status: 'succeeded', exitCode: 0 }));
     expect(screen.getByText(/building\.\.\./)).toBeInTheDocument();
     expect(screen.getByText(/Status: succeeded/)).toBeInTheDocument();
+    expect(onDone).toHaveBeenCalledWith('succeeded');
 });

@@ -46,7 +46,8 @@ export default function Websites({ websites, serverIp }) {
         const enabling = !website.ssl_enabled;
         if (enabling) {
             axios.post(route('websites.ssl.toggle', { website: website.id }), { enabled: true })
-                .then((res) => setSslOp({ id: res.data.operation_id, url: website.url }));
+                .then((res) => setSslOp({ id: res.data.operation_id, url: website.url }))
+                .catch(() => toast.error('Failed to start SSL generation'));
         } else {
             router.post(route('websites.ssl.toggle', { website: website.id }), { enabled: false }, {
                 preserveScroll: true, onSuccess: () => router.reload(),

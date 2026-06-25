@@ -18,7 +18,7 @@ export default function useOperation(operationId) {
             if (e.kind === 'status') { setStatus(e.status); setExitCode(e.exitCode); }
         });
 
-        return () => window.Echo.leave(`operations.${userId}`);
+        return () => channel.stopListening('.OperationUpdated');
     }, [operationId, userId]);
 
     return { status, lines, exitCode };

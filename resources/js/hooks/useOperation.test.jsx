@@ -10,7 +10,7 @@ vi.mock('@inertiajs/react', () => ({
 beforeEach(() => {
     captured = null;
     window.Echo = {
-        private: () => ({ listen: (_name, cb) => { captured = cb; } }),
+        private: () => ({ listen: (_name, cb) => { captured = cb; }, stopListening: vi.fn() }),
         leave: vi.fn(),
     };
 });
