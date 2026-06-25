@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import useOperation from '@/hooks/useOperation';
 
 const badge = { queued: 'text-gray-500', running: 'text-blue-600', succeeded: 'text-green-600', failed: 'text-red-600' };
@@ -5,9 +6,11 @@ const badge = { queued: 'text-gray-500', running: 'text-blue-600', succeeded: 't
 export default function OperationProgress({ operationId, onDone }) {
     const { status, lines, exitCode } = useOperation(operationId);
 
-    if ((status === 'succeeded' || status === 'failed') && onDone) {
-        setTimeout(() => onDone(status), 0);
-    }
+    useEffect(() => {
+        if ((status === 'succeeded' || status === 'failed') && onDone) {
+            onDone(status);
+        }
+    }, [status]);
 
     return (
         <div className="mt-2">
