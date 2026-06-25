@@ -21,6 +21,160 @@
 
 ---
 
+> **Execution order:** run **Task A** then **Task B** (front-end test infrastructure, project-wide — there is no JS test harness today) BEFORE the numbered tasks. Then Tasks 1–7 in order. Task 7 (React) depends on Task A's Vitest harness.
+
+### Task A: Front-end unit/component test harness (Vitest + RTL + jsdom)
+
+**Files:**
+- Create: `vitest.config.js`
+- Create: `resources/js/tests/setup.js`
+- Create: `resources/js/tests/sanity.test.jsx`
+- Modify: `package.json` (add `test` + `test:watch` scripts; devDeps added by install)
+
+**Interfaces:**
+- Produces: a working `npm run test` (Vitest, jsdom, RTL, `@` → `resources/js` alias, jest-dom matchers). Consumed by Task 7's component tests.
+
+- [ ] **Step 1: Install dev deps (in the container — node_modules is the container volume)**
+
+Run: `docker exec laranode-lab bash -lc 'cd /home/laranode_ln/panel && npm i -D vitest @testing-library/react @testing-library/jest-dom @testing-library/user-event jsdom'`
+Expected: installs succeed; `package.json` devDependencies gains these.
+
+- [ ] **Step 2: Create `vitest.config.js`** (separate from `vite.config.js` — must NOT load the laravel plugin, which needs a running Laravel server)
+
+```js
+import { defineConfig } from 'vitest/config';
+import react from '@vitejs/plugin-react';
+import path from 'node:path';
+
+export default defineConfig({
+    plugins: [react()],
+    resolve: { alias: { '@': path.resolve(__dirname, 'resources/js') } },
+    test: {
+        environment: 'jsdom',
+        globals: true,
+        setupFiles: ['resources/js/tests/setup.js'],
+        include: ['resources/js/**/*.{test,spec}.{js,jsx}'],
+    },
+});
+```
+
+- [ ] **Step 3: Create `resources/js/tests/setup.js`**
+
+```js
+import '@testing-library/jest-dom';
+```
+
+- [ ] **Step 4: Add scripts to `package.json`** (keep existing `build`/`dev`)
+
+In the `"scripts"` block add:
+```json
+        "test": "vitest run",
+        "test:watch": "vitest"
+```
+
+- [ ] **Step 5: Write a sanity test `resources/js/tests/sanity.test.jsx`**
+
+```jsx
+import { render, screen } from '@testing-library/react';
+import { test, expect } from 'vitest';
+
+test('vitest + React Testing Library render works', () => {
+    render(<div>hello laranode</div>);
+    expect(screen.getByText('hello laranode')).toBeInTheDocument();
+});
+```
+
+- [ ] **Step 6: Run it; verify it passes**
+
+Run: `docker exec laranode-lab bash -lc 'cd /home/laranode_ln/panel && npm run test'`
+Expected: 1 passing test.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add vitest.config.js resources/js/tests/setup.js resources/js/tests/sanity.test.jsx package.json
+git commit -m "test(frontend): add Vitest + React Testing Library harness"
+```
+
+---
+
+### Task B: E2E test harness (Playwright smoke)
+
+**Files:**
+- Create: `playwright.config.js`
+- Create: `tests/e2e/smoke.spec.js`
+- Modify: `package.json` (add `test:e2e` script; dep added by install)
+
+**Interfaces:**
+- Produces: `npm run test:e2e` running headless chromium against the running container (`http://localhost`) with the seeded admin. Reusable by later sub-projects.
+
+> Heavier layer: runs the browser **inside the container** (so it hits the container's own Apache on :80; node_modules is the container volume). A one-time browser+deps install is required. Keep specs to robust smokes — do NOT E2E the live SSL-streaming flow (needs queue+Reverb+Pebble; flaky).
+
+- [ ] **Step 1: Install Playwright + chromium (in the container, as root)**
+
+Run: `docker exec laranode-lab bash -lc 'cd /home/laranode_ln/panel && npm i -D @playwright/test && apt-get update -qq && npx playwright install --with-deps chromium'`
+Expected: package installed; chromium + its apt libs installed (one-time, ~150MB). If `apt-get` is slow/large, that's expected.
+
+- [ ] **Step 2: Create `playwright.config.js`**
+
+```js
+import { defineConfig, devices } from '@playwright/test';
+
+export default defineConfig({
+    testDir: './tests/e2e',
+    timeout: 30000,
+    use: { baseURL: process.env.APP_URL || 'http://localhost', headless: true },
+    projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+});
+```
+
+- [ ] **Step 3: Add the script to `package.json`**
+
+In `"scripts"` add:
+```json
+        "test:e2e": "playwright test"
+```
+
+- [ ] **Step 4: Write the smoke spec `tests/e2e/smoke.spec.js`**
+
+```js
+import { test, expect } from '@playwright/test';
+
+test('admin can log in and reach the dashboard', async ({ page }) => {
+    await page.goto('/login');
+    await page.fill('input#email', 'admin@laranode.test');
+    await page.fill('input#password', 'password');
+    await page.click('button[type="submit"]');
+    await expect(page).toHaveURL(/dashboard/);
+});
+
+test('the websites page renders for an authenticated admin', async ({ page }) => {
+    await page.goto('/login');
+    await page.fill('input#email', 'admin@laranode.test');
+    await page.fill('input#password', 'password');
+    await page.click('button[type="submit"]');
+    await page.waitForURL(/dashboard/);
+    await page.goto('/websites');
+    await expect(page.locator('body')).toContainText(/website/i);
+});
+```
+(Match the real input selectors in `resources/js/Pages/Auth/Login.jsx` — Breeze uses `id="email"` / `id="password"`. If they differ, adjust the selectors.)
+
+- [ ] **Step 5: Run it against the running container; verify**
+
+First confirm the app is up + assets built + admin seeded: `docker exec laranode-lab bash -lc 'cd /home/laranode_ln/panel && systemctl is-active apache2 && curl -s -o /dev/null -w "%{http_code}\n" http://localhost/login'` → apache `active`, login `200`.
+Run: `docker exec laranode-lab bash -lc 'cd /home/laranode_ln/panel && npm run test:e2e'`
+Expected: 2 passing E2E tests. If a selector mismatches, fix per the real Login page and re-run.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add playwright.config.js tests/e2e/smoke.spec.js package.json
+git commit -m "test(e2e): add Playwright harness + login/dashboard/websites smokes"
+```
+
+---
+
 ### Task 1: `operations` table + `Operation` model
 
 **Files:**
@@ -832,7 +986,8 @@ git commit -m "feat(platform): scheduler hook + daily operations prune"
 - Create: `resources/js/hooks/useOperation.js`
 - Create: `resources/js/Components/OperationProgress.jsx`
 - Modify: `resources/js/Pages/Websites/Index.jsx` (SSL toggle → axios + live progress; the current `toggleSsl` is at ~line 42 using `router.post`)
-- Verification: manual, in the `local-dev` container (no JS test harness exists in this project — verified by exercising the real UI).
+- Test (Vitest, from Task A): `resources/js/hooks/useOperation.test.jsx`, `resources/js/Components/OperationProgress.test.jsx`
+- Verification: automated Vitest component/hook tests (below) + a manual in-container check of the real live-streaming SSL flow (which needs queue+Reverb+Pebble and is deliberately not E2E'd).
 
 **Interfaces:**
 - Consumes: the `operations.{userId}` channel + `OperationUpdated` event (Task 2), the `toggleSsl` JSON `{operation_id}` (Task 4), Inertia shared `auth.user.id`, `window.Echo` (`resources/js/echo.js`), `window.axios` (`resources/js/bootstrap.js`).
@@ -895,7 +1050,78 @@ export default function OperationProgress({ operationId, onDone }) {
 }
 ```
 
-- [ ] **Step 3: Wire the SSL toggle in `Websites/Index.jsx`**
+- [ ] **Step 3: Write the Vitest test for `useOperation`**
+
+```jsx
+// resources/js/hooks/useOperation.test.jsx
+import { renderHook, act } from '@testing-library/react';
+import { test, expect, vi, beforeEach } from 'vitest';
+import useOperation from '@/hooks/useOperation';
+
+let captured; // the .listen() callback the hook registers
+vi.mock('@inertiajs/react', () => ({
+    usePage: () => ({ props: { auth: { user: { id: 7 } } } }),
+}));
+
+beforeEach(() => {
+    captured = null;
+    window.Echo = {
+        private: () => ({ listen: (_name, cb) => { captured = cb; } }),
+        leave: vi.fn(),
+    };
+});
+
+test('accumulates lines and tracks status for the matching operation', () => {
+    const { result } = renderHook(() => useOperation(42));
+    act(() => captured({ operationId: 42, kind: 'line', line: 'hello' }));
+    act(() => captured({ operationId: 42, kind: 'status', status: 'running', exitCode: null }));
+    expect(result.current.lines).toEqual(['hello']);
+    expect(result.current.status).toBe('running');
+});
+
+test('ignores events for a different operation id', () => {
+    const { result } = renderHook(() => useOperation(42));
+    act(() => captured({ operationId: 99, kind: 'line', line: 'nope' }));
+    expect(result.current.lines).toEqual([]);
+});
+```
+
+- [ ] **Step 4: Write the Vitest test for `OperationProgress`**
+
+```jsx
+// resources/js/Components/OperationProgress.test.jsx
+import { render, screen, act } from '@testing-library/react';
+import { test, expect, vi, beforeEach } from 'vitest';
+import OperationProgress from '@/Components/OperationProgress';
+
+let captured;
+vi.mock('@inertiajs/react', () => ({
+    usePage: () => ({ props: { auth: { user: { id: 1 } } } }),
+}));
+
+beforeEach(() => {
+    captured = null;
+    window.Echo = {
+        private: () => ({ listen: (_name, cb) => { captured = cb; } }),
+        leave: vi.fn(),
+    };
+});
+
+test('renders streamed lines and the terminal status', () => {
+    render(<OperationProgress operationId={5} onDone={vi.fn()} />);
+    act(() => captured({ operationId: 5, kind: 'line', line: 'building...' }));
+    act(() => captured({ operationId: 5, kind: 'status', status: 'succeeded', exitCode: 0 }));
+    expect(screen.getByText(/building\.\.\./)).toBeInTheDocument();
+    expect(screen.getByText(/Status: succeeded/)).toBeInTheDocument();
+});
+```
+
+- [ ] **Step 5: Run the Vitest tests; verify they pass**
+
+Run: `docker exec laranode-lab bash -lc 'cd /home/laranode_ln/panel && npm run test'`
+Expected: all Vitest tests pass (sanity + the 2 hook tests + the component test). If `usePage` mocking errors, confirm `@inertiajs/react` is the import path used by the hook/component.
+
+- [ ] **Step 6: Wire the SSL toggle in `Websites/Index.jsx`**
 
 Replace the `toggleSsl` handler (current, ~line 42, which does `router.post(...)`). New behavior: enabling SSL calls the endpoint via axios, stores the returned `operation_id` in state, and renders `<OperationProgress>`; on terminal status, `router.reload()`. Disabling keeps the existing `router.post` redirect. Add at the top: `import { useState } from 'react'; import axios from 'axios'; import OperationProgress from '@/Components/OperationProgress';` and a state `const [sslOp, setSslOp] = useState(null);`. Handler:
 ```jsx
@@ -921,22 +1147,22 @@ And render, near the table (e.g. above it), the live panel when an op is active:
     )}
 ```
 
-- [ ] **Step 4: Build assets**
+- [ ] **Step 7: Build assets**
 
 Run: `docker exec laranode-lab bash -lc 'cd /home/laranode_ln/panel && npm run build'`
 Expected: build succeeds (no import errors).
 
-- [ ] **Step 5: Manual verification in the container (no JS test harness)**
+- [ ] **Step 8: Manual verification of the live-streaming flow (the one path not E2E'd)**
 
-Ensure the queue worker + Reverb are running (they are, as systemd units): `docker exec laranode-lab bash -lc 'systemctl is-active laranode-queue-worker laranode-reverb'` → both `active`.
-Then in the browser (`http://localhost`, logged in as admin), with the `ssl` profile up (`make ssl-test` from PowerShell, so Pebble is reachable): create a website, click Enable SSL, and confirm the live log streams certbot output and ends `succeeded`, then the row shows SSL active. Also check `/admin/operations` lists the run with its output.
-**Surface honestly:** this task has no automated JS test (the project has no JS test setup); it is verified manually + backed by the Task 4 backend tests. State this in the task report.
+The component/hook logic is now covered by Vitest (Steps 3–5); the operation lifecycle by Pest (Task 4). What remains is the real end-to-end live stream, which needs queue+Reverb+Pebble and is deliberately not automated. Verify it once manually:
+Ensure the queue worker + Reverb are running: `docker exec laranode-lab bash -lc 'systemctl is-active laranode-queue-worker laranode-reverb'` → both `active`.
+Then in the browser (`http://localhost`, logged in as admin), with the `ssl` profile up (`make ssl-test` from PowerShell so Pebble is reachable): create a website, click Enable SSL, confirm the live log streams certbot output and ends `succeeded`, the row shows SSL active, and `/admin/operations` lists the run with its output. Report the outcome (this is the one manual gate; everything else is automated).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add resources/js/hooks/useOperation.js resources/js/Components/OperationProgress.jsx resources/js/Pages/Websites/Index.jsx
-git commit -m "feat(ui): live operation progress (hook + component) + SSL toggle streaming"
+git add resources/js/hooks/useOperation.js resources/js/Components/OperationProgress.jsx resources/js/Pages/Websites/Index.jsx resources/js/hooks/useOperation.test.jsx resources/js/Components/OperationProgress.test.jsx
+git commit -m "feat(ui): live operation progress (hook + component) + SSL toggle streaming + Vitest tests"
 ```
 
 ---
@@ -944,19 +1170,22 @@ git commit -m "feat(ui): live operation progress (hook + component) + SSL toggle
 ## Self-Review
 
 **1. Spec coverage:**
+- front-end unit/component test harness (Vitest+RTL+jsdom) → Task A ✓
+- front-end E2E harness (Playwright smoke) → Task B ✓
 - operations table + model → Task 1 ✓
 - OperationUpdated event + user-scoped channel auth → Task 2 ✓
 - lifecycle (markRunning/appendOutput/markFinished, broadcast) → Task 2 ✓
 - abstract OperationJob convention → Task 3 ✓
 - SSL conversion (action `$onOutput`, job, controller JSON) → Task 4 ✓
 - streamed output lines (Process callback splitting buffer) → Task 4 Step 3 ✓
-- React hook + OperationProgress + SSL UI → Task 7 ✓
+- React hook + OperationProgress + SSL UI → Task 7 ✓ (now with Vitest component/hook tests, Steps 3–5)
 - admin audit page → Task 5 ✓
 - scheduler hook + prune → Task 6 ✓
 - tests (lifecycle, failure, broadcast, channel auth, SSL, admin page) → Tasks 1–6 ✓ (channel-auth assertion lives in Task 2 Step 1's payload/channel test + the `routes/channels.php` closure; a dedicated auth-callback test is optional — the closure is trivial and exercised via the broadcasting auth route in manual verification).
+- front-end testing (component/hook + E2E) → Task A (Vitest) + Task B (Playwright) + Task 7's Vitest tests ✓
 
-**2. Placeholder scan:** No TBD/TODO; every code step has complete code; commands have expected output. The one intentional manual-only step (Task 7 front-end) is explicitly flagged as having no JS harness, not hidden.
+**2. Placeholder scan:** No TBD/TODO; every code step has complete code; commands have expected output.
 
-**3. Type/contract consistency:** `Operation` fields + methods (`markRunning`/`appendOutput`/`markFinished`) consistent across Tasks 1–4. `OperationUpdated(operation, kind, line)` + payload keys (`operationId`/`kind`/`status`/`line`/`exitCode`) consistent between Task 2 (event), Task 7 (hook reads them), and the Global Constraints. Channel `operations.{userId}` consistent (Task 2 auth, Task 7 subscribe). `GenerateSslOperationJob(operation, website, email)` matches Task 4 dispatch. `toggleSsl` JSON `{operation_id}` consistent between Task 4 (returns) and Task 7 (reads `res.data.operation_id`). Route name `operations.index` consistent (Task 5).
+**3. Type/contract consistency:** `Operation` fields + methods (`markRunning`/`appendOutput`/`markFinished`) consistent across Tasks 1–4. `OperationUpdated(operation, kind, line)` + payload keys (`operationId`/`kind`/`status`/`line`/`exitCode`) consistent between Task 2 (event), Task 7 (hook + its Vitest test read them), and the Global Constraints. Channel `operations.{userId}` consistent (Task 2 auth, Task 7 subscribe). `GenerateSslOperationJob(operation, website, email)` matches Task 4 dispatch. `toggleSsl` JSON `{operation_id}` consistent between Task 4 (returns) and Task 7 (reads `res.data.operation_id`). Route name `operations.index` consistent (Task 5).
 
-**Known gap surfaced (fail-loud):** Task 7 (front-end) has no automated test — the project ships no JS test harness. It is covered by manual in-container verification + the backend tests in Task 4. Flagged in the task and here rather than implied as tested.
+**Front-end testing coverage (was the prior gap, now closed):** Task A adds Vitest+RTL+jsdom (project had no JS harness); Task 7 adds deterministic component/hook tests for `useOperation` + `OperationProgress`; Task B adds Playwright E2E smokes. The only remaining **manual** gate is the real live-streaming SSL flow (queue+Reverb+Pebble), deliberately not E2E'd to avoid flakiness — and even that is component-tested (UI logic) + Pest-tested (backend lifecycle). Surfaced honestly, not implied as fully E2E'd.
