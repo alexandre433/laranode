@@ -101,11 +101,7 @@ class WebsiteController extends Controller
                 'status' => 'queued',
             ]);
 
-            try {
-                \App\Jobs\GenerateSslOperationJob::dispatch($operation, $website, $request->user()->email);
-            } catch (\Throwable) {
-                // Job rethrows on failure so failed_jobs records; operation already marked failed.
-            }
+            \App\Jobs\GenerateSslOperationJob::dispatch($operation, $website, $request->user()->email);
 
             return response()->json(['operation_id' => $operation->id]);
         }

@@ -37,11 +37,13 @@ test('a failing certbot run marks the operation failed and reverts ssl flags', f
     Process::fake(['*' => Process::result(output: '', errorOutput: 'certbot boom', exitCode: 1)]);
     $user = User::factory()->create();
     $site = makeSiteFor($user);
+    $op = \App\Models\Operation::create([
+        'user_id' => $user->id, 'type' => 'ssl.generate', 'target' => $site->url, 'status' => 'queued',
+    ]);
 
-    $response = $this->actingAs($user)
-        ->postJson(route('websites.ssl.toggle', $site), ['enabled' => true]);
+    expect(fn () => (new \App\Jobs\GenerateSslOperationJob($op, $site, $user->email))->handle())
+        ->toThrow(\Exception::class);
 
-    $op = Operation::findOrFail($response->json('operation_id'));
-    expect($op->status)->toBe('failed');
-    expect($site->fresh()->ssl_enabled)->toBeFalse();
+    expect($op->fresh()->status)->toBe('failed')
+        ->and($site->fresh()->ssl_enabled)->toBeFalse();
 });
