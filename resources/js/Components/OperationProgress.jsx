@@ -1,16 +1,20 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import useOperation from '@/hooks/useOperation';
 
 const badge = { queued: 'text-gray-500', running: 'text-blue-600', succeeded: 'text-green-600', failed: 'text-red-600' };
 
 export default function OperationProgress({ operationId, onDone }) {
     const { status, lines, exitCode } = useOperation(operationId);
+    const firedRef = useRef(false);
+
+    useEffect(() => { firedRef.current = false; }, [operationId]);
 
     useEffect(() => {
-        if ((status === 'succeeded' || status === 'failed') && onDone) {
+        if (!firedRef.current && (status === 'succeeded' || status === 'failed') && onDone) {
+            firedRef.current = true;
             onDone(status);
         }
-    }, [status]);
+    }, [status, onDone]);
 
     return (
         <div className="mt-2">
