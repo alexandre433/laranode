@@ -40,4 +40,26 @@ class Operation extends Model
     {
         return static::where('created_at', '<', now()->subDays(30));
     }
+
+    public function markRunning(): void
+    {
+        $this->update(['status' => 'running', 'started_at' => now()]);
+        \App\Events\OperationUpdated::dispatch($this, 'status');
+    }
+
+    public function appendOutput(string $line): void
+    {
+        $this->update(['output' => ($this->output ?? '') . $line . "\n"]);
+        \App\Events\OperationUpdated::dispatch($this, 'line', $line);
+    }
+
+    public function markFinished(int $exitCode): void
+    {
+        $this->update([
+            'status' => $exitCode === 0 ? 'succeeded' : 'failed',
+            'exit_code' => $exitCode,
+            'finished_at' => now(),
+        ]);
+        \App\Events\OperationUpdated::dispatch($this, 'status');
+    }
 }
