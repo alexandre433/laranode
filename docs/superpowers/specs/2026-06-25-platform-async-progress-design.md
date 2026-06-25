@@ -106,6 +106,18 @@ Each async feature subclasses this. `failed()` is naturally handled (markFinishe
 - SSL conversion: `Process::fake()` (success + failure), hit `toggleSsl` enabled → asserts an `operations` row (`type=ssl.generate`) created + `GenerateSslOperationJob` dispatched (`Queue::fake` or sync) + JSON `operation_id` returned; running it (sync) updates `ssl_status` as before. Disable path unchanged.
 - Admin page: admin sees `/admin/operations`; non-admin forbidden.
 
+## Front-end testing (added 2026-06-25 per user direction)
+
+The project ships **no JS test harness** today — front-end code is untested. This sub-project introduces front-end testing as project infrastructure (it's the first sub-project adding testable React components), so the UI is covered automatically, not just manually.
+
+- **Component / hook layer — Vitest + @testing-library/react + jsdom.** Deterministic, fast, no running app needed. Covers this sub-project's UI:
+  - `useOperation(operationId)` — mock `window.Echo` (fake `.private().listen()` capturing the handler) + mock Inertia `usePage` (auth.user.id); drive `line`/`status` events; assert returned `{status, lines, exitCode}` and that the wrong-`operationId` events are ignored.
+  - `OperationProgress` — render via RTL with a mocked Echo; assert it shows streamed lines + the status badge; `onDone` fires on terminal status.
+  - `npm run test` (`vitest run`) + `npm run test:watch`.
+- **E2E / "meta" layer — Playwright.** Real-browser smokes against the running `local-dev` container (host → `http://localhost`), using the seeded admin (`admin@laranode.test`/`password`): login → dashboard renders; authenticated pages (websites, `/admin/operations`) render. `npm run test:e2e`.
+  - **Deliberately NOT E2E-testing the live SSL streaming flow** — it needs queue+Reverb+Pebble live and would be flaky; that flow is covered by the Vitest component tests (UI logic) + the Pest backend tests (operation lifecycle) + manual verification. Honest scoping.
+- These harnesses are reused by every future sub-project's front end.
+
 ## File inventory
 
 ```
@@ -123,6 +135,13 @@ app/Http/Controllers/WebsiteController.php              (modify: toggleSsl gener
 resources/js/hooks/useOperation.js                      (new)
 resources/js/Components/OperationProgress.jsx           (new)
 resources/js/Pages/Operations/Index.jsx                 (new, admin audit page)
+vitest.config.js                                        (new, front-end test harness)
+resources/js/tests/setup.js                             (new, jest-dom setup)
+resources/js/hooks/useOperation.test.jsx                (new, Vitest)
+resources/js/Components/OperationProgress.test.jsx      (new, Vitest)
+playwright.config.js                                    (new, E2E harness)
+tests/e2e/smoke.spec.js                                 (new, Playwright smoke)
+package.json                                            (modify: test / test:watch / test:e2e scripts + devDeps)
 resources/js/Pages/Websites/Index.jsx                   (modify: SSL toggle → progress UI)
 tests/Feature/Operations/*                              (new)
 ```
