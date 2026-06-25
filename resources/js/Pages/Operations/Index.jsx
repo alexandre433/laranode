@@ -1,5 +1,5 @@
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout';
-import { Head } from '@inertiajs/react';
+import { Head, Link } from '@inertiajs/react';
 import { useState } from 'react';
 
 const badge = { queued: 'bg-gray-200 text-gray-800', running: 'bg-blue-200 text-blue-800', succeeded: 'bg-green-200 text-green-800', failed: 'bg-red-200 text-red-800' };
@@ -33,6 +33,15 @@ export default function Index({ operations }) {
                         ))}
                     </tbody>
                 </table>
+                <div className="mt-4 flex items-center gap-2">
+                    {operations.prev_page_url
+                        ? <Link href={operations.prev_page_url} className="px-3 py-1 border rounded" preserveScroll>Previous</Link>
+                        : <span className="px-3 py-1 border rounded opacity-50">Previous</span>}
+                    <span className="text-sm">Page {operations.current_page} of {operations.last_page}</span>
+                    {operations.next_page_url
+                        ? <Link href={operations.next_page_url} className="px-3 py-1 border rounded" preserveScroll>Next</Link>
+                        : <span className="px-3 py-1 border rounded opacity-50">Next</span>}
+                </div>
             </div>
         </AuthenticatedLayout>
     );
