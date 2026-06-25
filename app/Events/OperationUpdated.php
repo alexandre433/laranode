@@ -1,4 +1,4 @@
-<?php // app/Events/OperationUpdated.php
+<?php
 
 namespace App\Events;
 
