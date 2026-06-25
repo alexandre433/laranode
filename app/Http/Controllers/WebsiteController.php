@@ -91,24 +91,32 @@ class WebsiteController extends Controller
     {
         Gate::authorize('update', $website);
 
-        $request->validate([
-            'enabled' => 'required|boolean'
-        ]);
+        $request->validate(['enabled' => 'required|boolean']);
 
-        try {
-            if ($request->enabled) {
-                // Generate SSL certificate
-                (new GenerateWebsiteSslAction())->execute($website, $request->user()->email);
-            } else {
-                // Remove SSL certificate
-                (new RemoveWebsiteSslAction())->execute($website);
+        if ($request->enabled) {
+            $operation = \App\Models\Operation::create([
+                'user_id' => $request->user()->id,
+                'type' => 'ssl.generate',
+                'target' => $website->url,
+                'status' => 'queued',
+            ]);
+
+            try {
+                \App\Jobs\GenerateSslOperationJob::dispatch($operation, $website, $request->user()->email);
+            } catch (\Throwable) {
+                // Job rethrows on failure so failed_jobs records; operation already marked failed.
             }
 
-            session()->flash('success', $request->enabled ? 'SSL certificate generated successfully' : 'SSL certificate removed successfully');
-            return redirect()->route('websites.index');
+            return response()->json(['operation_id' => $operation->id]);
+        }
 
+        // Disable path stays synchronous (fast).
+        try {
+            (new RemoveWebsiteSslAction())->execute($website);
+            session()->flash('success', 'SSL certificate removed successfully');
+            return redirect()->route('websites.index');
         } catch (\Exception $e) {
-            session()->flash('error', 'Failed to ' . ($request->enabled ? 'generate' : 'remove') . ' SSL certificate: ' . $e->getMessage());
+            session()->flash('error', 'Failed to remove SSL certificate: ' . $e->getMessage());
             return redirect()->back();
         }
     }
