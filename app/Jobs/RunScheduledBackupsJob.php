@@ -41,8 +41,6 @@ class RunScheduledBackupsJob implements ShouldBeUnique, ShouldQueue
                 return;
             }
 
-            $entry->update(['last_run_at' => now()]);
-
             $data = [
                 'type' => $entry->type,
                 'target' => $entry->target,
@@ -55,6 +53,12 @@ class RunScheduledBackupsJob implements ShouldBeUnique, ShouldQueue
             ];
 
             $service->handle($data, $entry->user);
+
+            RetainBackupsJob::dispatch($entry->id);
+
+            // Stamp last_run_at AFTER dispatching so a service failure does not
+            // silently suppress the schedule for the next 50+ seconds.
+            $entry->update(['last_run_at' => now()]);
         });
     }
 }
