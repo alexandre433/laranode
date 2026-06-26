@@ -17,8 +17,11 @@ class DumpDatabaseAction
     {
         $cnfPath = sys_get_temp_dir().'/laranode-db-'.uniqid().'.cnf';
 
+        // Set umask so the file is created 0600 from the start, eliminating the
+        // TOCTOU window between file_put_contents() and a subsequent chmod().
+        $prevUmask = umask(0177);
         file_put_contents($cnfPath, "[client]\npassword={$database->db_password}\n");
-        chmod($cnfPath, 0600);
+        umask($prevUmask);
 
         try {
             $driver = $this->engineManager->for($database->engine ?? 'mysql');

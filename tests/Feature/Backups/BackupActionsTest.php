@@ -24,7 +24,8 @@ test('DumpDatabaseAction writes temp .cnf (mode 0600), calls engine driver, dele
     $cnfWasDeleted = false;
 
     // Build a fake driver that captures the cnf path and checks its permissions
-    $fakeDriver = new class($writtenCnfPaths, $cnfWasDeleted) implements BackupEngineDriver {
+    $fakeDriver = new class($writtenCnfPaths, $cnfWasDeleted) implements BackupEngineDriver
+    {
         public function __construct(
             private array &$writtenCnfPaths,
             private bool &$cnfWasDeleted,
@@ -50,7 +51,8 @@ test('DumpDatabaseAction writes temp .cnf (mode 0600), calls engine driver, dele
         }
     };
 
-    $fakeManager = new class($fakeDriver) extends BackupEngineManager {
+    $fakeManager = new class($fakeDriver) extends BackupEngineManager
+    {
         public function __construct(private BackupEngineDriver $driver) {}
 
         public function for(?string $engine): BackupEngineDriver
@@ -81,7 +83,8 @@ test('DumpDatabaseAction writes temp .cnf (mode 0600), calls engine driver, dele
 test('DumpDatabaseAction deletes .cnf even when driver throws', function () {
     $capturedCnf = null;
 
-    $throwingDriver = new class($capturedCnf) implements BackupEngineDriver {
+    $throwingDriver = new class($capturedCnf) implements BackupEngineDriver
+    {
         public function __construct(private mixed &$capturedCnf) {}
 
         public function dump(string $dbName, string $dbUser, string $cnfFile, callable $emit): string
@@ -91,7 +94,8 @@ test('DumpDatabaseAction deletes .cnf even when driver throws', function () {
         }
     };
 
-    $fakeManager = new class($throwingDriver) extends BackupEngineManager {
+    $fakeManager = new class($throwingDriver) extends BackupEngineManager
+    {
         public function __construct(private BackupEngineDriver $driver) {}
 
         public function for(?string $engine): BackupEngineDriver
