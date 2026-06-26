@@ -1,8 +1,9 @@
 # Laranode feature roadmap
 
 - **Date:** 2026-06-25
-- **Status:** Agreed (umbrella roadmap; each sub-project gets its own spec → plan → build cycle)
+- **Status:** Agreed + in progress (umbrella roadmap; each sub-project gets its own spec → plan → build cycle)
 - **Source:** research workflow (4 codebase mappers + 3 competitor researchers + synthesis), then user prioritization.
+- **Progress (2026-06-26):** #1 `platform-async-progress` **shipped** (merged to `main`). #2 expanded to `db-relational-engines` (the seam **plus** MySQL/MariaDB/Postgres in one sub-project; SQLite + Mongo split out to later sub-projects) — design in progress (seam approved). Phase 4 split per dev-branch reconciliation: `monitoring-alerts` (#11) kept, `notifications` (#12) + `user-analytics` (#13) added as separate items (cache→14, mongo→15). **Phase 6 (#16–21) added:** the six formerly-deferred cPanel-parity pillars, promoted at user request. Full per-feature stubs: `2026-06-26-deferred-features-stubs.md`.
 
 ## Objective
 
@@ -54,12 +55,24 @@ Every requested feature — git clone+build, fail2ban log scans, multi-engine in
 ### Phase 4 — Ops payoff (exploit the mature foundation)
 9. **`backups`** — scheduled + on-demand DB dump (per-engine) + file tar to local + S3-compatible storage; retention; restore-to-new-target. Uses scheduler + queue + drivers.
 10. **`cron-tasks`** — per-user crontab CRUD via sudo script + UI.
-11. **`notifications`** — a real notification system (added 2026-06-25): in-app **notification center** via Laravel database notifications (bell + unread count in the layout) plus opt-in delivery channels (email, webhook/Slack). Event sources: operation finished/failed (from sub-project #1), deploy success/failure, SSL issued/expiring, fail2ban bans, resource thresholds, backup results. Per-user, with notification preferences. Builds directly on the #1 operations + events + scheduler foundation. *(Plumbing can land early; specific alert sources wire in as their features ship.)*
-12. **`user-analytics`** — user-facing analytics about *their* machine/resources (added 2026-06-25). Today's live CPU/mem/network + sar history are **admin-only**; this surfaces historical, digestible analytics to the user: CPU/memory/disk/bandwidth over time, per-site traffic + disk usage, DB/account resource consumption vs their quotas (`domain_limit`/`database_limit`), SSL/cert status overview. Extends the existing `SarHistory`/`*HistoryService` + Reverb stats stack with user-scoped views + scheduled rollups (uses the #1 scheduler). *(Charts already in the stack: chart.js/react-chartjs-2.)*
+11. **`monitoring-alerts`** — surface `failed_jobs`; email/webhook alerts on deploy failure, SSL expiry, fail2ban bans, disk/CPU thresholds (Reverb stats already gathered). *(Can interleave earlier — SSL-expiry/disk alerts don't need deploy.)*
+12. **`notifications`** — a real notification system: in-app **notification center** via Laravel database notifications (bell + unread count in the layout) plus opt-in delivery channels (email, webhook/Slack). Event sources: operation finished/failed (from #1), deploy success/failure, SSL issued/expiring, fail2ban bans, resource thresholds, backup results. Per-user, with notification preferences. Builds on the #1 operations + events + scheduler foundation. *(Plumbing can land early; alert sources wire in as their features ship. Overlaps `monitoring-alerts` (#11) — keep the alert-trigger logic in #11, the delivery + in-app center in #12.)*
+13. **`user-analytics`** — user-facing analytics about *their* machine/resources. Today's live CPU/mem/network + sar history are **admin-only**; this surfaces historical, digestible analytics to the user: CPU/memory/disk/bandwidth over time, per-site traffic + disk usage, DB/account consumption vs their quotas (`domain_limit`/`database_limit`), SSL/cert status overview. Extends the existing `SarHistory`/`*HistoryService` + Reverb stats stack with user-scoped views + scheduled rollups (uses the #1 scheduler). *(Charts already in the stack: chart.js/react-chartjs-2.)*
 
 ### Phase 5 — Lower-fit engines (last; must not distort the abstraction)
-13. **`cache-redis-memcached`** — separate Cache Services UI (enable/disable, status, host:port, Redis AUTH+flush, Memcached port+memory). Not modeled as relational databases.
-14. **`db-mongodb`** — `MongoDriver` with role-based user flow, `db.stats()` sizing, mongo connection string, install + mongosh sudo script.
+14. **`cache-redis-memcached`** — separate Cache Services UI (enable/disable, status, host:port, Redis AUTH+flush, Memcached port+memory). Not modeled as relational databases.
+15. **`db-mongodb`** — `MongoDriver` with role-based user flow, `db.stats()` sizing, mongo connection string, install + mongosh sudo script.
+
+### Phase 6 — cPanel-parity pillars (promoted 2026-06-26 from deferred)
+
+Six heavyweight pillars, all **XL**, all building on the shipped async foundation. Stubs only — each needs its own spec → plan → build. Ordered by dependency + risk. Full detail (scope, scripts, packages, risks, open questions) in `2026-06-26-deferred-features-stubs.md`.
+
+16. **`dns-zones`** — BIND9 authoritative DNS: zones + records (A/AAAA/CNAME/MX/TXT/SRV/CAA), `rndc` reload, optional auto-zone on website add, optional DNSSEC. *(XL. Dep: foundation only — independent of DB work; feeds mail later. Footgun: zone is authoritative only with registrar NS delegation; must open port 53 without silently mutating the firewall.)*
+17. **`teams-rbac`** — teams + per-team roles (owner/developer/viewer) + per-resource collaborator grants on websites/databases; `scopeMine()`/policy overhaul. *(XL. Dep: after DB-driver abstraction freezes the `Database` morph key. Footgun: `{username}_ln` stays 1:1 — a developer-role member still runs PHP-FPM as the owner; audit all scopeMine callsites for impersonation. No new sudo scripts.)*
+18. **`app-installers`** — one-click WordPress (then Laravel/phpMyAdmin) into a docroot: download + auto DB + config + chown, live via OperationJob. *(XL. Dep: Websites + Databases. Footgun: wp-config plaintext creds; phpMyAdmin attack surface; idempotent rollback of half-installs.)*
+19. **`waf-modsecurity`** — ModSecurity v3 + OWASP CRS, per-vhost enable + paranoia level + exclusions + audit-log viewer. *(XL. Dep: stable vhost template + SSL toggle. Footgun: CRS blocking can lock out admin → default DetectionOnly; SSL+WAF both regenerate the vhost file → mutex-guard the render.)*
+20. **`staging-environments`** — per-site staging clone (files+DB) + promote/sync, `staging.{url}` vhost. *(XL. Dep: Websites + Databases + ideally `backups` first. Footgun: promote is destructive/irreversible → confirmation token + pre-promote snapshot; serialized-PHP search-replace is fragile.)*
+21. **`email-server`** — Postfix + Dovecot, mailboxes/aliases, DKIM, TLS via certbot, Rspamd, optional Roundcube. *(XL, heaviest/riskiest → last. Dep: SSL + ideally DNS (#16). Footgun: open-relay surface, IP reputation/PTR, many VPS block outbound :25 — consider inbound-only v1 with an external relay for outbound.)*
 
 ## Cross-cutting principles
 
@@ -70,7 +83,9 @@ Every requested feature — git clone+build, fail2ban log scans, multi-engine in
 
 ## Deferred / out of scope (revisit later)
 
-DNS zone management, email (Postfix/Dovecot), one-click app installers, staging environments, teams/granular roles, WAF/ModSecurity. Acknowledged as real cPanel pillars but lower ROI / heavier; not in this roadmap's near-term.
+**Promoted 2026-06-26 → now Phase 6 (#14–19):** DNS zones, email (Postfix/Dovecot), one-click app installers, staging environments, teams/granular roles, WAF/ModSecurity.
+
+**Still out of scope:** multi-server / fleet management (single-host is a design invariant), container orchestration, reseller/billing tiers. Revisit only if the single-host premise changes.
 
 ## Open items to resolve per sub-project (not blocking the roadmap)
 
@@ -81,4 +96,8 @@ DNS zone management, email (Postfix/Dovecot), one-click app installers, staging 
 
 ## Next step
 
-Brainstorm **Sub-project #1 (`platform-async-progress`)** into its own design spec, then `writing-plans`, then subagent-driven build. Branching: `local-dev-env` (test env) should merge to `main` first so features can be tested against it; feature sub-projects branch off `main`.
+#1 shipped. Active sub-project: **`db-relational-engines`** (#2 expanded) — seam approved (driver interface + `EngineManager` + capabilities descriptor + per-engine idiomatic execution: MySQL/MariaDB via privileged Laravel connection, Postgres via `sudo laranode-postgres.sh`). Remaining: finish its design spec → `writing-plans` → build. Then the rest of Phase 1 and onward.
+
+**Branching strategy:** each feature sub-project branches off `main` (e.g. `feature/db-relational-engines`); integrate completed branches into a long-lived `development` branch for combined testing in the local-dev container, then merge `development` → `main` once green. (`development` to be created when the first post-foundation feature branch is ready.)
+
+**Discipline gate (unchanged):** stubs ≠ specs ≠ plans. No feature is built before its own spec + implementation plan exist and are reviewed. Phase 6 entries are stubs.

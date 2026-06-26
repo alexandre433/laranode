@@ -14,3 +14,7 @@ Broadcast::channel('systemstats', function ($user) {
 Broadcast::channel('topstats', function ($user) {
     return $user->isAdmin();
 });
+
+Broadcast::channel('operations.{userId}', function ($user, $userId) {
+    return (int) $user->id === (int) $userId || $user->isAdmin();
+});
