@@ -34,7 +34,6 @@ return [
     */
     'apache_vhost_template' => base_path('laranode-scripts/templates/apache-vhost.template'),
 
-
     /*
     |--------------------------------------------------------------------------
     | Laranode File Manager - Editable Mime Types
@@ -43,8 +42,22 @@ return [
     | This option allows you to specify the mime types that can be edited
     | in the file manager.
     */
-    'editable_mime_types' =>
-    [
+    /*
+    |--------------------------------------------------------------------------
+    | Laranode Database Engines
+    |--------------------------------------------------------------------------
+    |
+    | Maps engine keys to their systemd service name and default port.
+    | Used by EngineManager to detect which engines are active.
+    |
+    */
+    'db_engines' => [
+        'mysql' => ['service' => 'mysql',       'port' => 3306],
+        'mariadb' => ['service' => 'mariadb',     'port' => 3306],
+        'postgres' => ['service' => 'postgresql',  'port' => 5432],
+    ],
+
+    'editable_mime_types' => [
         'text/plain',              // .txt, .log, .ini, .env, .conf, .md, .sh, .bash, .zsh
         'text/html',               // .html, .htm
         'text/css',                // .css
@@ -72,6 +85,6 @@ return [
         'text/rtf',
         'application/x-sh',        // .sh
         'application/x-sql',       // .sql
-    ]
+    ],
 
 ];
