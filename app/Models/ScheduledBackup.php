@@ -41,6 +41,12 @@ class ScheduledBackup extends Model
         'last_run_at' => 'datetime',
     ];
 
+    // Never expose S3 credentials in JSON / Inertia props.
+    protected $hidden = [
+        's3_key',
+        's3_secret',
+    ];
+
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
