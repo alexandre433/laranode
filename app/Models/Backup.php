@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\MassPrunable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Storage;
 
 class Backup extends Model
@@ -39,6 +40,12 @@ class Backup extends Model
         'size_bytes' => 'integer',
         's3_key' => 'encrypted',
         's3_secret' => 'encrypted',
+    ];
+
+    // Never expose S3 credentials in JSON / Inertia props.
+    protected $hidden = [
+        's3_key',
+        's3_secret',
     ];
 
     /**
@@ -94,6 +101,11 @@ class Backup extends Model
     public function pruning(): void
     {
         if ($this->disk_name && $this->path) {
+            // Re-register the S3 disk in the scheduler/worker process before deleting.
+            $s3Config = $this->s3DiskConfig();
+            if ($s3Config !== null) {
+                Config::set("filesystems.disks.{$this->disk_name}", $s3Config);
+            }
             Storage::disk($this->disk_name)->delete($this->path);
         }
     }

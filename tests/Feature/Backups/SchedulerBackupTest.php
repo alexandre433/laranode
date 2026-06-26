@@ -191,3 +191,47 @@ test('schedule:list output contains RunScheduledBackupsJob and model:prune with 
     expect($output)->toContain('model:prune');
     expect($output)->toContain('Backup');
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 7: RetainBackupsJob resolves the disk (incl. S3 creds) from a Backup row,
+// not from ScheduledBackup.disk_name, and registers the S3 disk in-process.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('RetainBackupsJob registers the S3 disk from Backup creds before retaining', function () {
+    $user = User::factory()->create();
+
+    // Schedule intentionally has NO disk_name — it must be resolved from a Backup row.
+    $schedule = ScheduledBackup::factory()->create([
+        'user_id' => $user->id,
+        'type' => 'db',
+        'target' => 's3reg_ln',
+        'storage' => 's3',
+        'disk_name' => null,
+        'retention_count' => 10, // high → nothing is pruned, so no real S3 I/O happens
+    ]);
+
+    $diskName = "backups_s3_{$user->id}";
+
+    Backup::factory()->completed()->create([
+        'user_id' => $user->id,
+        'type' => 'db',
+        'target' => 's3reg_ln',
+        'storage' => 's3',
+        'disk_name' => $diskName,
+        's3_key' => 'AKIAEXAMPLE',
+        's3_secret' => 'secretexample',
+        's3_bucket' => 'my-bucket',
+        'path' => 'x/1.sql.gz',
+        'created_at' => now(),
+    ]);
+
+    // Disk is not registered until the job runs.
+    expect(config("filesystems.disks.{$diskName}"))->toBeNull();
+
+    RetainBackupsJob::dispatchSync($schedule->id);
+
+    // The job re-registered the S3 disk in this process from the Backup row's
+    // encrypted credentials (the worker/scheduler never had this disk config).
+    expect(config("filesystems.disks.{$diskName}.driver"))->toBe('s3');
+    expect(config("filesystems.disks.{$diskName}.bucket"))->toBe('my-bucket');
+});
