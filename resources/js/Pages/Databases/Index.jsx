@@ -2,7 +2,11 @@ import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout';
 import { Head, router, usePage } from '@inertiajs/react';
 import { TbDatabase } from 'react-icons/tb';
 import { TiDelete } from 'react-icons/ti';
+import { toast } from 'react-toastify';
+import CreateDatabaseForm from './Partials/CreateDatabaseForm';
+import EditDatabaseForm from './Partials/EditDatabaseForm';
 import ConfirmationButton from '@/Components/ConfirmationButton';
+import { Tooltip } from 'react-tooltip';
 
 export default function DatabasesIndex({ databases = [] }) {
 
@@ -11,6 +15,8 @@ export default function DatabasesIndex({ databases = [] }) {
     const deleteDb = (id) => {
         router.delete(route('databases.destroy'), {
             data: { id },
+            onBefore: () => toast('Deleting database...'),
+            onError: () => toast('Failed to delete database.'),
         });
     };
 
@@ -19,9 +25,10 @@ export default function DatabasesIndex({ databases = [] }) {
             header={
                 <div className="flex flex-col xl:flex-row xl:justify-between max-w-7xl pr-5">
                     <h2 className="font-semibold text-xl text-gray-800 dark:text-gray-200 leading-tight flex items-center">
-                        <TbDatabase className='mr-2' />
+                        <TbDatabase className="mr-2" />
                         Databases ({databases.length}/{auth.user.database_limit || 'unlimited'})
                     </h2>
+                    <CreateDatabaseForm />
                 </div>
             }
         >
@@ -57,12 +64,19 @@ export default function DatabasesIndex({ databases = [] }) {
                                         </td>
                                         <td className="px-6 py-4 font-medium text-gray-900 whitespace-nowrap dark:text-white">{db.tables}</td>
                                         <td className="px-6 py-4 font-medium text-gray-900 whitespace-nowrap dark:text-white">{db.sizeMb}</td>
-                                        <td className="px-6 py-4 font-medium text-gray-900 whitespace-nowrap dark:text-white">{db.charset || '—'}</td>
-                                        <td className="px-6 py-4 font-medium text-gray-900 whitespace-nowrap dark:text-white">{db.collation || '—'}</td>
                                         <td className="px-6 py-4 font-medium text-gray-900 whitespace-nowrap dark:text-white">
-                                            <ConfirmationButton doAction={() => deleteDb(db.id)}>
-                                                <TiDelete className='w-6 h-6 text-red-500' />
-                                            </ConfirmationButton>
+                                            {db.engine === 'postgres' ? '—' : (db.charset || '—')}
+                                        </td>
+                                        <td className="px-6 py-4 font-medium text-gray-900 whitespace-nowrap dark:text-white">
+                                            {db.engine === 'postgres' ? '—' : (db.collation || '—')}
+                                        </td>
+                                        <td className="px-6 py-4 font-medium text-gray-900 whitespace-nowrap dark:text-white">
+                                            <div className="flex items-center space-x-2">
+                                                <EditDatabaseForm database={db} />
+                                                <ConfirmationButton doAction={() => deleteDb(db.id)}>
+                                                    <TiDelete className="w-6 h-6 text-red-500" />
+                                                </ConfirmationButton>
+                                            </div>
                                         </td>
                                     </tr>
                                 ))}
@@ -71,6 +85,7 @@ export default function DatabasesIndex({ databases = [] }) {
                     </div>
                 )}
             </div>
+            <Tooltip id="tooltip-edit" />
         </AuthenticatedLayout>
     );
 }
