@@ -20,7 +20,7 @@ class DatabaseFactory extends Factory
         return [
             'name' => fake()->unique()->slug(2).'_ln',
             'db_user' => fake()->unique()->slug(2).'_ln',
-            'db_password' => encrypt('secret'),
+            'db_password' => 'secret',
             'charset' => 'utf8mb4',
             'collation' => 'utf8mb4_unicode_ci',
             'engine' => 'mysql',

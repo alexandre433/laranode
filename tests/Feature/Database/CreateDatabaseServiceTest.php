@@ -95,6 +95,9 @@ test('CreateDatabaseService calls driver create then persists Database row with 
     expect($record->user_id)->toBe($user->id);
 
     $this->assertDatabaseHas('databases', ['name' => 'mydb_ln', 'engine' => 'mysql']);
+
+    // Password is stored encrypted but readable as plaintext via cast/accessor
+    expect($record->decryptedPassword)->toBe('secret123');
 });
 
 // ──────────────────────────────────────────────────────────────────
@@ -110,7 +113,7 @@ test('UpdateDatabaseService calls driver updatePassword and updateOptions then u
         'engine' => 'mysql',
         'charset' => 'utf8mb4',
         'collation' => 'utf8mb4_unicode_ci',
-        'db_password' => encrypt('old_pass'),
+        'db_password' => 'old_pass',
         'user_id' => $user->id,
     ]);
 

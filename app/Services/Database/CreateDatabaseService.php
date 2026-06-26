@@ -29,7 +29,7 @@ class CreateDatabaseService
         return Database::create([
             'name' => $spec->name,
             'db_user' => $spec->dbUser,
-            'db_password' => encrypt($spec->password),
+            'db_password' => $spec->password,
             'charset' => $spec->options['charset'] ?? null,
             'collation' => $spec->options['collation'] ?? null,
             'engine' => $engine,

@@ -41,7 +41,7 @@ class UpdateDatabaseService
         $update = [];
 
         if (! empty($validated['db_password'])) {
-            $update['db_password'] = encrypt($validated['db_password']);
+            $update['db_password'] = $validated['db_password'];
         }
 
         if (isset($validated['charset'])) {
