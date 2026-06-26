@@ -282,3 +282,35 @@ test('RestoreJob restores a real dump into a new DB name via CreateDatabaseServi
         }
     }
 })->group('system');
+
+// ---------------------------------------------------------------------------
+// Test 4: the privileged scripts reject argv flag-smuggling and bad identifiers
+// before performing any privileged work (security hardening guards).
+// ---------------------------------------------------------------------------
+test('backup/restore scripts reject argv-smuggling and invalid identifiers', function () {
+    $bin = base_path('laranode-scripts/bin');
+
+    $run = function (array $args) use ($bin) {
+        $script = array_shift($args);
+        $cmd = escapeshellarg($bin.'/'.$script);
+        foreach ($args as $a) {
+            $cmd .= ' '.escapeshellarg($a);
+        }
+        $out = [];
+        $code = 0;
+        exec($cmd.' 2>&1', $out, $code);
+
+        return $code;
+    };
+
+    // Leading-dash argument is rejected (argv flag smuggling) on every script.
+    expect($run(['laranode-db-backup.sh', 'mysql', '-x', 'user', 'cnf', 'out']))->toBe(1);
+    expect($run(['laranode-restore-db.sh', '-x', 'dump', 'db']))->toBe(1);
+    expect($run(['laranode-backup-files.sh', '/tmp', '-x', 'root']))->toBe(1);
+    expect($run(['laranode-restore-files.sh', '-x', '/tmp/dest', 'root']))->toBe(1);
+
+    // Invalid identifiers (non-alphanumeric) are rejected before any tool runs.
+    expect($run(['laranode-db-backup.sh', 'mysql', 'bad;name', 'user', 'cnf', 'out']))->toBe(1);
+    expect($run(['laranode-restore-db.sh', 'cnf', 'dump', 'bad name']))->toBe(1);
+    expect($run(['laranode-restore-files.sh', '/tmp/x.tgz', '/tmp/dest', 'bad/user']))->toBe(1);
+})->group('system');
