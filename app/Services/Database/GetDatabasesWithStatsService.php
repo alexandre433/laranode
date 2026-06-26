@@ -5,6 +5,9 @@ namespace App\Services\Database;
 use App\Databases\DatabaseStats;
 use App\Databases\EngineManager;
 use App\Models\Database;
+use Exception;
+
+class GetDatabasesWithStatsException extends Exception {}
 
 class GetDatabasesWithStatsService
 {

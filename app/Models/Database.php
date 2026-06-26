@@ -35,10 +35,11 @@ class Database extends Model
 
     /**
      * Get the decrypted database password.
+     * The 'encrypted' cast on db_password already decrypts on read.
      */
     public function getDecryptedPasswordAttribute(): string
     {
-        return decrypt($this->db_password);
+        return $this->db_password;
     }
 
     /**
