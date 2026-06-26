@@ -3,10 +3,13 @@
 use App\Databases\EngineManager;
 use App\Models\Database;
 use App\Models\User;
+use App\Services\Database\GetDatabasesWithStatsService;
 
 beforeEach(function () {
     // Reset EngineManager singleton so each test gets a fresh instance
     app()->forgetInstance(EngineManager::class);
+    // Reset the per-request static stats cache so it never leaks across tests
+    GetDatabasesWithStatsService::clearCache();
 });
 
 // ──────────────────────────────────────────────────────────────────
