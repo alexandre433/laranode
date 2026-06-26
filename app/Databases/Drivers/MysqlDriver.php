@@ -30,6 +30,9 @@ class MysqlDriver implements DatabaseEngineDriver
         $dbUser = $spec->dbUser;
         $password = $spec->password;
 
+        $this->assertSafeIdentifier($name);
+        $this->assertSafeIdentifier($dbUser);
+
         $conn = DB::connection($this->connectionName());
 
         try {
@@ -52,6 +55,7 @@ class MysqlDriver implements DatabaseEngineDriver
     public function updatePassword(Database $database, string $newPassword): void
     {
         $dbUser = $database->db_user;
+        $this->assertSafeIdentifier($dbUser);
         $conn = DB::connection($this->connectionName());
 
         $conn->statement("ALTER USER `{$dbUser}`@'localhost' IDENTIFIED BY ?", [$newPassword]);
@@ -64,6 +68,7 @@ class MysqlDriver implements DatabaseEngineDriver
         $charset = $options['charset'] ?? $database->charset;
         $collation = $options['collation'] ?? $database->collation;
 
+        $this->assertSafeIdentifier($name);
         $this->assertSafeIdentifier($charset);
         $this->assertSafeIdentifier($collation);
 
@@ -75,6 +80,8 @@ class MysqlDriver implements DatabaseEngineDriver
     {
         $name = $database->name;
         $dbUser = $database->db_user;
+        $this->assertSafeIdentifier($name);
+        $this->assertSafeIdentifier($dbUser);
         $conn = DB::connection($this->connectionName());
 
         $conn->statement("DROP DATABASE IF EXISTS `{$name}`");

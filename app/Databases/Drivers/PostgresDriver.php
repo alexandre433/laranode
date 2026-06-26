@@ -30,6 +30,8 @@ class PostgresDriver implements DatabaseEngineDriver
 
         $this->assertSafeName($name);
         $this->assertSafeName($dbUser);
+        $this->assertSafeName($encoding);
+        $this->assertSafeLocale($locale);
 
         $script = $this->scriptPath();
 
@@ -118,6 +120,16 @@ class PostgresDriver implements DatabaseEngineDriver
     {
         if (! preg_match('/^[a-zA-Z0-9_]+$/', $value)) {
             throw new InvalidArgumentException("Unsafe identifier value: {$value}");
+        }
+    }
+
+    /**
+     * Defense-in-depth: assert a locale matches a safe pattern before passing to sudo script.
+     */
+    private function assertSafeLocale(string $value): void
+    {
+        if (! preg_match('/^[a-zA-Z0-9_.@-]+$/', $value)) {
+            throw new InvalidArgumentException("Unsafe locale value: {$value}");
         }
     }
 

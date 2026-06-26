@@ -25,6 +25,22 @@ assert_safe() {
     fi
 }
 
+# Validate an encoding name (e.g. UTF8, LATIN1, SQL_ASCII): only [a-zA-Z0-9_].
+assert_encoding() {
+    local val="$1"
+    if ! echo "$val" | grep -qE '^[a-zA-Z0-9_]+$'; then
+        die "Unsafe encoding: '$val' — only [a-zA-Z0-9_] allowed."
+    fi
+}
+
+# Validate a locale (e.g. en_US.UTF-8, C, POSIX): only [a-zA-Z0-9_.@-].
+assert_locale() {
+    local val="$1"
+    if ! echo "$val" | grep -qE '^[a-zA-Z0-9_.@-]+$'; then
+        die "Unsafe locale: '$val' — only [a-zA-Z0-9_.@-] allowed."
+    fi
+}
+
 # Generate a random dollar-quote tag (lowercase alpha, 8 chars) to avoid
 # dollar-quoting breakout attacks.
 random_tag() {
@@ -52,6 +68,8 @@ libc_to_icu_locale() {
 cmd_create_db() {
     local name="$1" encoding="${2:-UTF8}" locale="${3:-en_US.UTF-8}"
     assert_safe "$name"
+    assert_encoding "$encoding"
+    assert_locale "$locale"
 
     # Detect whether we should use ICU (PostgreSQL 16+ on Ubuntu 24.04).
     # We try libc locale first; if PostgreSQL reports "invalid LC_COLLATE locale name"

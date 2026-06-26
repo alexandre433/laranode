@@ -19,10 +19,14 @@ use App\Services\Database\UpdateDatabaseService;
  */
 function makeStubDriver(array &$calls): DatabaseEngineDriver
 {
-    return new class ($calls) implements DatabaseEngineDriver {
+    return new class($calls) implements DatabaseEngineDriver
+    {
         public function __construct(private array &$calls) {}
 
-        public function connectionName(): string { return 'mysql_admin'; }
+        public function connectionName(): string
+        {
+            return 'mysql_admin';
+        }
 
         public function create(DatabaseSpec $spec): void
         {
