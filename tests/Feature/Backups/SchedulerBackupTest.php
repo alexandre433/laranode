@@ -41,8 +41,11 @@ test('RunScheduledBackupsJob dispatches BackupJob for due enabled schedules', fu
     $backup = Backup::where('target', 'mydb_ln')->where('user_id', $user->id)->first();
     expect($backup)->not->toBeNull('Backup row should be created by BackupService::handle()');
 
-    // The job was dispatched.
+    // The backup job was dispatched.
     Bus::assertDispatched(BackupJob::class);
+
+    // Retention job must also be dispatched per due entry.
+    Bus::assertDispatched(RetainBackupsJob::class);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -92,7 +95,7 @@ test('RunScheduledBackupsJob skips entries whose last_run_at is within 50 second
 // ─────────────────────────────────────────────────────────────────────────────
 
 test('RunScheduledBackupsJob updates last_run_at after dispatching', function () {
-    // Fake the bus so BackupJob is not actually executed (avoids needing a real DB model).
+    // Fake the bus so BackupJob / RetainBackupsJob are not actually executed.
     Bus::fake();
 
     $user = User::factory()->create();
@@ -114,8 +117,12 @@ test('RunScheduledBackupsJob updates last_run_at after dispatching', function ()
     $schedule->refresh();
     expect($schedule->last_run_at)->not->toBeNull();
     expect($schedule->last_run_at->gte($before))->toBeTrue(
-        'last_run_at should be updated to now() after dispatching'
+        'last_run_at should be updated to now() AFTER dispatching BackupJob + RetainBackupsJob'
     );
+
+    // Verify both jobs were dispatched (ensures last_run_at is stamped after, not before).
+    Bus::assertDispatched(BackupJob::class);
+    Bus::assertDispatched(RetainBackupsJob::class);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
