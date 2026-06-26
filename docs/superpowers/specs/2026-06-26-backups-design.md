@@ -15,7 +15,7 @@ Give every Laranode user on-demand and scheduled backups of their databases and 
 ## Success criteria
 
 - Triggering an on-demand backup returns immediately with an `operation_id`; the dump/tar runs on the queue with live output streamed to the user.
-- A scheduled backup runs daily (or at a user-configured cron expression) per job; old backups beyond the retention count are pruned in the same run.
+- A scheduled backup runs daily (or at a user-configured cron expression) per entry; old backups beyond the retention count are pruned in the same run.
 - A user can browse, download, and delete their own backup files through the UI.
 - Restore creates the target (new database name or new file path) — it never touches the original. The UI requires the user to name the restore target and confirm before dispatching.
 - S3 credentials are stored encrypted (same `encrypted` cast pattern as `Database::$db_password`). The local disk stores files under the site owner's homedir backup path, not under `storage/app`.
@@ -23,20 +23,21 @@ Give every Laranode user on-demand and scheduled backups of their databases and 
 
 ## Architecture
 
-Pattern: **Controller → FormRequest → Service (orchestration) → Action (single step) → `BackupJob`/`RestoreJob` extends `OperationJob`**. Storage uses the Laravel filesystem abstraction (`Storage::disk()`), so local and S3 are interchangeable behind the same interface — no branching in the job logic.
+Pattern: **Controller → FormRequest → Service (orchestration) → `BackupJob`/`RestoreJob` extends `OperationJob`** → bash scripts (privileged). Storage uses the Laravel filesystem abstraction (`Storage::disk()`), so local and S3 are interchangeable behind the same interface — no branching in the job logic beyond disk resolution.
 
 ```
 User triggers on-demand backup (POST /backups)
   → BackupController@store
-    → CreateBackupRequest (validation)
-      → BackupService::handle() — creates Backup row, resolves disk, dispatches BackupJob
+    → CreateBackupRequest (validation, including target-ownership check)
+      → BackupService::handle() — creates Backup row, resolves disk key, dispatches BackupJob
         → BackupJob extends OperationJob::run($emit)
             → DumpDatabaseAction (if type=db)  OR  TarFilesAction (if type=files)
             → UploadToStorageAction  (streams to disk — local or S3)
-            → Backup row updated with path, size
+            → Backup row updated with path, size, disk_name
 Scheduler (bootstrap/app.php withSchedule)
-  → BackupSchedulerJob  — iterates due ScheduledBackup rows, dispatches BackupJob per entry
-  → RetainBackupsAction — prunes backups over retention_count for each schedule
+  → RunScheduledBackupsJob (ShouldBeUnique, everyMinute) — iterates due ScheduledBackup rows,
+      dispatches BackupJob per entry, updates last_run_at, dispatches RetainBackupsJob
+  → RetainBackupsJob — prunes backups over retention_count for each schedule
 ```
 
 ### Components
@@ -44,157 +45,171 @@ Scheduler (bootstrap/app.php withSchedule)
 **1. `backups` table + `Backup` model**
 
 Migration `create_backups_table`:
-- `id`, `user_id` (FK users, cascade), `operation_id` (FK operations, nullable — null if created by scheduler before the operation row exists), `type` (`db` | `files`), `target` (the source: database name or website url), `storage` (`local` | `s3`), `disk_name` (string, nullable — the `config/filesystems.php` disk key resolved at backup time), `path` (string, nullable — relative path on the disk, set after upload), `size_bytes` (bigInteger, nullable), `status` (`pending` | `completed` | `failed`), `timestamps`.
+- `id`, `user_id` (FK users, cascade), `operation_id` (FK operations, nullable, set null on delete), `type` (`db` | `files`), `target` (source: database name or website url), `storage` (`local` | `s3`), `disk_name` (string, non-nullable after creation — the `config/filesystems.php` key resolved at backup time, e.g. `backups` for local or `backups_s3` for S3), `path` (string, nullable — relative path on the disk, set after upload), `size_bytes` (bigInteger, nullable), `status` (`pending` | `completed` | `failed`), `timestamps`.
 
 `Backup` model (`App\Models\Backup`):
 - `$fillable` for all above; `$casts`: `size_bytes` → integer.
 - `belongsTo(User)`, `belongsTo(Operation)`.
-- `scopeMine(Builder)` — mirrors `Website::scopeMine()` and `Database::scopeMine()` exactly: non-admins see own, admins see all.
-- `MassPrunable` targeting rows `where('created_at', '<', now()->subDays(90))` (separate from `Operation` pruning; backup rows live longer).
+- `scopeMine(Builder)` — mirrors `Database::scopeMine()` (line 49) exactly.
+- `MassPrunable` targeting rows `where('created_at', '<', now()->subDays(90))`. The `pruning` Eloquent hook also deletes any orphaned files from the disk before the row is deleted, so disk and DB stay in sync.
 
 **2. `scheduled_backups` table + `ScheduledBackup` model**
 
 Migration `create_scheduled_backups_table`:
-- `id`, `user_id` (FK users, cascade), `type` (`db` | `files`), `target` (db name or website url), `storage` (`local` | `s3`), `cron_expression` (string, default `0 2 * * *` — 2 AM daily), `retention_count` (integer, default 7), `s3_key` (text, encrypted, nullable), `s3_secret` (text, encrypted, nullable), `s3_region` (string, nullable), `s3_bucket` (string, nullable), `s3_endpoint` (string, nullable — for non-AWS S3), `enabled` (boolean, default true), `last_run_at` (timestamp, nullable), `timestamps`.
+- `id`, `user_id` (FK users, cascade), `type` (`db` | `files`), `target` (db name or website url), `storage` (`local` | `s3`), `disk_name` (string, nullable — resolved disk key, same as on `Backup`), `cron_expression` (string, default `0 2 * * *` — 2 AM daily), `retention_count` (integer, default 7), `s3_key` (text, encrypted, nullable), `s3_secret` (text, encrypted, nullable), `s3_region` (string, nullable), `s3_bucket` (string, nullable), `s3_endpoint` (string, nullable — for non-AWS S3-compatible endpoints), `enabled` (boolean, default true), `last_run_at` (timestamp, nullable), `timestamps`.
 
 `ScheduledBackup` model (`App\Models\ScheduledBackup`):
-- `$casts`: `s3_key` → `encrypted`, `s3_secret` → `encrypted`, `enabled` → `boolean`. Pattern matches `Database::$db_password`.
+- `$casts`: `s3_key` → `encrypted`, `s3_secret` → `encrypted`, `enabled` → `boolean`. Pattern matches `Database::$db_password` (`app/Models/Database.php` line 21-23).
 - `scopeMine(Builder)` — same pattern.
 - `belongsTo(User)`.
-- Note: for an on-demand backup with S3 storage, S3 credentials are passed through the `CreateBackupRequest` and stored transiently on the `BackupJob` constructor (not persisted to `Backup`). Only `ScheduledBackup` persists credentials. This avoids adding creds to the one-off `backups` table row.
 
-**3. DB dump contract — `BackupEngineDriver` interface**
+**S3 credential lifecycle:** S3 credentials for a `ScheduledBackup` are persisted encrypted on the row and read inside the job (never passed as job constructor arguments in plaintext). For on-demand S3 backups, `BackupService` resolves a runtime disk key (registered in config at dispatch time) and persists that key on the `Backup` row — the raw key/secret are never placed in the queue payload.
+
+**3. `backups` filesystem disk in `config/filesystems.php`**
+
+Add a dedicated `backups` disk (local driver), root configurable via `BACKUP_LOCAL_ROOT` env var defaulting to the panel root's relative `../backups` or, more practically, resolved per-job from the user's homedir. Because each backup's path already encodes `{userId}/`, a single disk root of `/home` is sufficient and simple:
+
+```php
+'backups' => [
+    'driver' => 'local',
+    'root'   => env('BACKUP_LOCAL_ROOT', '/home'),
+    'throw'  => true,
+],
+```
+
+Resolved `disk_name` values: `'backups'` for local; `'backups_s3_{scheduledBackupId}'` (runtime-registered per S3 schedule, never persisted to the disk config, registered by the job from the encrypted row). The `disk_name` stored on a `Backup` row is what `download` and `delete` use — so S3 backups require the S3 disk to be re-registered at download/delete time (same pattern as at backup time, reading from the `ScheduledBackup` row or the request payload).
+
+**4. Composer dependency: `league/flysystem-aws-s3-v3`**
+
+`composer require league/flysystem-aws-s3-v3` is an explicit required task. Without it every S3 path throws a `League\Flysystem\FilesystemException` at runtime. This must be done before any S3 code is written.
+
+**5. DB password to dump script — `--defaults-extra-file`**
+
+The dump script receives the DB password via a temp `--defaults-extra-file` (a `.cnf` file written to a `chmod 0600` temp path, deleted after the dump), not via argv. This prevents the password appearing in `ps aux` output or command logs:
+
+```bash
+# laranode-db-backup.sh receives: <engine> <dbName> <dbUser> <cnfFile> <outFile>
+# The cnfFile contains: [client]\npassword=...
+mysqldump --defaults-extra-file="$CNF_FILE" --user="$DB_USER" \
+  --single-transaction --quick --lock-tables=false \
+  "$DB_NAME" | gzip > "$OUT_FILE"
+```
+
+The PHP side writes the temp `.cnf` file before calling the script, passes its path, and cleans up in a `finally` block — same pattern as the temp dump file.
+
+**6. DB restore — route through `CreateDatabaseService`**
+
+`RestoreJob` for a DB restore does NOT issue a bare `CREATE DATABASE` SQL statement. Instead it calls `CreateDatabaseService` to provision the new database and a per-site MySQL user with grants, then pipes the dump. This ensures the restored DB gets a panel `Database` row and a properly privileged user — not an orphaned schema with no panel record.
+
+The `new_target` for a DB restore is validated in `RestoreBackupRequest` with strict identifier rules: `/^[a-zA-Z0-9_]{1,64}$/` — no spaces, no backticks, no SQL-injectable characters. The same regex is re-validated inside `RestoreJob::run()` before any database operation (defence in depth).
+
+**7. `BackupEngineDriver` interface + `MysqlBackupDriver`**
 
 ```php
 // App\Contracts\Backup\BackupEngineDriver
 interface BackupEngineDriver {
     /** Run the dump; stream output lines via $emit; return the local temp file path. */
-    public function dump(string $dbName, string $dbUser, string $dbPassword, callable $emit): string;
+    public function dump(string $dbName, string $dbUser, string $cnfFile, callable $emit): string;
 }
 ```
 
-Implementations:
-- `App\Backup\Drivers\MysqlBackupDriver` — shells out to `laranode-db-backup.sh mysql $dbName $dbUser $dbPassword $tempFile` (a new whitelisted bash script). Streams the process output. Returns `$tempFile`.
-- `App\Backup\Drivers\PostgresBackupDriver` — same convention for `pg_dump`; added when `db-postgres` (#3) ships. Skeleton can be registered to the manager immediately to prove extensibility without blocking.
+`MysqlBackupDriver` shells out to `laranode-db-backup.sh`. It writes the temp `.cnf` file, passes its path as an argument (not the password itself), and cleans up the `.cnf` file in a `finally` block.
 
-`App\Backup\BackupEngineManager` — resolves a driver from a `Database` model's `engine` column (once #2 ships the `engine` column; until then, defaults to `mysql`). Mirrors the `EngineManager` pattern from #2.
+`BackupEngineManager` resolves the driver from the `engine` field (defaults to `mysql` until #2 ships). `PostgresBackupDriver` is a skeleton stub throwing `LogicException`.
 
-**4. `DumpDatabaseAction`** (`App\Actions\Backup\DumpDatabaseAction`)
+**8. `DumpDatabaseAction`** (`App\Actions\Backup\DumpDatabaseAction`)
 
-`execute(Database $database, string $tempPath, callable $emit): string` — resolves the engine driver via `BackupEngineManager`, calls `driver->dump(...)`, returns the temp file path.
+`execute(Database $database, string $tempPath, callable $emit): string` — resolves engine driver, calls `driver->dump(dbName, dbUser, cnfPath, $emit)`. The decrypted password (`$database->db_password` via the `encrypted` cast) is written to the temp `.cnf` by the driver, never passed to PHP's `Process::run` argv.
 
-**5. `TarFilesAction`** (`App\Actions\Backup\TarFilesAction`)
+**9. `TarFilesAction`** (`App\Actions\Backup\TarFilesAction`)
 
-`execute(Website $website, string $tempPath, callable $emit): string` — runs:
-```php
-Process::run([
-    'sudo', config('laranode.laranode_bin_path') . '/laranode-backup-files.sh',
-    $website->websiteRoot, $tempPath, $website->user->systemUsername,
-], fn ($type, $buf) => ...);
-```
-Runs as the site owner's system user (`{username}_ln`) via the script — consistent with how all other per-site privileged ops work. Returns `$tempPath`.
+`execute(Website $website, string $tempPath, callable $emit): string` — archives `$website->websiteRoot` (the full site directory — includes git repos, uploads, everything above docroot; `fullDocumentRoot` is inside `websiteRoot` and is the served content; backing up `websiteRoot` is the safer complete snapshot). Calls `laranode-backup-files.sh` via sudo.
 
-**6. `UploadToStorageAction`** (`App\Actions\Backup\UploadToStorageAction`)
+**10. `UploadToStorageAction`** (`App\Actions\Backup\UploadToStorageAction`)
 
-`execute(string $localPath, string $storagePath, \Illuminate\Contracts\Filesystem\Filesystem $disk, callable $emit): void` — streams the local temp file to `$disk->putStream($storagePath, fopen($localPath, 'r'))`. The resolved disk is injected (not instantiated here) so the action is pure and easily faked in tests.
+`execute(string $localPath, string $storagePath, Filesystem $disk, callable $emit): void` — streams via `putStream`. The disk is injected, not instantiated here.
 
-**7. New bash scripts** in `laranode-scripts/bin/`:
-- `laranode-db-backup.sh $engine $dbName $dbUser $dbPassword $outFile` — runs `mysqldump` (or `pg_dump` later) as the appropriate user, writes to `$outFile`. **Not run inline; called by DumpDatabaseAction via the sudo-script convention.**
-- `laranode-backup-files.sh $siteRoot $outFile $sysUser` — runs `tar czf $outFile -C $siteRoot .` as `$sysUser`, sets ownership back to `www-data`. Both scripts added to the `sudoers.d` drop-in, not the monolithic sudoers line, per the cross-cutting convention.
+**11. `RetainBackupsAction`** (`App\Actions\Backup\RetainBackupsAction`)
 
-**8. `BackupJob extends OperationJob`** (`App\Jobs\BackupJob`)
+`execute(int $userId, string $type, string $target, int $retentionCount, Filesystem $disk): void` — fetches completed backups oldest-first, deletes files and rows for any beyond `retentionCount`. Also deletes the orphaned file from disk when removing a row.
 
-```php
-class BackupJob extends OperationJob {
-    public function __construct(
-        Operation $operation,
-        public Backup $backup,
-        public ?array $s3Config = null,   // null = use local disk
-    ) { parent::__construct($operation); }
+**12. New bash scripts** in `laranode-scripts/bin/`:
+- `laranode-db-backup.sh <engine> <dbName> <dbUser> <cnfFile> <outFile>` — runs `mysqldump --defaults-extra-file=$cnfFile` as the appropriate user, pipes through `gzip`. Does not log the password. Checks exit code of mysqldump and gzip separately (use `pipefail`).
+- `laranode-backup-files.sh <siteRoot> <outFile> <sysUser>` — `tar czf $outFile -C $siteRoot .`; sets ownership to `www-data` on the output file.
+- `laranode-restore-files.sh <tarFile> <destDir> <sysUser>` — `mkdir -p $destDir && tar xzf $tarFile -C $destDir`; sets ownership to `$sysUser:$sysUser`.
 
-    protected function run(callable $emit): int {
-        $tempFile = sys_get_temp_dir() . '/laranode-backup-' . uniqid() . '.tmp';
-        try {
-            if ($this->backup->type === 'db') {
-                $db = \App\Models\Database::where('name', $this->backup->target)
-                    ->where('user_id', $this->backup->user_id)->firstOrFail();
-                (new DumpDatabaseAction)->execute($db, $tempFile, $emit);
-            } else {
-                $site = \App\Models\Website::where('url', $this->backup->target)
-                    ->where('user_id', $this->backup->user_id)->firstOrFail();
-                (new TarFilesAction)->execute($site, $tempFile, $emit);
-            }
-            $disk = $this->resolveDisk();
-            $storagePath = $this->storagePath();
-            (new UploadToStorageAction)->execute($tempFile, $storagePath, $disk, $emit);
-            $this->backup->update([
-                'path' => $storagePath,
-                'size_bytes' => filesize($tempFile),
-                'status' => 'completed',
-            ]);
-            $emit('Backup complete: ' . $storagePath);
-            return 0;
-        } finally {
-            @unlink($tempFile); // always clean up the local temp file
-        }
-    }
+All three scripts are listed in the sudoers drop-in `laranode-scripts/etc/sudoers.d/laranode-backups`. The installer's monolithic `/etc/sudoers` line (which uses a `*.sh` wildcard and already covers all scripts in `bin/`) is **narrowed once** in this feature: replace the wildcard with explicit paths for each existing script plus the three new ones. This is safer than adding a redundant drop-in that conflicts with the existing wildcard. The installer change is: replace the `>> /etc/sudoers` append with a `visudo`-safe write via a heredoc to `/etc/sudoers.d/laranode-panel` (explicit list, mode 0440).
 
-    private function resolveDisk(): \Illuminate\Contracts\Filesystem\Filesystem { ... }
-    private function storagePath(): string {
-        // e.g. backups/{userId}/{type}/{target}/{Y-m-d-His}.tar.gz
-    }
-}
-```
+**13. `BackupJob extends OperationJob`** (`App\Jobs\BackupJob`)
 
-`SerializesModels` handles the `Backup` model across queue serialization. The `s3Config` array (plain values) serializes safely. The `finally` block ensures the temp file is removed even on failure — avoids orphaned disk usage.
+Constructor: `(Operation $operation, Backup $backup)`. The backup row already has `disk_name` set by `BackupService` before dispatch. For S3 schedules, `RunScheduledBackupsJob` sets `disk_name` to `'backups_s3'` and registers a runtime disk config keyed on that name from the encrypted `ScheduledBackup` credentials — the job reads the credentials from the `ScheduledBackup` row via the model, not from the job payload.
 
-**9. `RestoreJob extends OperationJob`** (`App\Jobs\RestoreJob`)
+The `run(callable $emit)` method:
+1. Resolves disk from `$this->backup->disk_name`.
+2. Calls dump or tar action to a `sys_get_temp_dir()` temp file.
+3. Calls `UploadToStorageAction` to stream the file to disk.
+4. Updates `Backup` with `path`, `size_bytes`, `status='completed'`.
+5. Temp file removed in `finally`.
 
-```php
-class RestoreJob extends OperationJob {
-    public function __construct(
-        Operation $operation,
-        public Backup $backup,
-        public string $newTarget,        // NEW db name or NEW website url — never the original
-        public ?array $s3Config = null,
-    ) { parent::__construct($operation); }
+**14. `BackupService`** (`App\Services\Backups\BackupService`)
 
-    protected function run(callable $emit): int { ... }
-}
-```
+`handle(array $validated, User $user): Operation` — creates the `Backup` row (with `disk_name` resolved), creates the `Operation` row, dispatches `BackupJob`, returns the `Operation`. For on-demand S3: registers a named runtime disk in `config(['filesystems.disks.backups_s3' => ...])` from the request's (validated, not persisted) S3 params, sets `disk_name = 'backups_s3'` on the `Backup` row, then dispatches the job. The raw credentials are not stored on the `Backup` row or in the job payload — they are lost after the request; the user must re-enter them for a new on-demand S3 backup. (This is the resolved default: always re-enter for one-off S3 — simpler, avoids surfacing secrets to UI.)
 
-For DB restores: downloads the dump to a temp file, creates the new DB (calls `CreateDatabaseService` to provision MySQL user + grant), then pipes the dump into the new schema. For file restores: downloads the tar, extracts to a new directory under the user's homedir. The `newTarget` is validated against existing names before dispatch so the job doesn't reach a destructive step only to fail there.
+`BackupException` — sibling class in same file per project convention.
 
-**10. `BackupService`** (`App\Services\Backups\BackupService`)
+**15. `RestoreJob extends OperationJob`** (`App\Jobs\RestoreJob`)
 
-`handle(array $validated, User $user): Operation` — creates the `Backup` row, creates the `Operation` row (`type='backup.db'` or `'backup.files'`), dispatches `BackupJob`, returns the `Operation`. Pattern mirrors `CreateWebsiteService::handle()`.
+Constructor: `(Operation $operation, Backup $backup, string $newTarget)`. No S3 config in constructor. The job reads the disk from `$backup->disk_name` (and for S3, re-registers the runtime disk from the `ScheduledBackup` row linked to the backup).
 
-`BackupException` — sibling class in the same file per project convention.
+For DB restores:
+1. Downloads dump to temp file from `Storage::disk($backup->disk_name)`.
+2. Re-validates `$newTarget` against `/^[a-zA-Z0-9_]{1,64}$/` and asserts it differs from `$backup->target`.
+3. Calls `CreateDatabaseService` to create the MySQL DB + user + grant + panel row.
+4. Pipes the dump into the new schema via `laranode-restore-db.sh` (a new script that takes `<cnfFile> <dumpFile> <dbName>` and runs `zcat $dumpFile | mysql --defaults-extra-file=$cnfFile $dbName`).
 
-**11. `BackupController`** (`App\Http\Controllers\BackupController`)
+For file restores: downloads tar, calls `laranode-restore-files.sh` via sudo.
+
+**16. `RestoreService`** (`App\Services\Backups\RestoreService`)
+
+`handle(Backup $backup, string $newTarget, User $user): Operation` — creates `Operation`, dispatches `RestoreJob`. `RestoreException` sibling.
+
+**17. `ScheduledBackupPolicy`** (`App\Policies\ScheduledBackupPolicy`)
+
+Explicit policy for `ScheduledBackup` mirroring `DatabasePolicy`. The `destroySchedule` controller action calls `Gate::authorize('delete', $scheduledBackup)` — without this policy the gate is unguarded and any authenticated user can delete any schedule.
+
+**18. `BackupPolicy`** (`App\Policies\BackupPolicy`)
+
+Mirrors `DatabasePolicy` exactly. `view`, `update`, `delete` methods check `$user->isAdmin() || $user->id === $backup->user_id`.
+
+**19. `BackupController`** (`App\Http\Controllers\BackupController`)
 
 Routes (auth-gated; non-admins see only own via `scopeMine`):
 - `GET /backups` → `index` — Inertia `Backups/Index`, paginated `Backup::mine()->with('operation')->latest()->paginate(20)` + `ScheduledBackup::mine()->get()`.
-- `POST /backups` → `store` — on-demand backup, returns JSON `{ operation_id }` (same pattern as `WebsiteController::toggleSsl`).
-- `DELETE /backups/{backup}` → `destroy` — deletes the file from disk + the row; policy-gated.
-- `GET /backups/{backup}/download` → `download` — streams from the storage disk; policy-gated; name reveals no internal paths.
-- `POST /backups/{backup}/restore` → `restore` — validates `new_target`, creates `RestoreJob`, returns JSON `{ operation_id }`.
+- `POST /backups` → `store` — on-demand backup, returns JSON `{ operation_id }`.
+- `DELETE /backups/{backup}` → `destroy` — deletes file from disk + row; policy-gated.
+- `GET /backups/{backup}/download` → `download` — for S3 storage: returns a presigned URL (redirect); for local storage: streams via `Storage::disk()->readStream()`. Policy-gated. No size cap in v1 for local; presigned URL is the efficient path for S3.
+- `POST /backups/{backup}/restore` → `restore` — validates `new_target`, dispatches `RestoreJob`, returns JSON `{ operation_id }`.
 - `POST /backups/schedules` → `storeSchedule` — `CreateScheduledBackupRequest`, creates `ScheduledBackup` row.
-- `DELETE /backups/schedules/{scheduledBackup}` → `destroySchedule`.
+- `DELETE /backups/schedules/{scheduledBackup}` → `destroySchedule` — policy-gated via `ScheduledBackupPolicy`.
 
-**12. Scheduler hook** — extends the existing `withSchedule` in `bootstrap/app.php`:
+Add a **nav link** for `/backups` in the authenticated layout (alongside Websites, MySQL, etc.) so the page is discoverable.
+
+**20. Scheduler hook** — extends the existing `withSchedule` in `bootstrap/app.php`:
 
 ```php
 $schedule->job(new \App\Jobs\RunScheduledBackupsJob)->everyMinute();
 ```
 
-`RunScheduledBackupsJob` (a plain `ShouldQueue` job, not an `OperationJob`) queries `ScheduledBackup::where('enabled', true)->get()`, evaluates `CronExpression::isDue($entry->cron_expression)`, dispatches a `BackupJob` for each due entry, updates `last_run_at`. Also dispatches a `RetainBackupsJob` per entry to prune backups beyond `retention_count` on that target. The `everyMinute` cadence matches how Laravel's own scheduler works — `RunScheduledBackupsJob` itself is the "schedule runner" for user-defined schedules.
+`RunScheduledBackupsJob` implements both `ShouldQueue` and `ShouldBeUnique`. The `ShouldBeUnique` constraint means if the `everyMinute` tick fires while a previous invocation is still running (e.g. many schedules are due at 2 AM), a second instance will not be dispatched — preventing double-fires and the resulting duplicate backups.
 
-**13. React UI**
+As an additional guard, `RunScheduledBackupsJob::handle()` skips any entry whose `last_run_at` is within the last 50 seconds, preventing re-processing if uniqueness is temporarily bypassed (e.g. the unique lock expired before the job finished).
+
+**21. React UI**
 
 - `resources/js/Pages/Backups/Index.jsx` — table of backups (date, type, target, size, status badge, download / delete / restore actions) + a "Scheduled Backups" sub-table + an "On-demand backup" form (select type + target + storage). On form submit: POST via axios, receive `operation_id`, render `<OperationProgress operationId={...} onDone={() => router.reload()} />` inline (reusing the shipped component from #1).
-- Restore flow: clicking Restore opens a modal with an input for `new_target` + a prominent warning ("This creates a new database/directory — the original is not touched"). Submit POSTs and shows the same `<OperationProgress>`.
+- Restore flow: clicking Restore opens a modal with a labelled `new_target` input + a prominent warning ("This creates a new database/directory — the original is not touched"). Submit POSTs to `backups.restore` and shows the same `<OperationProgress>`.
 - Reuses `useOperation` hook + `OperationProgress` component unchanged.
+- Add nav link in `AuthenticatedLayout` pointing to `route('backups.index')`.
 
 ## Data model summary
 
@@ -204,7 +219,7 @@ backups
   disk_name, path, size_bytes, status, created_at, updated_at
 
 scheduled_backups
-  id, user_id, type, target, storage, cron_expression, retention_count,
+  id, user_id, type, target, storage, disk_name, cron_expression, retention_count,
   s3_key (encrypted), s3_secret (encrypted), s3_region, s3_bucket,
   s3_endpoint, enabled, last_run_at, created_at, updated_at
 ```
@@ -216,16 +231,22 @@ No new columns on `Website` or `Database`. Backups are a separate domain.
 ```
 POST /backups { type: 'db', target: 'mydb', storage: 'local' }
   BackupController@store
-    CreateBackupRequest validates: type ∈ {db,files}, target exists + mine, storage ∈ {local,s3}; if s3: key/secret/bucket required
+    CreateBackupRequest validates:
+      type ∈ {db,files}
+      target exists in databases WHERE user_id = auth user (ownership enforced at FormRequest)
+      storage ∈ {local,s3}
+      if s3: s3_key, s3_secret, s3_bucket, s3_region required
     BackupService::handle($validated, $user)
-      Backup::create([user_id, type, target, storage='local', status='pending'])
+      Backup::create([user_id, type, target, storage='local', disk_name='backups', status='pending'])
       Operation::create([user_id, type='backup.db', target='mydb', status='queued'])
+      $backup->update(['operation_id' => $operation->id])
       BackupJob::dispatch($operation, $backup)
     return response()->json(['operation_id' => $operation->id])   // 200
   (queue worker picks up BackupJob)
     operation->markRunning()
-    DumpDatabaseAction->execute($db, $tempFile, $emit)  →  laranode-db-backup.sh (sudo)
-    UploadToStorageAction->execute($tempFile, $storagePath, Storage::disk('local'), $emit)
+    DumpDatabaseAction->execute($db, $tempFile, $emit)
+      MysqlBackupDriver->dump() writes .cnf, calls sudo laranode-db-backup.sh, cleans .cnf
+    UploadToStorageAction->execute($tempFile, $storagePath, Storage::disk('backups'), $emit)
     $backup->update(['path' => $storagePath, 'size_bytes' => ..., 'status' => 'completed'])
     operation->markFinished(0)
     (OperationUpdated events broadcast live via Reverb → useOperation hook → OperationProgress renders)
@@ -233,63 +254,69 @@ POST /backups { type: 'db', target: 'mydb', storage: 'local' }
 
 ## Error handling
 
-- Dump failure (nonzero exit from `laranode-db-backup.sh`): `DumpDatabaseAction` throws; `OperationJob::handle()` catches → `appendOutput('ERROR: ...')` + `markFinished(1)` + rethrows → `failed_jobs` records it. `Backup` row remains `pending` (not `completed`). The partial temp file is removed by the `finally` block.
+- Dump failure (nonzero exit from `laranode-db-backup.sh`): `MysqlBackupDriver` throws; `OperationJob::handle()` catches → `appendOutput('ERROR: ...')` + `markFinished(1)` + rethrows → `failed_jobs` records it. `Backup` row remains `pending`. Temp file and `.cnf` file removed by `finally` blocks.
 - S3 upload failure: `UploadToStorageAction` throws `\League\Flysystem\FilesystemException`; same catch path.
-- Restore target already exists: validated in `RestoreJob::run()` before any destructive step; emits an error line and returns exit code 1 without touching anything.
-- Disk full (local): the tar/dump will fail; the error is captured and the temp file cleaned up. Log + mark failed.
+- Restore `new_target` fails identifier validation: `RestoreBackupRequest` returns 422 before dispatch. `RestoreJob` re-validates as defence in depth and emits an error line returning exit code 1.
+- `CreateDatabaseService` fails during restore (e.g. name collision): throws `CreateDatabaseException`; job marks failed; no partial DB state (the service rolls back on user-creation failure).
+- Disk full (local): the tar/dump fails; error captured; temp file cleaned up; operation marked failed.
 - Queue worker down: operations sit `queued`; UI shows `queued` status honestly.
 
 ## Security
 
-- **Restore requires explicit new_target:** the controller and job both assert `$newTarget !== $backup->target`. No implicit overwrite path exists.
-- **Policy gates:** `BackupPolicy` (mirroring existing `DatabasePolicy`) — a user may only act on their own backups (`$user->id === $backup->user_id || $user->isAdmin()`).
-- **S3 credentials** stored via `encrypted` cast on `ScheduledBackup`. Never logged or included in `OperationUpdated` broadcast payload. For on-demand S3 backups the creds travel only inside the queued job payload (queue payloads are stored in the DB encrypted-at-rest via MySQL; not exposed in the `Backup` row or any API response).
-- **Local file path** — backups stored under the user's homedir, e.g. `/home/{username}_ln/backups/{type}/{target}/`, not under `storage/app` (which is the panel's private space). The `laranode-backup-files.sh` script runs as the `{username}_ln` system user and sets ownership appropriately. Download routes stream via Laravel's `Storage::disk()->readStream()` with no public URL exposed.
-- **Sudo scripts** added via a new `sudoers.d` drop-in (`/etc/sudoers.d/laranode-backups`) — not appended to the monolithic sudoers line.
-- **Footgun: restore is destructive.** UI must show an explicit warning. Controller rejects any `new_target` that already exists (a new `CREATE DATABASE` or `mkdir` would fail; better to fail early at validation with a clear message than deep in the job).
+- **Restore requires explicit new_target:** validated in `RestoreBackupRequest` (regex `/^[a-zA-Z0-9_]{1,64}$/`, must differ from source) AND re-validated inside `RestoreJob::run()`. No implicit overwrite path exists.
+- **DB restore goes through `CreateDatabaseService`:** no orphaned database schemas; every restored DB gets a panel row + per-site user.
+- **Policy gates:** `BackupPolicy` (own backups) and `ScheduledBackupPolicy` (own schedules) — both gate every destructive action. `destroySchedule` is explicitly gated, not unguarded.
+- **S3 credentials** stored via `encrypted` cast on `ScheduledBackup`. Never logged, never in `OperationUpdated` broadcast payload, never in the job constructor payload for scheduled backups. For on-demand S3 the creds are used transiently in the request lifecycle to register a runtime disk; they are not persisted.
+- **DB password to dump script** travels via a `--defaults-extra-file` temp `.cnf` file (mode 0600), not via argv — invisible to `ps aux`. The `.cnf` is deleted in a `finally` block.
+- **Local file path** — backups stored under `/home/{username}_ln/` (via the `backups` disk with root `/home`), not under `storage/app`.
+- **Sudoers** — the monolithic wildcard line in `/etc/sudoers` is narrowed to an explicit list in `/etc/sudoers.d/laranode-panel` (mode 0440). The backup scripts are added to the same explicit list. One change, not two conflicting mechanisms.
+- **Download** — local backups stream via `Storage::disk()->readStream()`; S3 backups return a presigned URL (short TTL redirect). No public URL exposed.
 
 ## Testing strategy
 
 ### Pest (feature tests, `tests/Feature/Backups/`)
 
 - **`BackupModelTest`** — `Backup` + `ScheduledBackup` factories, `scopeMine` scoping, prunable target date.
-- **`BackupJobTest`** — `Process::fake()` for the dump script (success + failure); `Storage::fake('local')`; assert temp file removed in both paths; assert `Backup` status `completed` vs `pending`; assert `Operation` lifecycle (`succeeded`/`failed`).
-- **`BackupControllerTest`** — POST `/backups` as owner returns `{ operation_id }`; non-owner cannot trigger backup on another user's DB; delete removes file + row; download returns a streamed response; restore endpoint validates `new_target` not-empty + not-same-as-source.
-- **`SchedulerBackupTest`** — `RunScheduledBackupsJob` dispatches `BackupJob` for due entries and skips disabled or not-yet-due ones; `RetainBackupsJob` deletes the oldest `Backup` rows beyond `retention_count` (ordered by `created_at` asc).
-- **`RestoreJobTest`** — `Process::fake()`; `Storage::fake()`; assert new DB created by `CreateDatabaseService` (mock); assert error on duplicate `new_target`.
-- **Engine-driver seam test** — a `NullBackupDriver` (in-test double implementing `BackupEngineDriver`) registered on `BackupEngineManager` in tests; proves the interface contract without a real mysqldump.
+- **`BackupJobTest`** — `Process::fake()` for the dump script (success + failure); `Storage::fake('backups')`; assert temp file removed in both paths; assert `Backup` status `completed` vs `pending`; assert `Operation` lifecycle (`succeeded`/`failed`).
+- **`BackupControllerTest`** — POST `/backups` as owner returns `{ operation_id }`; non-owner cannot trigger backup on another user's DB (422); delete removes file + row; download returns a streamed response; restore endpoint returns 422 for empty or same-as-source `new_target`; restore endpoint returns 422 for `new_target` that fails identifier regex; `destroySchedule` returns 403 for non-owner.
+- **`SchedulerBackupTest`** — `RunScheduledBackupsJob` dispatches `BackupJob` for due entries; skips disabled entries; skips recently-run entries (`last_run_at` within 50 seconds); updates `last_run_at`; `RetainBackupsJob` deletes oldest `Backup` rows beyond `retention_count`; scheduler registration asserts both `RunScheduledBackupsJob everyMinute` and `model:prune` with `Backup`.
+- **`RestoreJobTest`** — `Process::fake()`; `Storage::fake('backups')`; assert `CreateDatabaseService` called (mock); assert error on duplicate `new_target`; assert error on `new_target` failing identifier validation; assert error when `new_target === source`.
+- **Engine-driver seam test** — a `NullBackupDriver` (in-test double) proves the interface without real mysqldump.
 
-All tests use `QUEUE_CONNECTION=sync` (already set in `phpunit.xml`) so jobs run inline. `Event::fake()` for broadcast assertions.
+All tests use `QUEUE_CONNECTION=sync`. `Event::fake()` for broadcast assertions.
 
 ### Container integration (`make test-system` with `LARANODE_SYSTEM_TESTS=1`)
 
-- Real `laranode-db-backup.sh` dumps a known MySQL DB; verifies the output file is non-empty and valid SQL.
-- Real `laranode-backup-files.sh` tars a small test directory; verifies the archive can be extracted.
-- Restore job restores to a new DB name; verifies the restored DB contains the expected tables.
+- Real `laranode-db-backup.sh` dumps a known MySQL DB via `--defaults-extra-file`; verifies the output file is non-empty gzip (magic bytes `1f8b`).
+- Real `laranode-backup-files.sh` tars a small test directory; verifies the archive extracts correctly.
+- Restore job restores to a new DB name via `CreateDatabaseService`; verifies the restored DB contains the expected tables and a panel `Database` row exists.
 
-These are gated behind `LARANODE_SYSTEM_TESTS=1`, exercised in the `local-dev` Docker container only — same pattern as the SSL tests.
+These are gated behind `LARANODE_SYSTEM_TESTS=1`, exercised in the `local-dev` Docker container — same pattern as the SSL tests.
 
 ### Vitest (front-end)
 
-- `Backups/Index.jsx` — render with static props; assert backup rows rendered; assert restore modal opens on button click; assert `new_target` input present before submission.
+- `Backups/Index.jsx` — render with static props; assert backup rows rendered; assert restore modal opens on button click; assert `new_target` input present and warning text visible before submission.
 - Restore flow — mock axios POST; assert `<OperationProgress>` mounts with the returned `operation_id` (reuses the existing Echo mock pattern from `OperationProgress.test.jsx`).
 
 ## Back-compat / migration
 
-No changes to existing models or migrations. Two new migrations, two new models, no column alterations. The existing `bootstrap/app.php` `withSchedule` callback gains one `$schedule->job(...)` line — additive only. Existing routes unchanged. The `BackupEngineDriver` interface is designed from the start to slot in the `PostgresBackupDriver` from #3 without modifying the `BackupJob` or `DumpDatabaseAction`.
+No changes to existing models or migrations. Two new migrations, two new models, no column alterations. `bootstrap/app.php` `withSchedule` gains `RunScheduledBackupsJob` and `Backup` added to the `model:prune` array — additive only. Existing routes unchanged. The nav link addition to `AuthenticatedLayout` is additive.
 
-If #2 (`db-engine-abstraction`) has not shipped yet when this branch lands, `BackupEngineManager` defaults to `mysql` unconditionally (no `engine` column to read). Once #2 ships, swapping to `$database->engine` is a one-line change.
+The `BackupEngineDriver` interface slots in the `PostgresBackupDriver` from #3 without modifying `BackupJob` or `DumpDatabaseAction`.
+
+If #2 (`db-engine-abstraction`) has not shipped, `BackupEngineManager` defaults to `mysql` unconditionally. Once #2 ships, swapping to `$database->engine` is a one-line change.
 
 ## File inventory
 
 ```
+config/filesystems.php                                          (modify: add backups disk)
 database/migrations/XXXX_create_backups_table.php               (new)
 database/migrations/XXXX_create_scheduled_backups_table.php     (new)
 app/Models/Backup.php                                           (new)
 app/Models/ScheduledBackup.php                                  (new)
 app/Contracts/Backup/BackupEngineDriver.php                     (new)
 app/Backup/Drivers/MysqlBackupDriver.php                        (new)
-app/Backup/Drivers/PostgresBackupDriver.php                     (new — skeleton only)
+app/Backup/Drivers/PostgresBackupDriver.php                     (new — skeleton stub)
 app/Backup/BackupEngineManager.php                              (new)
 app/Actions/Backup/DumpDatabaseAction.php                       (new)
 app/Actions/Backup/TarFilesAction.php                           (new)
@@ -299,40 +326,40 @@ app/Services/Backups/BackupService.php                          (new, + BackupEx
 app/Services/Backups/RestoreService.php                         (new, + RestoreException)
 app/Jobs/BackupJob.php                                          (new)
 app/Jobs/RestoreJob.php                                         (new)
-app/Jobs/RunScheduledBackupsJob.php                             (new)
+app/Jobs/RunScheduledBackupsJob.php                             (new, ShouldBeUnique)
 app/Jobs/RetainBackupsJob.php                                   (new)
 app/Http/Controllers/BackupController.php                       (new)
 app/Http/Requests/CreateBackupRequest.php                       (new)
 app/Http/Requests/CreateScheduledBackupRequest.php              (new)
-app/Http/Requests/RestoreBackupRequest.php                      (new)
+app/Http/Requests/RestoreBackupRequest.php                      (new, identifier regex validation)
 app/Policies/BackupPolicy.php                                   (new)
+app/Policies/ScheduledBackupPolicy.php                          (new)
 routes/web.php                                                  (modify: backup routes)
-bootstrap/app.php                                               (modify: add RunScheduledBackupsJob)
-laranode-scripts/bin/laranode-db-backup.sh                      (new)
+bootstrap/app.php                                               (modify: add RunScheduledBackupsJob + Backup to prune)
+laranode-scripts/bin/laranode-db-backup.sh                      (new, --defaults-extra-file)
 laranode-scripts/bin/laranode-backup-files.sh                   (new)
-laranode-scripts/etc/sudoers.d/laranode-backups                 (new, sudoers drop-in)
+laranode-scripts/bin/laranode-restore-files.sh                  (new)
+laranode-scripts/bin/laranode-restore-db.sh                     (new, --defaults-extra-file)
+laranode-scripts/etc/sudoers.d/laranode-panel                   (new — replaces monolithic wildcard)
+laranode-scripts/bin/laranode-installer.sh                      (modify: install sudoers.d/laranode-panel)
 resources/js/Pages/Backups/Index.jsx                            (new)
+resources/js/Layouts/AuthenticatedLayout.jsx                    (modify: add nav link)
 tests/Feature/Backups/BackupModelTest.php                       (new)
 tests/Feature/Backups/BackupJobTest.php                         (new)
 tests/Feature/Backups/BackupControllerTest.php                  (new)
 tests/Feature/Backups/SchedulerBackupTest.php                   (new)
 tests/Feature/Backups/RestoreJobTest.php                        (new)
+tests/Feature/Backups/BackupSystemTest.php                      (new, LARANODE_SYSTEM_TESTS=1)
 resources/js/Pages/Backups/Backups.test.jsx                     (new, Vitest)
 ```
 
 ## Out of scope
 
-- Encrypting the backup archive at rest (beyond S3 server-side encryption, which the S3 disk handles transparently).
+- Encrypting the backup archive at rest (beyond S3 server-side encryption).
 - Cross-user restores (admin restoring a user's backup into a different user's account).
 - Incremental backups (full dump/tar only for v1).
-- Backup verification (checking the dump is valid SQL before marking complete) — defer; add `verify` step later.
-- A dedicated `BackupStorageDriver` abstraction for SFTP/Backblaze — S3-compatible covers the common case; revisit if needed.
-
-## Open questions
-
-1. **On-demand S3 creds UX:** Should the UI offer "use the same S3 config as an existing scheduled backup" as a shortcut, or always require re-entering for one-off S3 backups? (Re-entering is simpler and avoids surfacing persisted secrets to the UI; shortcut is more ergonomic.)
-2. **Local storage path:** Storing under `/home/{username}_ln/backups/` puts backup files on the same disk as user data. Should there be a global `BACKUP_LOCAL_ROOT` config value (defaulting to the homedir path) so an admin can point it at a separate volume or mount?
-3. **Retention granularity:** Is `retention_count` (keep last N) sufficient, or should the spec add a `retention_days` alternative? Keeping only one knob simplifies the UI; YAGNI unless asked.
-4. **RunScheduledBackupsJob cadence:** `everyMinute()` means at most 1-minute delay for any user-defined schedule. If the user base grows and many schedules run at 2 AM, this could pile up. For now the `database` queue serializes them naturally. Flag this if load becomes a concern.
-5. **File backup scope:** should "files" back up the entire `websiteRoot` (including `node_modules`/`.git` etc.) or only the `fullDocumentRoot`? Backing up `fullDocumentRoot` is smaller and more useful; backing up `websiteRoot` captures more (git repo, uploads above docroot). Decision needed before writing the bash script.
-6. **Download security for large backups:** streaming through Laravel is fine for small/medium archives, but a 2 GB tarball streaming through PHP is inefficient. A pre-signed S3 URL (for S3 storage) or an Apache `X-Sendfile` passthrough (for local) would be better for large files. Decide whether to handle this in v1 or defer.
+- Backup verification (checking the dump is valid SQL before marking complete).
+- A dedicated `BackupStorageDriver` abstraction for SFTP/Backblaze — S3-compatible covers the common case.
+- "Use an existing schedule's S3 config" shortcut for on-demand backups (re-entering is simpler and avoids surfacing persisted secrets to the UI — **resolved default: always re-enter for one-off S3**).
+- Size cap or progress for large local downloads — streamed via PHP for v1; presigned URL for S3 (**resolved default: presigned S3 URL / streamed local, no size cap v1**).
+- `retention_days` alternative to `retention_count` — single `retention_count` knob is sufficient for v1 (**resolved default: count only**).

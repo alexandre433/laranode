@@ -7,7 +7,7 @@
 
 ## Goal
 
-Deliver a persistent, per-user notification center: a bell icon with unread count in the layout, a slide-out or page listing recent notifications, and opt-in delivery to email and/or a webhook/Slack URL. Notifications are fed by event sources that already exist or ship in later sub-projects. This sub-project owns **delivery** and the in-app center; alert-trigger logic (thresholds, monitoring decisions) belongs to `monitoring-alerts` (#11).
+Deliver a persistent, per-user notification center: a bell icon with unread count in the layout, a page listing recent notifications, and opt-in delivery to email and/or a webhook/Slack URL. Notifications are fed by event sources that already exist or ship in later sub-projects. This sub-project owns **delivery** and the in-app center; alert-trigger logic (thresholds, monitoring decisions) belongs to `monitoring-alerts` (#11).
 
 **Why here in the sequence:** the `platform-async-progress` foundation (#1) ships the `operations` table, `OperationUpdated` broadcast, and Reverb/queue infrastructure that this feature builds on. The dispatch seam is designed now so wiring a new event source later is a one-line addition.
 
@@ -21,9 +21,9 @@ Event Source
         └─> preference filter (NotificationPreference rows for $user x $type x $channel)
               └─> $user->notify($notification)   // resolves enabled channels
                     ├─> DatabaseChannel  → notifications table
-                    │     └─> OperationUpdated-style broadcast → Bell/unread bump
+                    │     └─> NotificationsObserver::created() → NotificationCreated broadcast → bell bump
                     ├─> MailChannel      → queued Mailable (Laravel mail)
-                    └─> WebhookChannel   → HTTP POST to stored URL (custom driver)
+                    └─> WebhookChannel   → HTTP POST to stored encrypted URL (custom driver)
 ```
 
 No polling. The bell count updates live via Reverb the same way `OperationProgress` receives job output.
@@ -34,7 +34,9 @@ No polling. The bell count updates live via Reverb the same way `OperationProgre
 
 Laravel's `php artisan notifications:table` migration creates `notifications` (`id` UUIDv4, `type`, `notifiable_type`, `notifiable_id`, `data` JSON, `read_at` nullable, `created_at`, `updated_at`). Use this unchanged; no custom columns needed. The `type` column stores the FQCN of the notification class (e.g. `App\Notifications\OperationFinishedNotification`).
 
-`User` already uses the `Notifiable` trait (confirmed in `app/Models/User.php` line 10). No model change needed.
+Add a composite index `(notifiable_type, notifiable_id, read_at)` to the migration — the shared-prop unread count and `markAllRead` both query on all three columns.
+
+`User` already uses the `Notifiable` trait (confirmed in `app/Models/User.php` line 17). No model change needed.
 
 ### 2. `notification_preferences` table + model
 
@@ -42,11 +44,13 @@ New migration `create_notification_preferences_table`:
 - `id`, `user_id` (FK users, cascade), `event_type` (string — enum-like key, e.g. `operation.finished`, `ssl.issued`, `ssl.expiring`, `fail2ban.ban`, `resource.threshold`, `backup.result`, `deploy.success`, `deploy.failed`), `channel` (string: `database` | `mail` | `webhook`), `enabled` (boolean default true), `timestamps`.
 - Unique index on `(user_id, event_type, channel)`.
 
+**Channel values stored in this table use short aliases: `database`, `mail`, `webhook` — NOT the `WebhookChannel` FQCN.** `NotificationService::resolveChannels()` maps `webhook` → `WebhookChannel::class` when building the `via()` array.
+
 `App\Models\NotificationPreference`:
 - `$fillable`: `user_id`, `event_type`, `channel`, `enabled`.
 - `$casts`: `enabled => 'boolean'`.
 - `belongsTo(User)`.
-- Static helper `App\Models\NotificationPreference::isEnabled(int $userId, string $eventType, string $channel): bool` — single query; returns `true` when no row exists (opt-out model: everything on by default, user turns things off).
+- Static helper `App\Models\NotificationPreference::isEnabled(int $userId, string $eventType, string $channel): bool` — `$channel` here is the short alias; single query; returns `true` when no row exists (opt-out model: everything on by default, user turns things off).
 
 Default: all channels enabled for all event types. A missing row means "enabled" so new event types light up automatically for existing users.
 
@@ -62,7 +66,8 @@ class OperationFinishedNotification extends Notification implements ShouldQueue
 
     public function via(object $notifiable): array
     {
-        return NotificationService::resolveChannels($notifiable, 'operation.finished');
+        $eventType = $this->operation->status === 'failed' ? 'operation.failed' : 'operation.finished';
+        return NotificationService::resolveChannels($notifiable, $eventType);
     }
 
     public function toDatabase(object $notifiable): array { ... }
@@ -72,15 +77,15 @@ class OperationFinishedNotification extends Notification implements ShouldQueue
 ```
 
 Initial notification classes (wire up as their source features ship):
-- `OperationFinishedNotification` (`operation.finished` | `operation.failed`) — sources from the `#1` OperationJob foundation
-- `SslIssuedNotification` (`ssl.issued`) — from `GenerateSslOperationJob`
-- `SslExpiringNotification` (`ssl.expiring`) — scheduled check (see scheduler section)
-- `Fail2banBanNotification` (`fail2ban.ban`) — from `security-fail2ban` (#6)
-- `ResourceThresholdNotification` (`resource.threshold`) — from `monitoring-alerts` (#11)
-- `BackupResultNotification` (`backup.result`) — from `backups` (#9)
-- `DeployResultNotification` (`deploy.success` | `deploy.failed`) — from `deploy-git-push` (#7)
+- `OperationFinishedNotification` (`operation.finished` | `operation.failed`) — dispatched from `OperationJob::handle()` when `$notifyUser` is set
+- `SslIssuedNotification` (`ssl.issued`) — stub class; dispatch seam NOT yet wired (see §8 below)
+- `SslExpiringNotification` (`ssl.expiring`) — dispatched from the scheduler (see §Scheduler Extension)
+- `Fail2banBanNotification` (`fail2ban.ban`) — from `security-fail2ban` (#6) — stub
+- `ResourceThresholdNotification` (`resource.threshold`) — from `monitoring-alerts` (#11) — stub
+- `BackupResultNotification` (`backup.result`) — from `backups` (#9) — stub
+- `DeployResultNotification` (`deploy.success` | `deploy.failed`) — from `deploy-git-push` (#7) — stub
 
-For this sub-project, only `OperationFinishedNotification` and `SslIssuedNotification` are wired (the sources exist). The rest are created as stub classes (correct interface, no dispatch seam yet) so the channel + preference infrastructure is exercised end-to-end.
+For this sub-project, only `OperationFinishedNotification` and `SslExpiringNotification` have live dispatch seams. `SslIssuedNotification` is created as a stub (correct interface, no caller yet). The remaining classes are stubs so the channel + preference infrastructure is exercised end-to-end.
 
 ### 4. `NotificationService`
 
@@ -89,16 +94,26 @@ For this sub-project, only `OperationFinishedNotification` and `SslIssuedNotific
 ```php
 class NotificationService
 {
+    private const CHANNEL_MAP = [
+        'database' => 'database',
+        'mail'     => 'mail',
+        'webhook'  => \App\Notifications\Channels\WebhookChannel::class,
+    ];
+
     /**
      * Resolve which channels are enabled for a given user + event type.
-     * Returns channel driver names that Laravel's Notification system understands.
+     * $channel preferences use short aliases (database / mail / webhook).
+     * Returns channel driver names / class names that Laravel's Notification system understands.
      */
     public static function resolveChannels(object $notifiable, string $eventType): array
     {
-        $available = ['database', 'mail', WebhookChannel::class];
-        return array_filter($available, fn ($channel) =>
-            NotificationPreference::isEnabled($notifiable->id, $eventType, $channel)
-        );
+        return array_values(array_filter(
+            array_values(self::CHANNEL_MAP),
+            function ($driver) use ($notifiable, $eventType) {
+                $alias = array_search($driver, self::CHANNEL_MAP);
+                return NotificationPreference::isEnabled($notifiable->id, $eventType, $alias);
+            }
+        ));
     }
 
     /**
@@ -112,104 +127,167 @@ class NotificationService
 }
 ```
 
-Callers use `NotificationService::dispatch($user, new OperationFinishedNotification($operation))`. The notification's `via()` method calls `NotificationService::resolveChannels()` and Laravel routes to the correct channel drivers.
+Callers: `NotificationService::dispatch($user, new OperationFinishedNotification($operation))`.
 
 ### 5. Custom `WebhookChannel`
 
-`app/Notifications/Channels/WebhookChannel.php` — implements `send(object $notifiable, Notification $notification): void`. Reads `$notifiable->webhook_url` (new nullable column on `users`, see data model) and POSTs `$notification->toWebhook($notifiable)` as JSON using Laravel's `Http` facade with a 10-second timeout. Failures are caught and logged; they do not bubble (non-critical delivery path).
+`app/Notifications/Channels/WebhookChannel.php` — implements `send(object $notifiable, Notification $notification): void`.
 
-### 6. Webhook URL stored on `User`
+Security requirements applied in `send()`:
+1. Return early if `$notifiable->webhook_url` is null/empty.
+2. Validate scheme is `http` or `https` only — reject any other scheme.
+3. Reject RFC-1918 / loopback destinations (SSRF prevention): resolve the host and reject if the IP falls in `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, or `127.0.0.0/8`. Use `filter_var` with `FILTER_VALIDATE_IP` + `FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE` on the resolved IP.
+4. POST `$notification->toWebhook($notifiable)` as JSON using Laravel's `Http` facade with a 10-second timeout.
+5. Catch all `\Throwable`, log with `Log::warning(...)`, do not rethrow. Non-critical delivery path.
 
-Add `webhook_url` (nullable string) to `users` via a new migration. `User::$fillable` gains `webhook_url`. The Profile page (`Pages/Profile/Edit.jsx` / `ProfileController`) gains a webhook URL field. No encrypted cast needed (the URL is not a secret; the payload is informational).
+```php
+public function send(object $notifiable, Notification $notification): void
+{
+    $url = $notifiable->webhook_url;
+    if (empty($url)) return;
+
+    $parsed = parse_url($url);
+    if (!in_array($parsed['scheme'] ?? '', ['http', 'https'], true)) return;
+
+    $host = $parsed['host'] ?? '';
+    $ip = gethostbyname($host);
+    if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+        Log::warning('WebhookChannel blocked SSRF attempt', ['url' => $url]);
+        return;
+    }
+
+    try {
+        Http::timeout(10)->post($url, $notification->toWebhook($notifiable));
+    } catch (\Throwable $e) {
+        Log::warning('WebhookChannel delivery failed', ['url' => $url, 'error' => $e->getMessage()]);
+    }
+}
+```
+
+### 6. `webhook_url` stored on `User` — encrypted
+
+Add `webhook_url` (nullable string) to `users` via a new migration. `User` model:
+- `$fillable` gains `webhook_url`.
+- `$hidden` gains `webhook_url` — prevents it from leaking in the shared `auth.user` Inertia prop (Slack incoming-webhook tokens are secrets).
+- `casts()` returns `'webhook_url' => 'encrypted'` — encrypted at rest in the DB; decrypted transparently on read.
+
+The Profile preferences page reads `webhook_url` via a dedicated prop (not via `auth.user`), so it remains accessible to the UI despite `$hidden`. The `NotificationPreferencesController::index()` adds `'webhookUrl' => $request->user()->webhook_url` to the Inertia props.
+
+`ProfileUpdateRequest` does NOT handle `webhook_url` (it only handles name/email). Webhook URL is saved via `PATCH /profile/notifications` handled by `NotificationPreferencesController::updateWebhook()` — a dedicated endpoint that validates `webhook_url` as `nullable|url|max:2048` and saves it.
 
 ### 7. `NotificationPreferencesController`
 
-`app/Http/Controllers/NotificationPreferencesController.php` (thin — delegates to `NotificationService`):
-- `index()` — returns the current user's preferences as Inertia props (all supported event types × channels, with enabled state per row). Uses `NotificationPreference::where('user_id', $user->id)->get()` joined against the known event-type/channel matrix.
-- `update(Request $request)` — validates `event_type` (in-list) + `channel` (in-list) + `enabled` (boolean); upserts a `NotificationPreference` row; returns updated state.
+`app/Http/Controllers/NotificationPreferencesController.php` (thin):
+- `index()` — returns the current user's preference matrix as Inertia props, plus `webhookUrl` (decrypted). Returns `eventTypes`, `channels` (short aliases), `preferences` (full matrix), `webhookUrl`.
+- `update(Request $request)` — validates `event_type` (in-list) + `channel` in `['database','mail','webhook']` + `enabled` (boolean); upserts a `NotificationPreference` row using short alias; returns JSON.
+- `updateWebhook(Request $request)` — validates `webhook_url` as `nullable|url|max:2048`; saves to `$request->user()->webhook_url`; returns JSON.
 
-Route: `GET/PATCH /profile/notifications` (under existing auth middleware, not admin-only).
+Route: `GET /profile/notifications`, `PATCH /profile/notifications`, `PATCH /profile/notifications/webhook`.
 
 ### 8. `NotificationsController`
 
 `app/Http/Controllers/NotificationsController.php`:
-- `index()` — `Inertia::render('Notifications/Index', ['notifications' => auth()->user()->notifications()->latest()->paginate(30)])`. Lists all (read + unread). Uses `$user->notifications` (Laravel's polymorphic relation on the `notifications` table).
-- `markRead(string $id)` — marks a single notification read (`$user->notifications()->findOrFail($id)->markAsRead()`); returns JSON.
+- `index()` — `Inertia::render('Notifications/Index', ['notifications' => auth()->user()->notifications()->latest()->paginate(30)])`.
+- `markRead(string $id)` — marks a single notification read; returns JSON.
 - `markAllRead()` — `$user->unreadNotifications->markAsRead()`; returns JSON.
 
-Route: `GET /notifications` (bell page), `PATCH /notifications/{id}/read`, `PATCH /notifications/read-all`.
+Routes registered in this order (literal segment before parameter to avoid `read-all` being consumed as `{id}`):
+```php
+Route::patch('/notifications/read-all', [..., 'markAllRead'])->name('notifications.readAll');
+Route::patch('/notifications/{id}/read', [..., 'markRead'])->name('notifications.read');
+```
 
 ### 9. Live unread-count via Reverb
 
-When a `database` channel notification is written, dispatch a broadcast event `NotificationCreated implements ShouldBroadcast` on `private-notifications.{userId}`. The payload carries `{ unread_count: int }` only — no notification content over the wire (avoids leaking data in the channel payload).
+When a `database` channel notification is written, dispatch broadcast event `NotificationCreated implements ShouldBroadcastNow` on `private-notifications.{userId}`. Payload carries `{ unread_count: int }` only.
+
+`App\Events\NotificationCreated` is fired from `NotificationsObserver` (Eloquent Observer on `Illuminate\Notifications\DatabaseNotification`) on `created`. The observer counts `$model->notifiable->unreadNotifications()->count()` and dispatches.
+
+**Broadcast resilience:** `NotificationCreated::dispatch()` is wrapped in a `try/catch(\Throwable)` inside the observer. `ShouldBroadcastNow` broadcasts synchronously; if Reverb is down it throws. The in-app notification row is already written before the observer fires — catching the broadcast error keeps the row safe. The bell count will be stale until next page load (Inertia refreshes the shared prop). Log the error with `Log::warning`.
+
+```php
+public function created(DatabaseNotification $notification): void
+{
+    $notifiable = $notification->notifiable;
+    if ($notifiable === null) return;
+    $unreadCount = $notifiable->unreadNotifications()->count();
+    try {
+        NotificationCreated::dispatch($notifiable->id, $unreadCount);
+    } catch (\Throwable $e) {
+        Log::warning('NotificationCreated broadcast failed', ['error' => $e->getMessage()]);
+    }
+}
+```
 
 `routes/channels.php` gains:
 ```php
 Broadcast::channel('notifications.{userId}', function ($user, $userId) {
-    return (int) $user->id === (int) $userId;
+    return (int) $user->id === (int) $userId; // personal only — no admin cross-view
 });
 ```
-(Admin does not need to watch other users' notification channels — this is personal delivery, not an audit stream.)
 
-`App\Events\NotificationCreated` is fired from inside `NotificationsObserver` (an `Eloquent\Observer` on the `DatabaseNotification` model from `Illuminate\Notifications\DatabaseNotification`) on `created`. The observer counts `$model->notifiable->unreadNotifications()->count()` and broadcasts.
+### 10. `OperationJob` notification hook
 
-### 10. React — bell + unread count + notification center
+Add `public ?User $notifyUser = null` to `OperationJob`. When set, `handle()` calls `NotificationService::dispatch($this->notifyUser, new OperationFinishedNotification($this->operation))` after `markFinished`, on both success and failure paths, via a private `maybeNotify()` method. This is opt-in: existing subclasses with no `notifyUser` set are unaffected.
 
-**`useNotifications()`** (`resources/js/hooks/useNotifications.js`) — subscribes to `Echo.private('notifications.'+userId)`, listens for `.NotificationCreated`, maintains `unreadCount` state. Initialized from an Inertia shared prop `notifications.unreadCount` (added to `HandleInertiaRequests::share()`). Returns `{ unreadCount, refresh }`.
+`GenerateSslOperationJob` sets `$this->notifyUser = $website->user` in its constructor. Note: `Website::user()` currently selects only `['id', 'username', 'role']` — **the `email` column must be added to that select** so the mail channel has a valid recipient address. Fix: `$this->belongsTo(User::class)->select(['id', 'username', 'role', 'email'])`.
 
-**`NotificationBell.jsx`** (`resources/js/Components/NotificationBell.jsx`) — renders the bell icon (from the existing `react-icons` library, e.g. `IoNotificationsOutline`) + a red badge when `unreadCount > 0`. Clicking navigates to `/notifications` (Inertia link) or opens a slide-out dropdown (decision: see Open Questions).
+`SslIssuedNotification` is NOT dispatched from `GenerateSslOperationJob` in this sub-project. The class is created as a correctly-interfaced stub. The dispatch seam (calling `NotificationService::dispatch($user, new SslIssuedNotification($website))` from the job's `run()`) is left for a follow-up task or the `ssl` sub-project, to avoid wiring two notification types from one job and complicating the `notifyUser` opt-in semantics. The spec previously said it was wired — that was incorrect.
 
-**`TopNavi.jsx`** (`resources/js/Layouts/Partials/TopNavi.jsx`) — add `<NotificationBell />` alongside the existing logout/impersonate controls in the right side of the nav bar (line 34 area).
+### 11. React — bell + unread count + notification center
 
-**`Pages/Notifications/Index.jsx`** — list page: notification rows (icon per type, message, timestamp, read/unread state), "Mark all read" button, pagination. Mark-read fires axios PATCH, updates local state.
+**`useNotifications()`** (`resources/js/hooks/useNotifications.js`) — subscribes to `Echo.private('notifications.'+userId)`, listens for `.NotificationCreated`, sets `unreadCount` to `e.unread_count` from the event payload. Initialized from Inertia shared prop `notifications.unreadCount`. Returns `{ unreadCount, refresh }`.
 
-**`Pages/Profile/Edit.jsx`** — extend with a "Notification Preferences" section: a matrix of event types × channels with toggles, and a webhook URL input field. Calls `PATCH /profile/notifications`.
+**`NotificationBell.jsx`** (`resources/js/Components/NotificationBell.jsx`) — renders bell icon + red badge when `unreadCount > 0`. Accepts optional `unreadCount` prop override for testability. Clicking navigates to `/notifications` (Inertia Link).
+
+**`TopNavi.jsx`** — add `<NotificationBell />` in the right side of the nav bar.
+
+**`Pages/Notifications/Index.jsx`** — list page: notification rows (icon per type, message, timestamp, read/unread state), "Mark all read" button, pagination.
+
+**`Pages/Profile/Notifications.jsx`** — preference matrix (event types × short-alias channels with toggles) + webhook URL input field. Webhook URL is read from the `webhookUrl` Inertia prop (not `auth.user`). Saves via `PATCH /profile/notifications/webhook`.
 
 ## Data Flow (operation.finished example)
 
-1. `GenerateSslOperationJob` calls `Operation::markFinished(0)` (existing, `#1`).
-2. Job's `handle()` calls `NotificationService::dispatch($user, new OperationFinishedNotification($operation))` after `markFinished`.
-3. `OperationFinishedNotification::via()` calls `NotificationService::resolveChannels($user, 'operation.finished')` — returns e.g. `['database', 'mail']` (webhook not enabled by this user).
-4. Laravel dispatches to `DatabaseChannel` → inserts a row into `notifications`. `NotificationsObserver::created()` fires → dispatches `NotificationCreated` broadcast on `private-notifications.{userId}`.
-5. Laravel dispatches to `MailChannel` → queued mailable (existing queue worker picks it up).
-6. React's `useNotifications()` receives the Reverb event → increments `unreadCount` → `NotificationBell` shows the badge without a page reload.
-
-## Wiring Existing Event Sources
-
-`GenerateSslOperationJob::run()` already calls `$emit()` lines and returns 0. The dispatch call is added to the job's `handle()` in `OperationJob` base class — but only for the finished/failed lifecycle, not per-line events. Option: override `markFinished` to fire notifications, or add a hook in `OperationJob::handle()`. **Chosen approach:** add an optional `protected ?User $notifyUser = null` property to `OperationJob`; subclasses that want completion notifications set it; `handle()` calls `NotificationService::dispatch()` after `markFinished`. This keeps the base class opt-in and non-breaking.
+1. `GenerateSslOperationJob` runs; `OperationJob::handle()` calls `markFinished(0)`.
+2. `maybeNotify()` fires: `NotificationService::dispatch($user, new OperationFinishedNotification($operation))`.
+3. `OperationFinishedNotification::via()` calls `NotificationService::resolveChannels($user, 'operation.finished')` → e.g. `['database', WebhookChannel::class]`.
+4. Laravel dispatches to `DatabaseChannel` → inserts into `notifications`. `NotificationsObserver::created()` fires → tries `NotificationCreated::dispatch(...)` (caught on Reverb outage).
+5. Laravel dispatches to `WebhookChannel::send()` → validates URL + SSRF → POSTs JSON.
+6. React's `useNotifications()` receives the Reverb event → sets `unreadCount` → bell shows badge.
 
 ## Scheduler Extension
 
-The existing `bootstrap/app.php` `withSchedule` hook (added by `#1`) gains:
+`bootstrap/app.php` `withSchedule` hook gains:
 ```php
 $schedule->call(function () {
-    // Notify users about SSL certs expiring in 14 or 7 days
     Website::where('ssl_enabled', true)
         ->whereNotNull('ssl_expires_at')
-        ->whereIn(\Illuminate\Support\Facades\DB::raw('DATEDIFF(ssl_expires_at, NOW())'), [14, 7])
         ->with('user')
         ->get()
+        ->filter(fn ($site) => in_array((int) now()->diffInDays($site->ssl_expires_at, false), [14, 7]))
         ->each(fn ($site) =>
             NotificationService::dispatch($site->user, new SslExpiringNotification($site))
         );
-})->dailyAt('08:00');
+})->dailyAt('08:00')->description('ssl.expiring notifications');
 ```
 
 ## Error Handling
 
-- **Mail delivery failure:** Laravel queues mail; if the queue driver processes it and the mail server rejects, the job fails and goes to `failed_jobs`. No silent swallowing.
-- **Webhook failure:** `WebhookChannel` catches `\Throwable`, logs with `Log::warning(...)`, does not rethrow. Non-critical — the in-app notification is already written.
-- **Missing `webhook_url`:** `WebhookChannel::send()` returns early if `$notifiable->webhook_url` is null.
-- **Preference lookup:** on any DB error, `NotificationPreference::isEnabled()` returns `true` (fail-open: deliver rather than silently suppress).
-- **Broadcast failure:** `NotificationCreated` implements `ShouldBroadcastNow` so it does not queue separately. If Reverb is down, the broadcast fails silently; the unread count will be stale until next page load (where Inertia refreshes the shared prop).
+- **Mail delivery failure:** queued via Laravel mail stack; failures go to `failed_jobs`. No silent swallowing.
+- **Webhook failure:** `WebhookChannel` catches `\Throwable`, logs with `Log::warning`, does not rethrow. Non-critical — in-app notification already written.
+- **Missing `webhook_url`:** `WebhookChannel::send()` returns early if null/empty.
+- **SSRF / bad scheme:** `WebhookChannel::send()` silently returns (logged as warning for SSRF attempts).
+- **Preference lookup failure:** `NotificationPreference::isEnabled()` returns `true` on any DB error (fail-open: deliver rather than silently suppress).
+- **Broadcast failure:** `NotificationsObserver` wraps `NotificationCreated::dispatch()` in try/catch; stale count fixed on next Inertia navigation.
 
 ## Security
 
-- **Channel auth:** `private-notifications.{userId}` authorized to own user only (no admin cross-user; notifications are personal). The existing `operations.{userId}` allows admin cross-view; notifications deliberately do not.
-- **Notification content:** `toDatabase()` stores only the fields needed for display (no secrets, no raw output blobs — reference the `Operation::id` for lookups). Webhook payload includes `event_type`, `operation_id`, `url`, `status` — no credential data.
-- **Webhook URL:** stored plaintext (it's a URL, not a secret). Panel admin can view it via the accounts UI; document this. If a Slack incoming-webhook URL is considered sensitive (it authorizes posting), we can add a dedicated `encrypted_webhook_url` cast — see Open Questions.
-- **Preference controller:** scoped to `auth()->user()`; no policy object needed beyond the auth middleware since users can only edit their own preferences.
-- **Mass assignment:** `NotificationPreference::$fillable` restricts `event_type` to an allowlist validated in the FormRequest.
+- **SSRF prevention:** `WebhookChannel` validates http/https scheme and rejects RFC-1918/loopback IPs before POSTing.
+- **Webhook URL encrypted at rest:** `encrypted` cast on `User::$casts`; `webhook_url` in `User::$hidden` prevents leaking via `auth.user` shared prop.
+- **Channel auth:** `private-notifications.{userId}` authorized to own user only (no admin cross-view; notifications are personal).
+- **Notification content:** `toDatabase()` stores only display fields (no secrets, no raw output blobs).
+- **Preference controller:** scoped to `auth()->user()`; no policy object needed beyond auth middleware.
+- **Mass assignment:** `NotificationPreference::$fillable` restricts columns; `event_type` allowlist validated in controller.
 
 ## Testing Strategy
 
@@ -217,102 +295,102 @@ $schedule->call(function () {
 
 `tests/Feature/Notifications/`:
 
-- **`NotificationPreferenceTest`** — upsert creates row; missing row returns `isEnabled=true` (fail-open); `resolveChannels()` excludes disabled channels; unique constraint on (user, event_type, channel).
-- **`NotificationDispatchTest`** — `NotificationService::dispatch($user, new OperationFinishedNotification($op))` with all channels enabled → `assertDatabaseHas('notifications', ...)` + `Event::assertDispatched(NotificationCreated::class)` + assert `SentMessage` via `Mail::fake()`. With database-only → no mail sent.
-- **`WebhookChannelTest`** — `Http::fake()` → assert POST to `$user->webhook_url` with correct JSON; null `webhook_url` → no HTTP call; HTTP 500 from webhook → no exception thrown.
-- **`NotificationsControllerTest`** — `GET /notifications` returns 200; mark-read sets `read_at`; mark-all-read clears all unread for user, not other users'.
-- **`NotificationPreferencesControllerTest`** — GET returns full matrix; PATCH toggles a channel; invalid event_type rejected 422.
-- **`SslExpiringSchedulerTest`** — seed a website with `ssl_expires_at = now()->addDays(7)` → run the scheduled callback → `assertDatabaseHas('notifications', ['type' => SslExpiringNotification::class])`.
-- **`BroadcastChannelAuthTest`** — user can authorize `notifications.{own_id}`; cannot authorize `notifications.{other_id}`; admin also cannot (unlike `operations.{userId}`).
+- **`NotificationPreferenceTest`** — `isEnabled` returns `true` on missing row; returns `false` on disabled row; unique constraint enforced; `resolveChannels` excludes disabled channels (using short alias keys).
+- **`NotificationDispatchTest`** — all channels enabled → DB row written + mail sent + webhook POSTed; `database`-only → no mail, no webhook; `webhook` disabled → no HTTP call.
+- **`WebhookChannelTest`** — POST to valid URL with correct JSON; null `webhook_url` → no call; HTTP 500 from webhook → no exception; `http://` URL rejected (non-https blocked); private IP rejected (SSRF).
+- **`NotificationsControllerTest`** — `GET /notifications` returns 200; `markRead` sets `read_at`; `markAllRead` clears only auth user's unread (not other users'); `read-all` route not captured as `{id}` (route order).
+- **`NotificationPreferencesControllerTest`** — GET returns matrix with `webhookUrl` prop; PATCH toggles preference; invalid `event_type` → 422; invalid `channel` → 422; `PATCH /profile/notifications/webhook` saves encrypted URL; non-http/https webhook URL rejected 422.
+- **`SslExpiringSchedulerTest`** — website with `ssl_expires_at = now()->addDays(7)` → scheduler callback fires → `notifications` row inserted; 30-day cert → no row; schedule entry registered (`php artisan schedule:list` shows it).
+- **`BroadcastChannelAuthTest`** — user authorizes own `notifications.{id}`; cannot authorize other user's channel; admin cannot either.
+- **`OperationJobNotificationTest`** — job with `notifyUser` dispatches `OperationFinishedNotification` on success; on failure (exception) dispatches notification and rethrows; without `notifyUser` sends nothing.
+- **`ObserverBroadcastTest`** — observer catches `\Throwable` from `NotificationCreated::dispatch()` and does not rethrow; DB notification row remains.
+
+### Integration (`LARANODE_SYSTEM_TESTS=1` in local-dev container)
+
+No system calls in this sub-project. Full notification flow (dispatch → DB row → broadcast → bell) exercised via Pest suite under `QUEUE_CONNECTION=sync` + `Event::fake()`.
+
+However, the `WebhookChannel` SSRF DNS resolution (`gethostbyname`) must be verified at least once against a real DNS in the container. Add one `LARANODE_SYSTEM_TESTS=1`-gated test in `WebhookChannelTest`:
+```php
+test('webhook channel blocks private-IP hostname (system)', function () {
+    if (!env('LARANODE_SYSTEM_TESTS')) { skip('system tests only'); }
+    Http::fake(); // should never be called
+    $user = User::factory()->create(['webhook_url' => 'http://localhost/hook']);
+    (new WebhookChannel())->send($user, new OperationFinishedNotification($op));
+    Http::assertNothingSent();
+})->group('system');
+```
 
 ### Vitest (frontend)
 
-`resources/js/hooks/useNotifications.test.jsx`:
-- Mock `window.Echo` (same pattern as `useOperation.test.jsx`); drive a `.NotificationCreated` event; assert `unreadCount` increments.
-
-`resources/js/Components/NotificationBell.test.jsx`:
-- Render with `unreadCount=0` → no badge; `unreadCount=3` → badge shows "3".
-
-### Container integration (`LARANODE_SYSTEM_TESTS=1` not needed — no system calls)
-
-Full notification flow (dispatch → DB row → broadcast → bell update) exercised via the Pest suite under `QUEUE_CONNECTION=sync` + `Event::fake()` in the local-dev container, same as `#1`.
+- `useNotifications.test.jsx` — mock `window.Echo`; drive `.NotificationCreated` event; assert `unreadCount` sets to `e.unread_count`.
+- `NotificationBell.test.jsx` — `unreadCount=0` → no badge; `unreadCount=3` via prop override → badge shows "3".
 
 ## Back-compat / Migration
 
-- `User` already has `Notifiable` — no model change. New `webhook_url` column is nullable with no default, so existing rows are unaffected.
-- `notification_preferences` starts empty for all users; `NotificationPreference::isEnabled()` returns `true` on a missing row, so existing users get all notifications until they opt out. No seeder needed.
-- The `notifications` table is Laravel standard; no conflict with any existing table (confirmed — `database/migrations/` does not contain it today).
-- `OperationJob::handle()` gains an opt-in hook (`$this->notifyUser`). All existing subclasses (`GenerateSslOperationJob`) continue to work unchanged with no notification behavior until they set the property.
-- `HandleInertiaRequests::share()` adding `notifications.unreadCount` is additive; no existing JS reads it, so no breakage.
+- `User` already has `Notifiable` — no model change beyond `$fillable`, `$hidden`, and `casts()`.
+- `webhook_url` nullable with no default; existing rows read as `null` (encrypted cast handles null transparently).
+- `notification_preferences` starts empty; `isEnabled` returns `true` on missing row; no seeder needed.
+- `notifications` table is Laravel standard; confirmed absent from `database/migrations/` today.
+- `OperationJob` opt-in hook (`$notifyUser`): all existing subclasses continue unchanged.
+- `HandleInertiaRequests::share()` gaining `notifications.unreadCount` is additive.
+- `Website::user()` select change (adding `email`) is backward-compatible — callers only read the columns they need.
 
 ## File Inventory
 
 ```
-database/migrations/XXXX_create_notification_preferences_table.php   (new)
-database/migrations/XXXX_add_webhook_url_to_users_table.php           (new)
-app/Models/NotificationPreference.php                                  (new)
-app/Notifications/OperationFinishedNotification.php                    (new)
-app/Notifications/SslIssuedNotification.php                            (new)
-app/Notifications/SslExpiringNotification.php                          (new; stub dispatch seam)
-app/Notifications/Fail2banBanNotification.php                          (new; stub)
-app/Notifications/ResourceThresholdNotification.php                    (new; stub)
-app/Notifications/BackupResultNotification.php                         (new; stub)
-app/Notifications/DeployResultNotification.php                         (new; stub)
-app/Notifications/Channels/WebhookChannel.php                          (new)
-app/Services/Notifications/NotificationService.php                     (new)
-app/Events/NotificationCreated.php                                     (new; ShouldBroadcast)
-app/Observers/NotificationsObserver.php                                (new)
-app/Http/Controllers/NotificationsController.php                       (new)
-app/Http/Controllers/NotificationPreferencesController.php             (new)
-routes/web.php                                                         (modify: notifications + prefs routes)
-routes/channels.php                                                    (modify: notifications.{userId})
-app/Jobs/OperationJob.php                                              (modify: opt-in notifyUser hook)
-app/Jobs/GenerateSslOperationJob.php                                   (modify: set notifyUser)
-app/Http/Middleware/HandleInertiaRequests.php                          (modify: share unreadCount)
-bootstrap/app.php                                                      (modify: ssl-expiry schedule)
-app/Models/User.php                                                    (modify: $fillable += webhook_url)
-resources/js/hooks/useNotifications.js                                 (new)
-resources/js/Components/NotificationBell.jsx                           (new)
-resources/js/Layouts/Partials/TopNavi.jsx                              (modify: add NotificationBell)
-resources/js/Pages/Notifications/Index.jsx                             (new)
-resources/js/Pages/Profile/Edit.jsx                                    (modify: prefs + webhook URL)
-resources/js/hooks/useNotifications.test.jsx                           (new; Vitest)
-resources/js/Components/NotificationBell.test.jsx                      (new; Vitest)
-tests/Feature/Notifications/NotificationPreferenceTest.php             (new)
-tests/Feature/Notifications/NotificationDispatchTest.php               (new)
-tests/Feature/Notifications/WebhookChannelTest.php                     (new)
-tests/Feature/Notifications/NotificationsControllerTest.php            (new)
-tests/Feature/Notifications/NotificationPreferencesControllerTest.php  (new)
-tests/Feature/Notifications/SslExpiringSchedulerTest.php               (new)
-tests/Feature/Notifications/BroadcastChannelAuthTest.php               (new)
+database/migrations/XXXX_create_notifications_table.php                (new — artisan generated + index added)
+database/migrations/XXXX_add_webhook_url_to_users_table.php            (new)
+database/migrations/XXXX_create_notification_preferences_table.php     (new)
+app/Models/NotificationPreference.php                                   (new)
+app/Models/User.php                                                     (modify: $fillable, $hidden, casts + webhook_url)
+app/Models/Website.php                                                  (modify: user() select += email)
+app/Notifications/OperationFinishedNotification.php                     (new)
+app/Notifications/SslIssuedNotification.php                             (new; stub — no dispatch seam)
+app/Notifications/SslExpiringNotification.php                           (new; scheduler dispatches)
+app/Notifications/Fail2banBanNotification.php                           (new; stub)
+app/Notifications/ResourceThresholdNotification.php                     (new; stub)
+app/Notifications/BackupResultNotification.php                          (new; stub)
+app/Notifications/DeployResultNotification.php                          (new; stub)
+app/Notifications/Channels/WebhookChannel.php                           (new; SSRF-safe)
+app/Services/Notifications/NotificationService.php                      (new; alias→FQCN map)
+app/Events/NotificationCreated.php                                      (new; ShouldBroadcastNow)
+app/Observers/NotificationsObserver.php                                 (new; broadcast in try/catch)
+app/Http/Controllers/NotificationsController.php                        (new)
+app/Http/Controllers/NotificationPreferencesController.php              (new; webhookUrl prop + updateWebhook)
+routes/web.php                                                          (modify: read-all BEFORE {id}/read; prefs routes)
+routes/channels.php                                                     (modify: notifications.{userId} personal-only)
+app/Jobs/OperationJob.php                                               (modify: notifyUser + maybeNotify)
+app/Jobs/GenerateSslOperationJob.php                                    (modify: set notifyUser; no SslIssuedNotification)
+app/Providers/AppServiceProvider.php                                    (modify: register NotificationsObserver)
+app/Http/Middleware/HandleInertiaRequests.php                           (modify: share notifications.unreadCount)
+bootstrap/app.php                                                       (modify: ssl-expiry schedule entry)
+resources/js/hooks/useNotifications.js                                  (new)
+resources/js/Components/NotificationBell.jsx                            (new; prop override for testability)
+resources/js/Layouts/Partials/TopNavi.jsx                               (modify: add NotificationBell)
+resources/js/Pages/Notifications/Index.jsx                              (new)
+resources/js/Pages/Profile/Notifications.jsx                            (new; reads webhookUrl prop not auth.user)
+resources/js/Pages/Profile/Edit.jsx                                     (modify: link to /profile/notifications)
+resources/js/hooks/useNotifications.test.jsx                            (new; Vitest)
+resources/js/Components/NotificationBell.test.jsx                       (new; Vitest)
+tests/Feature/Notifications/NotificationPreferenceTest.php              (new)
+tests/Feature/Notifications/NotificationDispatchTest.php                (new)
+tests/Feature/Notifications/WebhookChannelTest.php                      (new; includes system test)
+tests/Feature/Notifications/NotificationsControllerTest.php             (new; no .skip())
+tests/Feature/Notifications/NotificationPreferencesControllerTest.php   (new)
+tests/Feature/Notifications/SslExpiringSchedulerTest.php                (new)
+tests/Feature/Notifications/BroadcastChannelAuthTest.php                (new)
+tests/Feature/Notifications/OperationJobNotificationTest.php            (new)
+tests/Feature/Notifications/ObserverBroadcastTest.php                   (new)
 ```
 
 ## Boundary with `monitoring-alerts` (#11)
 
-`monitoring-alerts` (#11) owns:
-- Reading `failed_jobs` and deciding whether a failure is alert-worthy.
-- Evaluating CPU/disk/memory thresholds against the `SystemStatsService` data.
-- Scheduling periodic resource-check runs.
-
-`notifications` (#12) owns:
-- How to deliver a triggered alert to a user (database / mail / webhook).
-- The in-app notification center UI.
-- Per-user delivery preferences.
-
-The seam: `monitoring-alerts` calls `NotificationService::dispatch($user, new ResourceThresholdNotification(...))` when it decides a threshold has been crossed. `#12` provides that service and the notification class stub; `#11` provides the dispatch call site and the threshold logic. They can ship in either order — stubs in `#12` allow `#11` to wire into a real delivery channel immediately.
+`monitoring-alerts` (#11) owns threshold evaluation, scheduling of resource checks, and deciding when to alert. `notifications` (#12) owns delivery (database / mail / webhook), the in-app center UI, and per-user delivery preferences. The seam: `#11` calls `NotificationService::dispatch($user, new ResourceThresholdNotification(...))`. `#12` provides the service and the stub class; `#11` provides the dispatch call site and threshold logic.
 
 ## Out of Scope (Later)
 
-- Push notifications (browser/mobile) — not on this host's stack.
-- Admin broadcast to all users — design it if teams/RBAC (#17) introduces a need.
-- Notification grouping / digest mode — add if volume becomes noisy after several event sources are live.
-- Signed/HMAC-verified webhook delivery (like GitHub webhooks) — add to `WebhookChannel` if requested; the stub URL is the simplest secure approach for a self-hosted panel.
-
-## Open Questions
-
-1. **Bell interaction — page vs dropdown:** does clicking the bell navigate to `/notifications` (simplest, reuses `Notifications/Index.jsx`) or open a slide-out dropdown with the last 5 unread items + "View all" link? The dropdown is better UX but adds a more complex React component; the page is simpler. Recommend: page for v1, upgrade to dropdown later.
-2. **Webhook URL sensitivity:** should `webhook_url` use an `encrypted` cast (to protect Slack incoming-webhook tokens at rest in the DB)? The database is on the same host, so the threat model is limited, but Slack tokens are arguably secrets. Decision needed before migration is written.
-3. **`NotificationsObserver` registration:** register in `AppServiceProvider::boot()` via `DatabaseNotification::observe(NotificationsObserver::class)`, or use a model lifecycle hook in `NotificationPreference`? The Observer approach is cleaner; confirm no conflict with `lab404/laravel-impersonate`.
-4. **Shared prop cost:** `HandleInertiaRequests::share()` adding `notifications.unreadCount` fires a COUNT query on every Inertia page load. Acceptable for v1 (one cheap indexed query). Confirm this is tolerable or cache with a 30-second TTL in a later pass.
-5. **`ShouldBroadcastNow` vs `ShouldBroadcast`:** `NotificationCreated` using `ShouldBroadcastNow` bypasses the queue (immediate delivery, no queue worker lag for the bell bump). This is the right call for a count-only event, but confirm it works when Reverb is under load.
-6. **`OperationJob` hook design:** the `protected ?User $notifyUser` property requires subclasses to set it explicitly. Alternative: `handle()` always notifies `$this->operation->user` on terminal status, with a per-subclass opt-out. The explicit opt-in is safer (avoids surprising behavior for jobs that don't want notifications), but the opt-out default would auto-wire all future `OperationJob` subclasses. Which default is preferred?
+- Push notifications (browser/mobile).
+- Admin broadcast to all users.
+- Notification grouping / digest mode.
+- Signed/HMAC-verified webhook delivery.
+- Dropdown bell (v1 uses page navigation; upgrade later).

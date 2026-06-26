@@ -102,3 +102,36 @@
 - **Plans are over-specified** — all five embed speculative implementation code instead of a concise phased task list with acceptance criteria (the template's shape). Revision should trim to tasks + acceptance, not full code.
 - **Recurring real bugs:** secrets passed as process argv (db, backups, pg); raw SQL interpolation (db charset/collation, backups restore); `scopeMine()` admin-passthrough used where per-user isolation is required (user-analytics); the redundant sudoers drop-in vs the existing `*.sh` wildcard (backups, cron) — the wildcard should be narrowed once, project-wide.
 - **Process::fake() / vacuous tests** masked several of the above — revised plans must include at least one real-system (LARANODE_SYSTEM_TESTS) integration test per system-touching path.
+
+---
+
+# Post-revision re-review (2026-06-26)
+
+Revision pass applied the must-fixes + defaults and trimmed the plans. Re-review verdicts: **all five now `minor-fixes`** — no `major`, no critical security blockers (all original injection/SSRF/privilege/secret issues confirmed resolved). Remaining punch-list below — **resolve at build time** (each becomes a builder acceptance item). 🟠 = genuine bug, ▫ = spec clarification.
+
+## #2 db-relational-engines
+- ▫ Postgres password: spec lists TWO methods (`\password` stdin vs dollar-tag `ALTER ROLE`). Pick ONE (dollar-tag `ALTER ROLE` fed via stdin/0600 file); never pass via `psql` argv.
+- 🟠 Provision the `laranode_pg_reader` stats role (CREATE ROLE + GRANT CONNECT + SELECT on `pg_stat_*`) in `laranode-installer.sh` AND `local-dev/entrypoint-setup.sh`, or `PostgresIntegrationTest` fails.
+- 🟠 Postgres service detection: Ubuntu uses the versioned unit `postgresql@16-main`, not `postgresql` — `available()` must try both candidate names.
+- ▫ `mariadb_admin` connection must set `driver=mariadb` (not `mysql`).
+- ▫ Add `EngineManager::for(null|'')` → mysql guard test; cache `available()` per request (avoid 3× `systemctl` per FormRequest).
+- ▫ Task 9: atomically REPLACE the old `mysql.*` route block (delete + add aliases in one commit) — avoid double-registration. Fix the "admin listing preserved" wording (it's a corrected bug: admins now see all rows).
+
+## #9 backups
+- 🟠 S3 disk in the queue worker: `BackupJob`/`RestoreJob` run in the worker where the request/scheduler-registered `backups_s3` disk does NOT exist. The job must re-register the disk at `run()` start from encrypted creds on the `ScheduledBackup`/`Backup` row. Make concrete or all S3 paths throw.
+- ▫ Nav link goes in `resources/js/Layouts/Partials/SidebarNavi.jsx`, not `AuthenticatedLayout.jsx`.
+- ▫ Spec says "3 scripts" but there are 4 backup scripts in the sudoers drop-in. Declare `dragonmantank/cron-expression` directly (or validate via native Schedule).
+
+## #10 cron-tasks
+- 🟠 Create the `Operation` row BEFORE `DB::transaction` (a rollback inside the txn destroys it and `markFinished` no-ops). Txn wraps only `CronJob::create` + sync.
+- 🟠 `DeleteCronJobService` must EXCLUDE the job being deleted from the re-sync (delete row first, then re-sync; restore on failure).
+- 🟠 `local-dev/entrypoint-setup.sh` must grant the `laranode-cron.sh` sudo (currently only the installer is updated) or system tests have no sudo.
+- ▫ Wrap `toggleActive` in a transaction; remove the phantom `DeleteCronJobRequest` reference; document that the per-user cap check uses the actor id under impersonation.
+
+## #12 notifications
+- ▫ Document the DNS-rebinding TOCTOU caveat (low severity self-hosted) + optionally a socket-bound HTTP client; add an IPv6 `http://[::1]/` SSRF test case.
+- ▫ Specify `SslExpiringNotification` payload (`toDatabase` keys); note the dual scheme-validation (controller 422 + channel guard) is intentional defence-in-depth.
+
+## #13 user-analytics
+- 🟠 `websiteRoot` null-path (revision regression): `UserSiteStatsService` must eager-load `->with('user')` OR build the path from `$user->homedir.'/domains/'.$site->url` — else `du` fails in prod (`Process::fake` masks it).
+- ▫ Align test inventory (`RollupServiceTest` listed in spec); parse `wc -l` via `(int) trim($output)` (leading whitespace).
