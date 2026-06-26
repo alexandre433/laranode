@@ -82,7 +82,8 @@ test('MysqlBackupDriver throws RuntimeException on nonzero exit code', function 
 // ─────────────────────────────────────────────────────────────────────────────
 
 test('a class implementing BackupEngineDriver satisfies the interface contract', function () {
-    $null = new class implements BackupEngineDriver {
+    $null = new class implements BackupEngineDriver
+    {
         public function dump(string $dbName, string $dbUser, string $cnfFile, callable $emit): string
         {
             $emit('noop');
