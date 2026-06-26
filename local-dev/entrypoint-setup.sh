@@ -29,7 +29,7 @@ log "enabling + starting core services"
 sed -i 's/ENABLED="false"/ENABLED="true"/' /etc/default/sysstat || true
 systemctl enable --now apache2 mysql php8.4-fpm sysstat
 
-# --- PostgreSQL: start + provision ---
+# --- PostgreSQL: start ---
 log "starting postgresql@16-main"
 systemctl enable --now postgresql@16-main
 
@@ -40,8 +40,26 @@ for i in $(seq 1 30); do
 done
 sudo -u postgres psql -c "SELECT 1" >/dev/null 2>&1 || { log "ERROR: postgresql did not start"; exit 1; }
 
-# Provision pgsql_admin stats-reader role (idempotent)
-# Password is read from .env.docker (already loaded above as $PGSQL_PASSWORD).
+# --- wait for mysql socket ---
+log "waiting for mysql..."
+for i in $(seq 1 30); do
+  mysqladmin -u root ping >/dev/null 2>&1 && break
+  sleep 1
+done
+mysqladmin -u root ping >/dev/null 2>&1 || { log "ERROR: mysql did not start"; exit 1; }
+
+# --- load env (for DB_PASSWORD, ADMIN_*, PGSQL_PASSWORD, etc.) ---
+set -a; . "$PANEL/local-dev/.env.docker"; set +a
+
+# --- linux-native bin dir with executable scripts + patched ssl-manager ---
+log "populating $BIN"
+mkdir -p "$BIN"
+cp -f /opt/laranode/bin-src/*.sh "$BIN"/
+cp -f "$PANEL/local-dev/bin/laranode-ssl-manager.sh" "$BIN/laranode-ssl-manager.sh"
+chmod -R 0755 "$BIN"
+
+# --- PostgreSQL: provision stats-reader role ---
+# PGSQL_PASSWORD is now available from .env.docker (loaded above).
 log "provisioning laranode_pg_reader role"
 PGSQL_PASSWORD="${PGSQL_PASSWORD:-pg_reader_local_dev}"
 PG_TAG=$(head -c 16 /dev/urandom | base64 | tr -dc 'a-z' | head -c 8)
@@ -62,29 +80,11 @@ log "writing postgres sudoers"
 cp -f "$PANEL/laranode-scripts/bin/laranode-postgres-sudoers" /etc/sudoers.d/laranode-postgres
 chmod 440 /etc/sudoers.d/laranode-postgres
 
-# Smoke test (uses the BIN path that entrypoint populates at runtime)
+# Smoke test (BIN is now populated above)
 log "postgres smoke test"
 sudo "$BIN/laranode-postgres.sh" create-db ln_smoke_test UTF8 en_US.UTF-8
 sudo "$BIN/laranode-postgres.sh" drop-db ln_smoke_test
 log "postgres smoke test PASSED"
-
-# --- wait for mysql socket ---
-log "waiting for mysql..."
-for i in $(seq 1 30); do
-  mysqladmin -u root ping >/dev/null 2>&1 && break
-  sleep 1
-done
-mysqladmin -u root ping >/dev/null 2>&1 || { log "ERROR: mysql did not start"; exit 1; }
-
-# --- load env (for DB_PASSWORD, ADMIN_*, etc.) ---
-set -a; . "$PANEL/local-dev/.env.docker"; set +a
-
-# --- linux-native bin dir with executable scripts + patched ssl-manager ---
-log "populating $BIN"
-mkdir -p "$BIN"
-cp -f /opt/laranode/bin-src/*.sh "$BIN"/
-cp -f "$PANEL/local-dev/bin/laranode-ssl-manager.sh" "$BIN/laranode-ssl-manager.sh"
-chmod -R 0755 "$BIN"
 
 # --- container sudoers (www-data runs the scripts; mirrors installer line 172 + new path) ---
 log "writing sudoers"

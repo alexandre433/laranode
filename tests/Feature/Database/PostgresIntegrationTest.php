@@ -80,23 +80,65 @@ test('postgres full lifecycle: create index delete with security assertions', fu
     expect($connectFailed)->toBeTrue('REVOKE CONNECT FROM PUBLIC should prevent the stats-reader role from connecting to the new database');
 
     // ---- SECURITY: Password not visible in process list during create ----
-    // The password must not appear in /proc/*/cmdline (it should have been passed via stdin).
-    // We re-create on a different db to observe the process list, but since the test runs
-    // synchronously, we verify this by asserting the password was not in the last create
-    // process command via checking /proc entries for psql commands that might have leaked it.
-    // Note: since the system test is synchronous, the process is already done.
-    // We instead verify through the script design: 'update-user-password' uses stdin.
-    // The real check here is that the laranode-postgres.sh never passes password as argv.
-    // We verify by examining the script source.
-    $scriptPath = config('laranode.laranode_bin_path').'/laranode-postgres.sh';
+    // We spawn a background password-change operation and concurrently scan /proc/*/cmdline
+    // to confirm the password never appears in any process argument list.
+    // update-user-password reads the password from stdin (never argv), so no psql
+    // process should carry the plaintext password in its command line.
+    $monitorPassword = 'MonitorSecret_'.$uniqueSuffix.'_xyz987';
+    $passwordFoundInProc = false;
 
-    if (file_exists($scriptPath)) {
-        $scriptContent = file_get_contents($scriptPath);
-        // Script must NOT pass password as a positional argument to psql
-        // It should use stdin (via heredoc or pipe)
-        expect($scriptContent)->not->toContain('psql -c "ALTER ROLE')
-            ->and($scriptContent)->toContain('password=$(cat)');
+    // Write a short monitor script that scans /proc/*/cmdline for the password
+    // and writes "FOUND" to a temp file if it appears.
+    $monitorOutput = sys_get_temp_dir().'/pg_proc_check_'.$uniqueSuffix.'.txt';
+    $monitorScript = sys_get_temp_dir().'/pg_proc_monitor_'.$uniqueSuffix.'.sh';
+
+    file_put_contents($monitorScript, <<<BASH
+        #!/usr/bin/env bash
+        FOUND=0
+        for i in \$(seq 1 50); do
+            for f in /proc/*/cmdline; do
+                if strings "\$f" 2>/dev/null | grep -qF '{$monitorPassword}'; then
+                    FOUND=1
+                    break 2
+                fi
+            done
+            sleep 0.05
+        done
+        echo "\$FOUND" > '{$monitorOutput}'
+        BASH);
+    chmod($monitorScript, 0755);
+
+    // Start the monitor in the background
+    $monitorPid = null;
+    $descriptors = [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']];
+    $monitorProc = proc_open("bash {$monitorScript}", $descriptors, $pipes);
+    if (is_resource($monitorProc)) {
+        $status = proc_get_status($monitorProc);
+        $monitorPid = $status['pid'];
     }
+
+    // Run update-user-password — password travels via stdin only
+    $scriptPath = config('laranode.laranode_bin_path').'/laranode-postgres.sh';
+    $result = \Illuminate\Support\Facades\Process::pipe(function ($pipe) use ($monitorPassword, $dbUser, $scriptPath) {
+        $pipe->command("printf '%s' ".escapeshellarg($monitorPassword));
+        $pipe->command("sudo {$scriptPath} update-user-password ".escapeshellarg($dbUser));
+    });
+
+    // Wait for the monitor to finish
+    if (is_resource($monitorProc)) {
+        proc_close($monitorProc);
+    }
+
+    // Check monitor result
+    if (file_exists($monitorOutput)) {
+        $passwordFoundInProc = trim(file_get_contents($monitorOutput)) === '1';
+        @unlink($monitorOutput);
+    }
+    @unlink($monitorScript);
+
+    expect($passwordFoundInProc)->toBeFalse(
+        'Password must not appear in /proc/*/cmdline — it must be passed via stdin, not as an argument'
+    );
 
     // ---- INDEX: non-admin sees own row, admin sees all ----
     $manager = app(EngineManager::class);
