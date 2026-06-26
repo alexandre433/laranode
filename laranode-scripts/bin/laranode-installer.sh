@@ -165,11 +165,55 @@ systemctl restart apache2
 
 echo -e "\033[34m"
 echo "--------------------------------------------------------------------------------"
+echo "Installing PostgreSQL client"
+echo "--------------------------------------------------------------------------------"
+echo -e "\033[0m"
+
+apt install -y postgresql-client
+
+echo -e "\033[34m"
+echo "--------------------------------------------------------------------------------"
+echo "Provisioning PostgreSQL stats-reader role (laranode_pg_reader)"
+echo "--------------------------------------------------------------------------------"
+echo -e "\033[0m"
+
+# Enable and start the versioned unit for Ubuntu 24.04 (so it survives reboots)
+systemctl enable --now postgresql@16-main 2>/dev/null || systemctl enable --now postgresql || true
+
+# Generate a random password for the stats-reader role and write it to .env
+PGSQL_READER_PASS=$(openssl rand -base64 18)
+PGSQL_PG_TAG=$(head -c 16 /dev/urandom | base64 | tr -dc 'a-z' | head -c 8)
+sudo -u postgres psql -v ON_ERROR_STOP=1 --dbname=postgres <<SQL
+DO \$\$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'laranode_pg_reader') THEN
+        CREATE ROLE laranode_pg_reader LOGIN;
+    END IF;
+END\$\$;
+ALTER ROLE laranode_pg_reader PASSWORD \$${PGSQL_PG_TAG}\$${PGSQL_READER_PASS}\$${PGSQL_PG_TAG}\$;
+GRANT CONNECT ON DATABASE postgres TO laranode_pg_reader;
+GRANT pg_read_all_stats TO laranode_pg_reader;
+SQL
+
+# Write the generated password into .env so the pgsql_admin connection can authenticate
+if [ -f /home/laranode_ln/panel/.env ]; then
+    sed -i "s#^PGSQL_PASSWORD=.*#PGSQL_PASSWORD=\"${PGSQL_READER_PASS}\"#" /home/laranode_ln/panel/.env || \
+        echo "PGSQL_PASSWORD=\"${PGSQL_READER_PASS}\"" >> /home/laranode_ln/panel/.env
+fi
+
+echo -e "\033[34m"
+echo "--------------------------------------------------------------------------------"
 echo "Adding www-data to sudoers and allowing to run laranode scripts"
 echo "--------------------------------------------------------------------------------"
 echo -e "\033[0m"
 
 echo "www-data ALL=(ALL) NOPASSWD: /home/laranode_ln/panel/laranode-scripts/bin/*.sh, /usr/sbin/a2dissite, /bin/rm /etc/apache2/sites-available/*.conf" >> /etc/sudoers
+
+# Postgres sudoers drop-in (separate file for easy auditing)
+PANEL_PATH=/home/laranode_ln/panel
+install -m 440 /dev/null /etc/sudoers.d/laranode-postgres
+echo "www-data ALL=(ALL) NOPASSWD: ${PANEL_PATH}/laranode-scripts/bin/laranode-postgres.sh" \
+    > /etc/sudoers.d/laranode-postgres
 
 echo -e "\033[34m"
 echo "--------------------------------------------------------------------------------"
