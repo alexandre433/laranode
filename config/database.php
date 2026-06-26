@@ -119,9 +119,9 @@ return [
         'mysql_admin' => [
             'driver' => 'mysql',
             'url' => null,
-            'host' => env('DB_HOST', '127.0.0.1'),
-            'port' => env('DB_PORT', '3306'),
-            'database' => env('DB_DATABASE', 'laravel'),
+            'host' => env('MYSQL_ADMIN_HOST', env('DB_HOST', '127.0.0.1')),
+            'port' => env('MYSQL_ADMIN_PORT', env('DB_PORT', '3306')),
+            'database' => env('MYSQL_ADMIN_DB', 'mysql'),
             'username' => env('MYSQL_ADMIN_USERNAME', env('DB_USERNAME', 'root')),
             'password' => env('MYSQL_ADMIN_PASSWORD', env('DB_PASSWORD', '')),
             'unix_socket' => env('DB_SOCKET', ''),
@@ -131,17 +131,21 @@ return [
             'prefix_indexes' => true,
             'strict' => true,
             'engine' => null,
+            // PDO_EMULATE_PREPARES enables client-side binding for DDL statements
+            // like "CREATE USER ... IDENTIFIED BY ?" which MySQL's server-side
+            // prepared statement protocol does not support for DDL clauses.
             'options' => extension_loaded('pdo_mysql') ? array_filter([
                 PDO::MYSQL_ATTR_SSL_CA => env('MYSQL_ATTR_SSL_CA'),
-            ]) : [],
+                PDO::ATTR_EMULATE_PREPARES => true,
+            ]) : [PDO::ATTR_EMULATE_PREPARES => true],
         ],
 
         'mariadb_admin' => [
             'driver' => 'mariadb',
             'url' => null,
-            'host' => env('DB_HOST', '127.0.0.1'),
-            'port' => env('DB_PORT', '3306'),
-            'database' => env('DB_DATABASE', 'laravel'),
+            'host' => env('MYSQL_ADMIN_HOST', env('DB_HOST', '127.0.0.1')),
+            'port' => env('MYSQL_ADMIN_PORT', env('DB_PORT', '3306')),
+            'database' => env('MYSQL_ADMIN_DB', 'mysql'),
             'username' => env('MYSQL_ADMIN_USERNAME', env('DB_USERNAME', 'root')),
             'password' => env('MYSQL_ADMIN_PASSWORD', env('DB_PASSWORD', '')),
             'unix_socket' => env('DB_SOCKET', ''),
@@ -153,7 +157,8 @@ return [
             'engine' => null,
             'options' => extension_loaded('pdo_mysql') ? array_filter([
                 PDO::MYSQL_ATTR_SSL_CA => env('MYSQL_ATTR_SSL_CA'),
-            ]) : [],
+                PDO::ATTR_EMULATE_PREPARES => true,
+            ]) : [PDO::ATTR_EMULATE_PREPARES => true],
         ],
 
         'pgsql_admin' => [
