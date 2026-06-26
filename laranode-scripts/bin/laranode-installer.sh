@@ -210,7 +210,12 @@ echo -e "\033[0m"
 # Install explicit sudoers drop-in (replaces the old monolithic wildcard in /etc/sudoers
 # and the separate laranode-postgres drop-in). visudo -c validates syntax before copy.
 PANEL_PATH=/home/laranode_ln/panel
-install -m 440 "${PANEL_PATH}/laranode-scripts/etc/sudoers.d/laranode-panel" /etc/sudoers.d/laranode-panel
+SUDOERS_SRC="${PANEL_PATH}/laranode-scripts/etc/sudoers.d/laranode-panel"
+if ! visudo -c -f "${SUDOERS_SRC}"; then
+    echo "ERROR: sudoers file failed syntax check — aborting install" >&2
+    exit 1
+fi
+install -m 440 "${SUDOERS_SRC}" /etc/sudoers.d/laranode-panel
 # Remove legacy drop-in if it exists
 rm -f /etc/sudoers.d/laranode-postgres
 
