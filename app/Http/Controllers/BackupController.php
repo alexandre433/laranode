@@ -22,12 +22,14 @@ class BackupController extends Controller
 {
     public function index(Request $request): \Inertia\Response
     {
-        $backups = Backup::scopeMine(Backup::query())
+        $backups = Backup::query()
+            ->mine()
             ->with('operation')
             ->latest()
             ->paginate(20);
 
-        $schedules = ScheduledBackup::scopeMine(ScheduledBackup::query())
+        $schedules = ScheduledBackup::query()
+            ->mine()
             ->latest()
             ->get();
 
