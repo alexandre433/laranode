@@ -21,6 +21,11 @@ class Backup extends Model
         'target',
         'storage',
         'disk_name',
+        's3_key',
+        's3_secret',
+        's3_region',
+        's3_bucket',
+        's3_endpoint',
         'path',
         'size_bytes',
         'status',
@@ -32,7 +37,33 @@ class Backup extends Model
 
     protected $casts = [
         'size_bytes' => 'integer',
+        's3_key' => 'encrypted',
+        's3_secret' => 'encrypted',
     ];
+
+    /**
+     * Build the Laravel filesystem disk config array for S3 backups.
+     * Returns null when this backup uses local storage (no S3 creds stored).
+     *
+     * @return array<string,mixed>|null
+     */
+    public function s3DiskConfig(): ?array
+    {
+        if ($this->storage !== 's3' || ! $this->s3_key) {
+            return null;
+        }
+
+        return [
+            'driver' => 's3',
+            'key' => $this->s3_key,
+            'secret' => $this->s3_secret,
+            'region' => $this->s3_region ?? 'us-east-1',
+            'bucket' => $this->s3_bucket ?? '',
+            'url' => $this->s3_endpoint ?: null,
+            'endpoint' => $this->s3_endpoint ?: null,
+            'use_path_style_endpoint' => ! empty($this->s3_endpoint),
+        ];
+    }
 
     public function user(): BelongsTo
     {

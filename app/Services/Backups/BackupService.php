@@ -7,14 +7,14 @@ use App\Models\Backup;
 use App\Models\Operation;
 use App\Models\User;
 use Exception;
-use Illuminate\Support\Facades\Config;
 
 class BackupException extends Exception {}
 
 class BackupService
 {
     /**
-     * Create the Backup + Operation rows, register any runtime S3 disk, and dispatch BackupJob.
+     * Create the Backup + Operation rows, persist any S3 credentials (encrypted),
+     * register a runtime disk when needed, and dispatch BackupJob.
      *
      * @param  array{type: string, target: string, storage: string, s3_key?: string, s3_secret?: string, s3_region?: string, s3_bucket?: string, s3_endpoint?: string}  $data
      */
@@ -23,21 +23,8 @@ class BackupService
         $storage = $data['storage'] ?? 'local';
 
         if ($storage === 's3') {
-            // Register a runtime S3 disk from the request params (not persisted to config file).
-            // BackupJob will re-register it at run() time by reading credentials off the Backup row.
-            // For on-demand backups we register it now so the disk name is resolvable immediately.
+            // Each user gets a deterministic disk name so tests can assert on it.
             $diskName = 'backups_s3_'.$user->id;
-
-            Config::set("filesystems.disks.{$diskName}", [
-                'driver' => 's3',
-                'key' => $data['s3_key'] ?? '',
-                'secret' => $data['s3_secret'] ?? '',
-                'region' => $data['s3_region'] ?? 'us-east-1',
-                'bucket' => $data['s3_bucket'] ?? '',
-                'url' => $data['s3_endpoint'] ?? null,
-                'endpoint' => $data['s3_endpoint'] ?? null,
-                'use_path_style_endpoint' => ! empty($data['s3_endpoint']),
-            ]);
         } else {
             $diskName = 'backups';
         }
@@ -49,6 +36,9 @@ class BackupService
             'status' => 'queued',
         ]);
 
+        // S3 credentials are stored encrypted on the Backup row so BackupJob can
+        // re-register the disk inside the queue worker process (where the Config
+        // set during the request is no longer present).
         $backup = Backup::create([
             'user_id' => $user->id,
             'operation_id' => $operation->id,
@@ -56,6 +46,11 @@ class BackupService
             'target' => $data['target'] ?? '',
             'storage' => $storage,
             'disk_name' => $diskName,
+            's3_key' => $data['s3_key'] ?? null,
+            's3_secret' => $data['s3_secret'] ?? null,
+            's3_region' => $data['s3_region'] ?? null,
+            's3_bucket' => $data['s3_bucket'] ?? null,
+            's3_endpoint' => $data['s3_endpoint'] ?? null,
             'status' => 'pending',
         ]);
 
