@@ -9,7 +9,7 @@ All six are **XL** and all build on the shipped `platform-async-progress` founda
 
 ---
 
-## #14 · `dns-zones` — DNS Zone Management
+## #16 · `dns-zones` — DNS Zone Management
 
 **Summary:** Authoritative DNS for domains hosted on the single host, using BIND9 (`named`) with zone files under `/etc/bind/zones/`. Full CRUD for zones + records (A/AAAA/CNAME/MX/TXT/SRV/CAA), safe reload via `rndc`, optional auto-zone creation on website add, optional DNSSEC signing — wired through the sudo-script + Service + OperationJob + Reverb audit pattern.
 
@@ -54,7 +54,7 @@ All six are **XL** and all build on the shipped `platform-async-progress` founda
 
 ---
 
-## #15 · `teams-rbac` — Teams & Granular RBAC
+## #17 · `teams-rbac` — Teams & Granular RBAC
 
 **Summary:** Extends the binary admin|user model with teams (orgs), per-team member roles (owner/developer/viewer), and per-resource collaborator grants on websites + databases, with least-privilege enforcement.
 
@@ -91,7 +91,7 @@ All six are **XL** and all build on the shipped `platform-async-progress` founda
 
 ---
 
-## #16 · `app-installers` — One-Click App Installers
+## #18 · `app-installers` — One-Click App Installers
 
 **Summary:** Install common web apps (WordPress first; then Laravel skeleton / phpMyAdmin) into an existing website docroot: download release, provision a DB via `CreateDatabaseService`, generate config (wp-config.php etc.), chown to the site's `{username}_ln` user, optionally update document_root — streamed live via OperationJob so every install hits the audit log.
 
@@ -129,7 +129,7 @@ All six are **XL** and all build on the shipped `platform-async-progress` founda
 
 ---
 
-## #17 · `waf-modsecurity` — WAF / ModSecurity v3 + OWASP CRS
+## #19 · `waf-modsecurity` — WAF / ModSecurity v3 + OWASP CRS
 
 **Summary:** Install libmodsecurity3 + Apache mod-security2 connector + OWASP CRS globally, then per-vhost enable/disable, paranoia-level selection, rule exclusions, and an audit-log viewer — via the existing sudo-script + Service + OperationJob + Reverb + audit pattern.
 
@@ -171,7 +171,7 @@ All six are **XL** and all build on the shipped `platform-async-progress` founda
 
 ---
 
-## #18 · `staging-environments` — Staging Environments
+## #20 · `staging-environments` — Staging Environments
 
 **Summary:** Per-site staging copy: clone files + DB into a `staging.{url}` vhost owned by the same `{username}_ln` account, with promote-to-prod and sync-from-prod. Each op (clone/promote/sync) is a queued OperationJob with live progress + audit row.
 
@@ -214,7 +214,7 @@ All six are **XL** and all build on the shipped `platform-async-progress` founda
 
 ---
 
-## #19 · `email-server` — Email (Postfix + Dovecot)
+## #21 · `email-server` — Email (Postfix + Dovecot)
 
 **Summary:** Full mail stack: Postfix SMTP + Dovecot IMAP/POP3, per-domain virtual mailboxes + aliases under each `{username}_ln` homedir, DKIM via OpenDKIM, TLS via existing certbot certs, Rspamd spam filtering, DNS record guidance (SPF/DMARC/PTR), optional Roundcube webmail. Every destructive mutation is an OperationJob with live progress + audit.
 
@@ -264,5 +264,5 @@ All six are **XL** and all build on the shipped `platform-async-progress` founda
 - **All six are XL and all consume the foundation** — none are quick wins. Sequencing matters more than parallelism.
 - **Recurring footgun: destructive ops** (promote, domain/zone/Maildir removal, WAF enforce) → every one needs explicit confirmation tokens + (ideally) a backup snapshot step. This argues for shipping **`backups` (#9)** before staging/mail.
 - **Template-regeneration races** (WAF + SSL on the same vhost file) → a shared, mutex-guarded vhost-render path is worth extracting before WAF.
-- **DNS is a soft prerequisite for mail** (MX/SPF/DKIM/DMARC) — #14 before #19 improves the mail UX even though mail can surface values without it.
+- **DNS is a soft prerequisite for mail** (MX/SPF/DKIM/DMARC) — #16 before #21 improves the mail UX even though mail can surface values without it.
 - **`teams-rbac` wants the DB morph key frozen** → after the DB-driver abstraction.
