@@ -2,9 +2,13 @@
 
 namespace App\Providers;
 
+use App\Models\Backup;
 use App\Models\Database;
+use App\Models\ScheduledBackup;
 use App\Models\Website;
+use App\Policies\BackupPolicy;
 use App\Policies\DatabasePolicy;
+use App\Policies\ScheduledBackupPolicy;
 use App\Policies\WebsitePolicy;
 use Illuminate\Foundation\Support\Providers\AuthServiceProvider as ServiceProvider;
 
@@ -18,6 +22,8 @@ class AuthServiceProvider extends ServiceProvider
     protected $policies = [
         Website::class => WebsitePolicy::class,
         Database::class => DatabasePolicy::class,
+        Backup::class => BackupPolicy::class,
+        ScheduledBackup::class => ScheduledBackupPolicy::class,
     ];
 
     /**

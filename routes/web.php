@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AccountsController;
+use App\Http\Controllers\BackupController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DatabasesController;
 use App\Http\Controllers\FilemanagerController;
@@ -91,6 +92,17 @@ Route::middleware('auth')->group(function () {
     Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
     Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
+});
+
+// Backups [Admin | User]
+Route::middleware(['auth'])->group(function () {
+    Route::get('/backups', [BackupController::class, 'index'])->name('backups.index');
+    Route::post('/backups', [BackupController::class, 'store'])->name('backups.store');
+    Route::delete('/backups/{backup}', [BackupController::class, 'destroy'])->name('backups.destroy');
+    Route::post('/backups/{backup}/restore', [BackupController::class, 'restore'])->name('backups.restore');
+    Route::get('/backups/{backup}/download', [BackupController::class, 'download'])->name('backups.download');
+    Route::post('/backups/schedules', [BackupController::class, 'storeSchedule'])->name('backups.schedules.store');
+    Route::delete('/backups/schedules/{scheduledBackup}', [BackupController::class, 'destroySchedule'])->name('backups.schedules.destroy');
 });
 
 require __DIR__.'/auth.php';

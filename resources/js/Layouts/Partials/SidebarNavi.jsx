@@ -8,6 +8,7 @@ import { TbBrandMysql } from "react-icons/tb";
 import { MdSecurity, MdOutlineListAlt } from "react-icons/md";
 import { IoLockClosedOutline } from "react-icons/io5";
 import { TbWorldWww } from "react-icons/tb";
+import { MdBackup } from "react-icons/md";
 
 const SidebarNavi = () => {
 
@@ -134,6 +135,18 @@ const SidebarNavi = () => {
                         </Link>
                     </li>
                 )}
+
+                <li>
+                    <Link
+                        href={route('backups.index')}
+                        className="relative flex flex-row items-center h-11 focus:outline-none hover:bg-gray-900 text-gray-300 border-l-4 border-transparent hover:border-indigo-900 pr-6"
+                    >
+                        <div>
+                            <MdBackup className="ml-3 w-5 h-5" />
+                        </div>
+                        <span className="ml-2 text-sm tracking-wide truncate">Backups</span>
+                    </Link>
+                </li>
 
                 <li>
                     <Link
