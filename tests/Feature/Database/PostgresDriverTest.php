@@ -21,9 +21,14 @@ test('capabilities returns PostgreSQL label with users and encoding/locale optio
 });
 
 test('create calls create-db, create-user, grant in order and password is not in command array', function () {
-    Process::fake([
-        '*' => Process::result(exitCode: 0),
-    ]);
+    /** @var array<int, \Illuminate\Process\PendingProcess> $captured */
+    $captured = [];
+
+    Process::fake(function ($process) use (&$captured) {
+        $captured[] = $process;
+
+        return Process::result(exitCode: 0);
+    });
 
     $user = User::factory()->create();
     $spec = new DatabaseSpec(
@@ -37,25 +42,23 @@ test('create calls create-db, create-user, grant in order and password is not in
     $driver = new PostgresDriver;
     $driver->create($spec);
 
-    // Confirm create-db was called
-    Process::assertRan(function ($process) {
-        return is_array($process->command) && in_array('create-db', $process->command);
-    });
+    // Verify exactly 3 processes were called
+    expect($captured)->toHaveCount(3);
 
-    // Confirm create-user was called and password is NOT in the command array
-    Process::assertRan(function ($process) {
-        if (! is_array($process->command)) {
-            return false;
-        }
+    // Verify ordering: create-db is first
+    expect($captured[0]->command)->toContain('create-db');
 
-        return in_array('create-user', $process->command)
-            && ! in_array('super_secret_pg_password_456', $process->command);
-    });
+    // Verify ordering: create-user is second
+    expect($captured[1]->command)->toContain('create-user');
 
-    // Confirm grant was called
-    Process::assertRan(function ($process) {
-        return is_array($process->command) && in_array('grant', $process->command);
-    });
+    // Verify ordering: grant is third
+    expect($captured[2]->command)->toContain('grant');
+
+    // Password must NOT appear in the create-user command array
+    expect(in_array('super_secret_pg_password_456', $captured[1]->command))->toBeFalse();
+
+    // Password MUST be passed via stdin (not argv) to create-user
+    expect($captured[1]->input)->toBe('super_secret_pg_password_456');
 });
 
 test('non-zero exit on create-db throws CreateDatabaseException without calling create-user', function () {
@@ -150,9 +153,14 @@ test('delete calls drop-db and drop-user', function () {
 });
 
 test('updatePassword calls update-user-password action with password via stdin not argv', function () {
-    Process::fake([
-        '*' => Process::result(exitCode: 0),
-    ]);
+    /** @var array<int, \Illuminate\Process\PendingProcess> $captured */
+    $captured = [];
+
+    Process::fake(function ($process) use (&$captured) {
+        $captured[] = $process;
+
+        return Process::result(exitCode: 0);
+    });
 
     $user = User::factory()->create();
     $database = new Database([
@@ -168,13 +176,14 @@ test('updatePassword calls update-user-password action with password via stdin n
     $driver = new PostgresDriver;
     $driver->updatePassword($database, 'new_pg_secret_789');
 
-    // Password must NOT appear in the command array but is in input
-    Process::assertRan(function ($process) {
-        if (! is_array($process->command)) {
-            return false;
-        }
+    expect($captured)->toHaveCount(1);
 
-        return in_array('update-user-password', $process->command)
-            && ! in_array('new_pg_secret_789', $process->command);
-    });
+    // update-user-password action must be in the command
+    expect($captured[0]->command)->toContain('update-user-password');
+
+    // Password must NOT appear in the command array
+    expect(in_array('new_pg_secret_789', $captured[0]->command))->toBeFalse();
+
+    // Password MUST be passed via stdin
+    expect($captured[0]->input)->toBe('new_pg_secret_789');
 });
