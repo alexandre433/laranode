@@ -62,6 +62,8 @@ dataset('blocked_cron_commands', [
     'empty command'                    => ['', 'alice'],
     'php or-chain'                     => ['php /home/alice_ln/artisan || true', 'alice'],
     'php lt redirect'                  => ['php /home/alice_ln/artisan < /etc/passwd', 'alice'],
+    'path traversal dotdot'            => ['php /home/alice_ln/../other_ln/evil.php', 'alice'],
+    'path traversal to etc'            => ['php /home/alice_ln/../../etc/passwd', 'alice'],
 ]);
 
 test('AllowedCronCommand blocks disallowed commands', function (string $command, string $username) {

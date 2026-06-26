@@ -56,7 +56,15 @@ class AllowedCronCommand implements ValidationRule
             return;
         }
 
-        // The path must be within the user's own homedir
+        // The path must be within the user's own homedir.
+        // Reject any path containing '..' to prevent directory traversal bypass
+        // (e.g. 'php /home/alice_ln/../other_ln/evil.php' would otherwise pass str_starts_with).
+        if (str_contains($firstArg, '..')) {
+            $fail('The :attribute path must not contain directory traversal sequences (..).');
+
+            return;
+        }
+
         $homedir = $this->user->homedir;
 
         if (! str_starts_with($firstArg, $homedir.'/')) {
