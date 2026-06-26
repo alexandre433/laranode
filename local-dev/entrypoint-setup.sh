@@ -17,10 +17,56 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
+# --- install PostgreSQL if not present ---
+if ! dpkg -l postgresql-16 >/dev/null 2>&1; then
+    log "installing postgresql-16 + client"
+    apt-get update -qq
+    apt-get install -y -qq postgresql-16 postgresql-client-16
+fi
+
 # --- core services ---
 log "enabling + starting core services"
 sed -i 's/ENABLED="false"/ENABLED="true"/' /etc/default/sysstat || true
 systemctl enable --now apache2 mysql php8.4-fpm sysstat
+
+# --- PostgreSQL: start + provision ---
+log "starting postgresql@16-main"
+systemctl enable --now postgresql@16-main
+
+# Wait for Postgres socket
+for i in $(seq 1 30); do
+    sudo -u postgres psql -c "SELECT 1" >/dev/null 2>&1 && break
+    sleep 1
+done
+sudo -u postgres psql -c "SELECT 1" >/dev/null 2>&1 || { log "ERROR: postgresql did not start"; exit 1; }
+
+# Provision pgsql_admin stats-reader role (idempotent)
+# Password is read from .env.docker (already loaded above as $PGSQL_PASSWORD).
+log "provisioning laranode_pg_reader role"
+PGSQL_PASSWORD="${PGSQL_PASSWORD:-pg_reader_local_dev}"
+PG_TAG=$(head -c 16 /dev/urandom | base64 | tr -dc 'a-z' | head -c 8)
+sudo -u postgres psql -v ON_ERROR_STOP=1 --dbname=postgres <<SQL
+DO \$\$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'laranode_pg_reader') THEN
+        CREATE ROLE laranode_pg_reader LOGIN;
+    END IF;
+END\$\$;
+ALTER ROLE laranode_pg_reader PASSWORD \$${PG_TAG}\$${PGSQL_PASSWORD}\$${PG_TAG}\$;
+GRANT CONNECT ON DATABASE postgres TO laranode_pg_reader;
+GRANT pg_read_all_stats TO laranode_pg_reader;
+SQL
+
+# Apply postgres sudoers drop-in
+log "writing postgres sudoers"
+cp -f "$PANEL/laranode-scripts/bin/laranode-postgres-sudoers" /etc/sudoers.d/laranode-postgres
+chmod 440 /etc/sudoers.d/laranode-postgres
+
+# Smoke test (uses the BIN path that entrypoint populates at runtime)
+log "postgres smoke test"
+sudo "$BIN/laranode-postgres.sh" create-db ln_smoke_test UTF8 en_US.UTF-8
+sudo "$BIN/laranode-postgres.sh" drop-db ln_smoke_test
+log "postgres smoke test PASSED"
 
 # --- wait for mysql socket ---
 log "waiting for mysql..."
