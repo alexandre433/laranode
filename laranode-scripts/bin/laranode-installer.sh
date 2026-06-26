@@ -177,19 +177,29 @@ echo "Provisioning PostgreSQL stats-reader role (laranode_pg_reader)"
 echo "--------------------------------------------------------------------------------"
 echo -e "\033[0m"
 
-# Start the versioned unit for Ubuntu 24.04
-systemctl start postgresql@16-main 2>/dev/null || systemctl start postgresql || true
+# Enable and start the versioned unit for Ubuntu 24.04 (so it survives reboots)
+systemctl enable --now postgresql@16-main 2>/dev/null || systemctl enable --now postgresql || true
 
-sudo -u postgres psql -v ON_ERROR_STOP=1 --dbname=postgres <<'SQL'
-DO $$
+# Generate a random password for the stats-reader role and write it to .env
+PGSQL_READER_PASS=$(openssl rand -base64 18)
+PGSQL_PG_TAG=$(head -c 16 /dev/urandom | base64 | tr -dc 'a-z' | head -c 8)
+sudo -u postgres psql -v ON_ERROR_STOP=1 --dbname=postgres <<SQL
+DO \$\$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'laranode_pg_reader') THEN
         CREATE ROLE laranode_pg_reader LOGIN;
     END IF;
-END$$;
+END\$\$;
+ALTER ROLE laranode_pg_reader PASSWORD \$${PGSQL_PG_TAG}\$${PGSQL_READER_PASS}\$${PGSQL_PG_TAG}\$;
 GRANT CONNECT ON DATABASE postgres TO laranode_pg_reader;
 GRANT pg_read_all_stats TO laranode_pg_reader;
 SQL
+
+# Write the generated password into .env so the pgsql_admin connection can authenticate
+if [ -f /home/laranode_ln/panel/.env ]; then
+    sed -i "s#^PGSQL_PASSWORD=.*#PGSQL_PASSWORD=\"${PGSQL_READER_PASS}\"#" /home/laranode_ln/panel/.env || \
+        echo "PGSQL_PASSWORD=\"${PGSQL_READER_PASS}\"" >> /home/laranode_ln/panel/.env
+fi
 
 echo -e "\033[34m"
 echo "--------------------------------------------------------------------------------"
