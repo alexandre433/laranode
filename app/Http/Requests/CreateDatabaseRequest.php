@@ -73,6 +73,9 @@ class CreateDatabaseRequest extends FormRequest
             'db_pass' => ['required', 'string', 'min:8'],
             'charset' => ['required_if:engine,mysql', 'required_if:engine,mariadb', 'nullable', 'regex:/^[a-zA-Z0-9_]+$/'],
             'collation' => ['required_if:engine,mysql', 'required_if:engine,mariadb', 'nullable', 'regex:/^[a-zA-Z0-9_]+$/'],
+            // Postgres options. Nullable so the driver/script defaults (UTF8 / en_US.UTF-8) apply when omitted.
+            'encoding' => ['nullable', 'string', 'regex:/^[a-zA-Z0-9_]+$/'],
+            'locale' => ['nullable', 'string', 'regex:/^[a-zA-Z0-9_.@-]+$/'],
         ];
     }
 

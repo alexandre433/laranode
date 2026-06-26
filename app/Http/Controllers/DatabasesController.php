@@ -73,6 +73,8 @@ class DatabasesController extends Controller
             options: array_filter([
                 'charset' => $validated['charset'] ?? null,
                 'collation' => $validated['collation'] ?? null,
+                'encoding' => $validated['encoding'] ?? null,
+                'locale' => $validated['locale'] ?? null,
             ], fn ($v) => $v !== null),
         );
 

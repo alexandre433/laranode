@@ -12,6 +12,11 @@ use App\Services\Database\DeleteDatabaseService;
 use App\Services\Database\GetDatabasesWithStatsService;
 use App\Services\Database\UpdateDatabaseService;
 
+beforeEach(function () {
+    // Reset the per-request static stats cache so it never leaks across tests
+    GetDatabasesWithStatsService::clearCache();
+});
+
 /**
  * Build a stub driver that records calls and returns predictable values.
  *
