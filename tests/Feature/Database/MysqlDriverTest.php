@@ -145,3 +145,42 @@ test('updatePassword records parameterized ALTER USER statement', function () {
         expect($entry['bindings'])->toContain('new_super_secret_456');
     }
 });
+
+test('create rejects an injection-laden database name before any SQL runs', function () {
+    $recorded = [];
+    bindMysqlAdminMock($recorded);
+
+    $user = User::factory()->create();
+    $spec = new DatabaseSpec(
+        name: 'evil`; DROP DATABASE laranode; --',
+        dbUser: 'safeuser_ln',
+        password: 'whatever_pass_123',
+        userId: $user->id,
+        options: ['charset' => 'utf8mb4', 'collation' => 'utf8mb4_unicode_ci'],
+    );
+
+    expect(fn () => (new MysqlDriver)->create($spec))
+        ->toThrow(InvalidArgumentException::class);
+
+    // The unsafe identifier must be rejected before any statement is issued.
+    expect($recorded)->toBeEmpty();
+});
+
+test('create rejects an injection-laden db user before any SQL runs', function () {
+    $recorded = [];
+    bindMysqlAdminMock($recorded);
+
+    $user = User::factory()->create();
+    $spec = new DatabaseSpec(
+        name: 'safedb_ln',
+        dbUser: 'evil`@localhost; --',
+        password: 'whatever_pass_123',
+        userId: $user->id,
+        options: ['charset' => 'utf8mb4', 'collation' => 'utf8mb4_unicode_ci'],
+    );
+
+    expect(fn () => (new MysqlDriver)->create($spec))
+        ->toThrow(InvalidArgumentException::class);
+
+    expect($recorded)->toBeEmpty();
+});

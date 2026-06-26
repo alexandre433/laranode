@@ -3,7 +3,6 @@
 use App\Databases\EngineManager;
 use App\Models\Database;
 use App\Models\User;
-use Illuminate\Support\Facades\Process;
 
 beforeEach(function () {
     // Reset EngineManager singleton so each test gets a fresh instance
@@ -19,16 +18,26 @@ function fakeEngineManagerWithMysql(): void
     $manager = Mockery::mock(EngineManager::class);
     $manager->shouldReceive('available')->andReturn(['mysql' => 'mysql']);
     $manager->shouldReceive('for')->with('mysql')->andReturn(
-        new class implements \App\Contracts\DatabaseEngineDriver {
-            public function connectionName(): string { return 'mysql_admin'; }
+        new class implements \App\Contracts\DatabaseEngineDriver
+        {
+            public function connectionName(): string
+            {
+                return 'mysql_admin';
+            }
+
             public function create(\App\Databases\DatabaseSpec $spec): void {}
+
             public function updatePassword(\App\Models\Database $database, string $newPassword): void {}
+
             public function updateOptions(\App\Models\Database $database, array $options): void {}
+
             public function delete(\App\Models\Database $database): void {}
+
             public function stats(\App\Models\Database $database): \App\Databases\DatabaseStats
             {
                 return new \App\Databases\DatabaseStats(tableCount: 0, sizeMb: 0.0);
             }
+
             public function capabilities(): \App\Databases\EngineCapabilities
             {
                 return new \App\Databases\EngineCapabilities(label: 'MySQL', hasUsers: true, optionFields: ['charset', 'collation']);

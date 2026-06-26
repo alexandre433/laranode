@@ -187,3 +187,27 @@ test('updatePassword calls update-user-password action with password via stdin n
     // Password MUST be passed via stdin
     expect($captured[0]->input)->toBe('new_pg_secret_789');
 });
+
+test('create rejects an injection-laden locale before invoking the script', function () {
+    $ran = false;
+    Process::fake(function ($process) use (&$ran) {
+        $ran = true;
+
+        return Process::result(exitCode: 0);
+    });
+
+    $user = User::factory()->create();
+    $spec = new DatabaseSpec(
+        name: 'pgdb_ok',
+        dbUser: 'pguser_ok',
+        password: 'password',
+        userId: $user->id,
+        options: ['encoding' => 'UTF8', 'locale' => "en_US.UTF-8'; DROP DATABASE x; --"],
+    );
+
+    expect(fn () => (new PostgresDriver)->create($spec))
+        ->toThrow(InvalidArgumentException::class);
+
+    // Validation must happen before any sudo script is invoked.
+    expect($ran)->toBeFalse();
+});
