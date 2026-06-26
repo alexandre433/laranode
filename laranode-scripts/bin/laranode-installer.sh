@@ -207,13 +207,12 @@ echo "Adding www-data to sudoers and allowing to run laranode scripts"
 echo "--------------------------------------------------------------------------------"
 echo -e "\033[0m"
 
-echo "www-data ALL=(ALL) NOPASSWD: /home/laranode_ln/panel/laranode-scripts/bin/*.sh, /usr/sbin/a2dissite, /bin/rm /etc/apache2/sites-available/*.conf" >> /etc/sudoers
-
-# Postgres sudoers drop-in (separate file for easy auditing)
+# Install explicit sudoers drop-in (replaces the old monolithic wildcard in /etc/sudoers
+# and the separate laranode-postgres drop-in). visudo -c validates syntax before copy.
 PANEL_PATH=/home/laranode_ln/panel
-install -m 440 /dev/null /etc/sudoers.d/laranode-postgres
-echo "www-data ALL=(ALL) NOPASSWD: ${PANEL_PATH}/laranode-scripts/bin/laranode-postgres.sh" \
-    > /etc/sudoers.d/laranode-postgres
+install -m 440 "${PANEL_PATH}/laranode-scripts/etc/sudoers.d/laranode-panel" /etc/sudoers.d/laranode-panel
+# Remove legacy drop-in if it exists
+rm -f /etc/sudoers.d/laranode-postgres
 
 echo -e "\033[34m"
 echo "--------------------------------------------------------------------------------"
