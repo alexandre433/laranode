@@ -3,7 +3,7 @@
 - **Date:** 2026-06-25
 - **Status:** Agreed + in progress (umbrella roadmap; each sub-project gets its own spec → plan → build cycle)
 - **Source:** research workflow (4 codebase mappers + 3 competitor researchers + synthesis), then user prioritization.
-- **Progress (2026-06-26):** #1 `platform-async-progress` **shipped** (merged to `main`). #2 expanded to `db-relational-engines` (the seam **plus** MySQL/MariaDB/Postgres in one sub-project; SQLite + Mongo split out to later sub-projects) — design in progress (seam approved). Phase 4 split per dev-branch reconciliation: `monitoring-alerts` (#11) kept, `notifications` (#12) + `user-analytics` (#13) added as separate items (cache→14, mongo→15). **Phase 6 (#16–21) added:** the six formerly-deferred cPanel-parity pillars, promoted at user request. Full per-feature stubs: `2026-06-26-deferred-features-stubs.md`.
+- **Progress (2026-06-27):** Built via SDD + a parallel worktree+container harness (`local-dev/parallel/`). **Merged to `development`:** #1 `platform-async-progress`, #2 `db-relational-engines` (MySQL/MariaDB/Postgres), #9 `backups`, #10 `cron-tasks` — each with full Pest + Vitest + system tests + adversarial review + security hardening. **Building now in parallel worktrees:** #12 `notifications`, #13 `user-analytics`. **Phase 7 added** from a 2026-06-27 local review (14 backlog items → 3 sub-projects: `dashboard-ux-polish`, `db-service-control`, `php-runtimes`; specs+plans drafted, pending review). Phase 4 split earlier: `monitoring-alerts` (#11) + `notifications` (#12) + `user-analytics` (#13); cache→14, mongo→15. Phase 6 (#16–21) = promoted deferred pillars (stubs: `2026-06-26-deferred-features-stubs.md`). **`main` not yet advanced** (development is the integration branch).
 
 ## Objective
 
@@ -73,6 +73,16 @@ Six heavyweight pillars, all **XL**, all building on the shipped async foundatio
 19. **`waf-modsecurity`** — ModSecurity v3 + OWASP CRS, per-vhost enable + paranoia level + exclusions + audit-log viewer. *(XL. Dep: stable vhost template + SSL toggle. Footgun: CRS blocking can lock out admin → default DetectionOnly; SSL+WAF both regenerate the vhost file → mutex-guard the render.)*
 20. **`staging-environments`** — per-site staging clone (files+DB) + promote/sync, `staging.{url}` vhost. *(XL. Dep: Websites + Databases + ideally `backups` first. Footgun: promote is destructive/irreversible → confirmation token + pre-promote snapshot; serialized-PHP search-replace is fragile.)*
 21. **`email-server`** — Postfix + Dovecot, mailboxes/aliases, DKIM, TLS via certbot, Rspamd, optional Roundcube. *(XL, heaviest/riskiest → last. Dep: SSL + ideally DNS (#16). Footgun: open-relay surface, IP reputation/PTR, many VPS block outbound :25 — consider inbound-only v1 with an external relay for outbound.)*
+
+### Phase 7 — UX & runtime (from 2026-06-27 local review)
+
+Captured while running the panel locally; specs + plans drafted 2026-06-27 (**draft — pending review→revise before build**). The 14 backlog items batch into three sub-projects:
+
+22. **`dashboard-ux-polish`** — one sweep of small UX + bug fixes: instant/last-known dashboard stats (no blank-on-refresh), top-processes pie chart, surface Postgres/MariaDB wherever "MySQL" shows, centered panel, collapsible sidebar, Operations dark-mode fix, generic DB icon, file-manager double-click hint + breadcrumb, PHP-manager installed-state detection (+ block reinstall of an installed version), block self-impersonation. *(M; mostly frontend + a few backend/bug fixes. `2026-06-27-dashboard-ux-polish*`.)*
+23. **`db-service-control`** — admin start/stop/restart of the DB engine service (`systemctl` via `laranode-db-service.sh`, allowlisted to `config('laranode.db_engines')`) + OperationJob + per-engine status UI on the databases page. *(M. `2026-06-27-db-service-control*`.)*
+24. **`php-runtimes`** — alternative per-site PHP runtime (FrankenPHP first; Swoole later) via a Laravel-Octane-style app server behind an Apache reverse-proxy, per-site systemd unit + loopback port. *(XL, high: per-site port allocation, proxy vhost variant, runtime lifecycle. `2026-06-27-php-runtimes*`.)*
+
+> The "browse DB contents" backlog ask (D9) is covered by `dbgui-adminer` (#5).
 
 ## Cross-cutting principles
 

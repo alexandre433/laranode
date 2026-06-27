@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AccountsController;
+use App\Http\Controllers\AnalyticsController;
 use App\Http\Controllers\BackupController;
 use App\Http\Controllers\CronJobsController;
 use App\Http\Controllers\DashboardController;
@@ -124,5 +125,8 @@ Route::middleware('auth')->group(function () {
     Route::patch('/profile/notifications/webhook', [NotificationPreferencesController::class, 'updateWebhook'])->name('notifications.preferences.webhook');
     Route::patch('/profile/notifications', [NotificationPreferencesController::class, 'update'])->name('notifications.preferences.update');
 });
+
+// Analytics [Admin | User]
+Route::get('/analytics', [AnalyticsController::class, 'index'])->middleware(['auth'])->name('analytics.index');
 
 require __DIR__.'/auth.php';
