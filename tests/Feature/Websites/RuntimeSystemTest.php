@@ -530,3 +530,44 @@ test('laranode-vhost-switch.sh rejects leading-dot domain (..evil.com) with non-
     expect($result['exitCode'])
         ->not->toBe(0, 'Script must reject leading-dot domain. Output: '.$result['output']);
 })->group('system');
+
+// ---------------------------------------------------------------------------
+// Test 14: laranode-runtime-unit.sh rejects invalid domain (..evil.com)
+// ---------------------------------------------------------------------------
+
+test('laranode-runtime-unit.sh rejects consecutive-dot domain (..evil.com) with non-zero exit', function () {
+    $templates = base_path('laranode-scripts/templates');
+
+    $result = runScript('laranode-runtime-unit.sh', [
+        'write-unit', '..evil.com', '9100', RT_TEST_SYSTEM_USER, '/public_html', $templates,
+    ]);
+
+    expect($result['exitCode'])
+        ->not->toBe(0, 'laranode-runtime-unit.sh must reject consecutive-dot domain. Output: '.$result['output']);
+})->group('system');
+
+// ---------------------------------------------------------------------------
+// Test 15: laranode-runtime-unit.sh rejects path-traversal domain
+// ---------------------------------------------------------------------------
+
+test('laranode-runtime-unit.sh rejects path-traversal domain (evil.com/../../etc) with non-zero exit', function () {
+    $templates = base_path('laranode-scripts/templates');
+
+    $result = runScript('laranode-runtime-unit.sh', [
+        'write-unit', 'evil.com/../../etc', '9100', RT_TEST_SYSTEM_USER, '/public_html', $templates,
+    ]);
+
+    expect($result['exitCode'])
+        ->not->toBe(0, 'laranode-runtime-unit.sh must reject path-traversal domain. Output: '.$result['output']);
+})->group('system');
+
+// ---------------------------------------------------------------------------
+// Test 16: laranode-runtime-manage.sh rejects consecutive-dot unit name
+// ---------------------------------------------------------------------------
+
+test('laranode-runtime-manage.sh rejects consecutive-dot unit name (laranode-frankenphp-foo..bar.service) with non-zero exit', function () {
+    $result = runScript('laranode-runtime-manage.sh', ['start', 'laranode-frankenphp-foo..bar.service']);
+
+    expect($result['exitCode'])
+        ->not->toBe(0, 'Script must reject consecutive-dot unit name. Output: '.$result['output']);
+})->group('system');
