@@ -78,16 +78,16 @@ export default function Notifications({ eventTypes, channels, preferences, webho
         <AuthenticatedLayout>
             <Head title="Notification Preferences" />
             <div className="p-6 max-w-4xl">
-                <h1 className="text-xl font-semibold mb-6">Notification Preferences</h1>
+                <h1 className="text-xl font-semibold mb-6 text-gray-900 dark:text-gray-100">Notification Preferences</h1>
 
                 {/* Preference matrix */}
                 <div className="bg-white dark:bg-gray-950 shadow rounded-lg p-4 mb-6 overflow-x-auto">
                     <table className="w-full text-sm">
                         <thead>
                             <tr>
-                                <th className="text-left py-2 pr-4 font-medium">Event</th>
+                                <th className="text-left py-2 pr-4 font-medium text-gray-700 dark:text-gray-300">Event</th>
                                 {channels.map((ch) => (
-                                    <th key={ch} className="text-center py-2 px-4 font-medium">
+                                    <th key={ch} className="text-center py-2 px-4 font-medium text-gray-700 dark:text-gray-300">
                                         {CHANNEL_LABELS[ch] ?? ch}
                                     </th>
                                 ))}
@@ -119,7 +119,7 @@ export default function Notifications({ eventTypes, channels, preferences, webho
 
                 {/* Webhook URL */}
                 <div className="bg-white dark:bg-gray-950 shadow rounded-lg p-4">
-                    <h2 className="text-base font-semibold mb-3">Webhook URL</h2>
+                    <h2 className="text-base font-semibold mb-3 text-gray-900 dark:text-gray-100">Webhook URL</h2>
                     <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">
                         Notifications will be POSTed as JSON to this URL. Leave blank to disable.
                     </p>
