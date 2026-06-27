@@ -28,5 +28,8 @@ return Application::configure(basePath: dirname(__DIR__))
             \App\Models\Backup::class,
         ]])->daily();
         $schedule->job(new \App\Jobs\RunScheduledBackupsJob)->everyMinute();
+        $schedule->call(new \App\Actions\SSL\SendSslExpiryNotificationsAction)
+            ->dailyAt('08:00')
+            ->description('ssl.expiring notifications');
     })
     ->create();
