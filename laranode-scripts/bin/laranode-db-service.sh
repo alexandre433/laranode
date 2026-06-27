@@ -52,7 +52,7 @@ case "$ENGINE" in
         ;;
 esac
 
-echo "Running: systemctl $ACTION $SERVICE"
+echo "Running: systemctl $ACTION $ENGINE"
 
 if [ "$ENGINE" = "postgres" ]; then
     # Try the generic alias first; fall back to versioned unit on Ubuntu.
@@ -67,4 +67,4 @@ else
     systemctl "$ACTION" "$SERVICE"
 fi
 
-echo "Done: systemctl $ACTION $SERVICE"
+echo "Done: systemctl $ACTION $ENGINE"
