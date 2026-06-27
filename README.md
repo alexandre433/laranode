@@ -35,8 +35,9 @@ Laranode can be installed on a FRESH VPS or dedicated server.
 - 10GB Disk Space
 
 ### Quick Install
+Run on a clean Ubuntu 24.04 server as root:
 ```bash
-curl -sSL https://raw.githubusercontent.com/crivion/laranode/refs/heads/main/laranode-scripts/bin/laranode-installer.sh | bash
+curl -sSL https://raw.githubusercontent.com/alexandre433/laranode/refs/heads/main/laranode-scripts/bin/laranode-installer.sh | bash
 ```
 
 ## Getting Started
