@@ -34,6 +34,19 @@ class StoreCronJobRequest extends FormRequest
             $count = CronJob::where('user_id', $user->id)->count();
             if ($count >= 50) {
                 $validator->errors()->add('command', 'You have reached the maximum of 50 cron jobs.');
+
+                return;
+            }
+
+            // Surface a meaningful error for the UNIQUE(user_id, schedule, command)
+            // constraint instead of letting it surface as a 500 from the DB layer.
+            $schedule = $this->input('schedule');
+            $command = $this->input('command');
+            if ($schedule && $command && CronJob::where('user_id', $user->id)
+                ->where('schedule', $schedule)
+                ->where('command', $command)
+                ->exists()) {
+                $validator->errors()->add('command', 'You already have a cron job with this schedule and command.');
             }
         });
     }
