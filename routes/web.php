@@ -13,6 +13,7 @@ use App\Http\Controllers\NotificationsController;
 use App\Http\Controllers\PHPManagerController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\StatsHistoryController;
+use App\Http\Controllers\DbServiceController;
 use App\Http\Controllers\WebsiteController;
 use App\Http\Middleware\AdminMiddleware;
 use Illuminate\Support\Facades\Route;
@@ -91,6 +92,14 @@ Route::get('/stats/history', [StatsHistoryController::class, 'cpuAndMemory'])->m
 // Operations audit log [Admin]
 Route::get('/admin/operations', [\App\Http\Controllers\OperationsController::class, 'index'])
     ->middleware(['auth', AdminMiddleware::class])->name('operations.index');
+
+// DB Service Control [Admin]
+Route::middleware(['auth', AdminMiddleware::class])->group(function () {
+    Route::post('/admin/databases/service', [DbServiceController::class, 'action'])
+        ->name('databases.service.action');
+    Route::get('/admin/databases/service/status', [DbServiceController::class, 'status'])
+        ->name('databases.service.status');
+});
 
 // Accounts
 Route::middleware('auth')->group(function () {
