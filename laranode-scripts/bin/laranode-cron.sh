@@ -11,6 +11,7 @@ set -euo pipefail
 # Security:
 #   - $SYSTEM_USER must match ^[a-zA-Z0-9_]+$, end in _ln, exist, and not be root.
 #   - Each line in <tmp_file> must be: 5 schedule fields <TAB> command (no embedded newlines).
+#   - Command portion must start with 'php /home/<system_user>/' (allowlist: php only, v1).
 #   - Flag-smuggling: any argument starting with '-' is rejected.
 #   - sudoers grants only (www-data) not (ALL); sudo only elevates to www-data.
 
@@ -75,8 +76,14 @@ case "$SUBCMD" in
             exit 1
         fi
 
+        # Trap: clean up our own reference to TMP_FILE on any error/exit.
+        # (PHP service also deletes it in finally{}; this is defence-in-depth.)
+        trap 'rm -f "$TMP_FILE"' EXIT INT TERM
+
         # Validate every non-empty line in the tmp file.
         # Each line must be: <f1> <f2> <f3> <f4> <f5> TAB <command>
+        # Command allowlist (v1): must start with 'php /home/<SYSTEM_USER>/'
+        ALLOWED_CMD_PREFIX="php /home/${SYSTEM_USER}/"
         while IFS= read -r line || [ -n "$line" ]; do
             # Skip empty lines
             [ -z "$line" ] && continue
@@ -94,6 +101,20 @@ case "$SUBCMD" in
                 echo "ERROR: invalid crontab line format (need 5 schedule fields + TAB + command): $line" >&2
                 exit 1
             fi
+
+            # Extract the command portion: everything after the first TAB (field 2 onward).
+            # cut uses TAB as default delimiter; field 1 = "f1 f2 f3 f4 f5", field 2 = command.
+            CMD_PART=$(printf '%s\n' "$line" | cut -f2-)
+
+            # Allowlist check: command must start with 'php /home/<SYSTEM_USER>/'
+            case "$CMD_PART" in
+                "$ALLOWED_CMD_PREFIX"*)
+                    ;;  # allowed
+                *)
+                    echo "ERROR: command not allowed (must start with '${ALLOWED_CMD_PREFIX}'): $CMD_PART" >&2
+                    exit 1
+                    ;;
+            esac
         done < "$TMP_FILE"
 
         # Get existing crontab minus managed lines.
@@ -112,20 +133,24 @@ case "$SUBCMD" in
             MANAGED_LINES="${MANAGED_LINES}${line} ${MARKER}"$'\n'
         done < "$TMP_FILE"
 
-        # Write crontab: managed block first, then remaining non-managed entries
+        # Write crontab: managed block first, then remaining non-managed entries.
+        # '--' separates options from positional args; '-' means read from stdin.
         if [ -z "$MANAGED_LINES" ] && [ -z "$STRIPPED" ]; then
             # Nothing left — install an empty crontab
-            printf '' | crontab -u "$SYSTEM_USER" -
+            printf '' | crontab -u "$SYSTEM_USER" -- -
         elif [ -z "$MANAGED_LINES" ]; then
             # No managed lines, only preserve existing
-            printf '%s\n' "$STRIPPED" | crontab -u "$SYSTEM_USER" -
+            printf '%s\n' "$STRIPPED" | crontab -u "$SYSTEM_USER" -- -
         elif [ -z "$STRIPPED" ]; then
             # Only managed lines
-            printf '%s\n' "$MANAGED_LINES" | crontab -u "$SYSTEM_USER" -
+            printf '%s\n' "$MANAGED_LINES" | crontab -u "$SYSTEM_USER" -- -
         else
             # Both managed and pre-existing non-managed lines
-            printf '%s\n%s\n' "$MANAGED_LINES" "$STRIPPED" | crontab -u "$SYSTEM_USER" -
+            printf '%s\n%s\n' "$MANAGED_LINES" "$STRIPPED" | crontab -u "$SYSTEM_USER" -- -
         fi
+
+        # Disarm trap (PHP service owns the file; don't double-delete)
+        trap - EXIT INT TERM
 
         echo "OK: crontab updated for $SYSTEM_USER"
         ;;
@@ -137,9 +162,9 @@ case "$SUBCMD" in
 
         if [ -z "$STRIPPED" ]; then
             # Empty crontab
-            printf '' | crontab -u "$SYSTEM_USER" -
+            printf '' | crontab -u "$SYSTEM_USER" -- -
         else
-            printf '%s\n' "$STRIPPED" | crontab -u "$SYSTEM_USER" -
+            printf '%s\n' "$STRIPPED" | crontab -u "$SYSTEM_USER" -- -
         fi
 
         echo "OK: managed crontab entries removed for $SYSTEM_USER"

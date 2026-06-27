@@ -13,11 +13,13 @@ class CreateCronJobService
 {
     public function handle(User $user): void
     {
+        // Set umask to 0177 so tempnam() creates the file at 0600 atomically.
+        // This eliminates the TOCTOU window between creation and chmod.
+        $oldUmask = umask(0177);
         $tmpFile = tempnam(sys_get_temp_dir(), 'laranode_cron_');
+        umask($oldUmask);
 
         try {
-            // Secure the temp file before writing (0600, no TOCTOU)
-            chmod($tmpFile, 0600);
 
             $jobs = CronJob::where('user_id', $user->id)->where('active', true)->get();
 
