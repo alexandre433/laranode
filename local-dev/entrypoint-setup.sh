@@ -97,6 +97,11 @@ www-data ALL=(ALL) NOPASSWD: $BIN/*.sh, /usr/sbin/a2dissite, /bin/rm /etc/apache
 EOF
 chmod 440 /etc/sudoers.d/laranode
 
+# --- cron sudoers drop-in (grants www-data NOPASSWD for laranode-cron.sh at panel path) ---
+log "writing laranode-cron sudoers drop-in"
+cp -f "$PANEL/laranode-scripts/etc/sudoers.d/laranode-cron" /etc/sudoers.d/laranode-cron
+chmod 440 /etc/sudoers.d/laranode-cron
+
 # --- MySQL user + db (idempotent; grant for localhost and 127.0.0.1) ---
 log "creating mysql user + db"
 mysql -u root <<SQL
