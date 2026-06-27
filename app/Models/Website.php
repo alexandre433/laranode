@@ -49,7 +49,7 @@ class Website extends Model
 
     public function user(): \Illuminate\Database\Eloquent\Relations\BelongsTo
     {
-        return $this->belongsTo(User::class)->select(['id', 'username', 'role']);
+        return $this->belongsTo(User::class)->select(['id', 'username', 'role', 'email']);
     }
 
     public function phpVersion(): \Illuminate\Database\Eloquent\Relations\BelongsTo

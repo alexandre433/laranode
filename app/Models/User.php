@@ -33,6 +33,7 @@ class User extends Authenticatable
         'domain_limit',
         'database_limit',
         'ssh_access',
+        'webhook_url',
     ];
 
     /**
@@ -43,6 +44,7 @@ class User extends Authenticatable
     protected $hidden = [
         'password',
         'remember_token',
+        'webhook_url',
     ];
 
     /**
@@ -56,6 +58,7 @@ class User extends Authenticatable
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
             'ssh_access' => 'boolean',
+            'webhook_url' => 'encrypted',
         ];
     }
 

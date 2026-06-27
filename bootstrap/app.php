@@ -31,6 +31,10 @@ return Application::configure(basePath: dirname(__DIR__))
         ]])->daily();
         $schedule->job(new \App\Jobs\RunScheduledBackupsJob)->everyMinute();
 
+        $schedule->call(new \App\Actions\SSL\SendSslExpiryNotificationsAction)
+            ->dailyAt('08:00')
+            ->description('ssl.expiring notifications');
+
         $schedule->call(function () {
             \App\Models\User::chunkById(50, function ($users) {
                 foreach ($users as $user) {
