@@ -24,7 +24,7 @@ class CronJobsController extends Controller
         return Inertia::render('CronJobs/Index', compact('cronJobs'));
     }
 
-    public function store(StoreCronJobRequest $request): RedirectResponse
+    public function store(StoreCronJobRequest $request, CreateCronJobService $createService): RedirectResponse
     {
         $user = $request->user();
         $validated = $request->validated();
@@ -41,7 +41,7 @@ class CronJobsController extends Controller
         $op->markRunning();
 
         try {
-            DB::transaction(function () use ($user, $validated) {
+            DB::transaction(function () use ($user, $validated, $createService) {
                 CronJob::create([
                     'user_id' => $user->id,
                     'schedule' => $validated['schedule'],
@@ -49,7 +49,7 @@ class CronJobsController extends Controller
                     'label' => $validated['label'] ?? null,
                 ]);
 
-                (new CreateCronJobService)->handle($user);
+                $createService->handle($user);
             });
 
             // markFinished OUTSIDE the transaction — a rollback must not destroy the audit row.
@@ -58,6 +58,10 @@ class CronJobsController extends Controller
         } catch (CreateCronJobException $e) {
             $op->markFinished(1);
             session()->flash('error', 'Failed to create cron job: '.$e->getMessage());
+        } catch (\Throwable $e) {
+            report($e);
+            $op->markFinished(1);
+            session()->flash('error', 'An unexpected error occurred while creating the cron job.');
         }
 
         return redirect()->route('cron-jobs.index');
@@ -91,6 +95,10 @@ class CronJobsController extends Controller
         } catch (DeleteCronJobException $e) {
             $op->markFinished(1);
             session()->flash('error', 'Failed to delete cron job: '.$e->getMessage());
+        } catch (\Throwable $e) {
+            report($e);
+            $op->markFinished(1);
+            session()->flash('error', 'An unexpected error occurred while deleting the cron job.');
         }
 
         return redirect()->route('cron-jobs.index');
@@ -125,6 +133,10 @@ class CronJobsController extends Controller
         } catch (CreateCronJobException $e) {
             $op->markFinished(1);
             session()->flash('error', 'Failed to toggle cron job: '.$e->getMessage());
+        } catch (\Throwable $e) {
+            report($e);
+            $op->markFinished(1);
+            session()->flash('error', 'An unexpected error occurred while toggling the cron job.');
         }
 
         return redirect()->route('cron-jobs.index');

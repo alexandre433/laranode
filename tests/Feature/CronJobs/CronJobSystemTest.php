@@ -79,7 +79,7 @@ function runCronSh(array $args): array
 function runCronShViaSudo(array $args): array
 {
     $script = base_path('laranode-scripts/bin/laranode-cron.sh');
-    $cmd = 'sudo -u www-data sudo -u www-data '.escapeshellarg($script);
+    $cmd = 'sudo -u www-data '.escapeshellarg($script);
     foreach ($args as $a) {
         $cmd .= ' '.escapeshellarg($a);
     }

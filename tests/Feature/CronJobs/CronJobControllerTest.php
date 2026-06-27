@@ -3,6 +3,7 @@
 use App\Models\CronJob;
 use App\Models\Operation;
 use App\Models\User;
+use App\Services\CronJobs\CreateCronJobService;
 use Illuminate\Support\Facades\Process;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -226,6 +227,32 @@ test('POST /cron-jobs when script fails marks Operation failed and rolls back Cr
     $op = Operation::where('user_id', $user->id)->where('type', 'cron.create')->first();
     expect($op)->not->toBeNull();
     expect($op->status)->toBe('failed');
+});
+
+test('POST /cron-jobs marks Operation finished (not stuck) on an unexpected exception', function () {
+    // Force an UNEXPECTED (non-domain) exception from the create service.
+    $this->mock(CreateCronJobService::class, function ($mock) {
+        $mock->shouldReceive('handle')->andThrow(new \RuntimeException('boom'));
+    });
+
+    $user = User::factory()->isNotAdmin()->create(['username' => 'throwtest']);
+
+    $response = $this->actingAs($user)->post('/cron-jobs', [
+        'schedule' => '* * * * *',
+        'command' => 'php /home/'.$user->systemUsername.'/artisan inspire',
+    ]);
+
+    $response->assertRedirect(route('cron-jobs.index'));
+    $response->assertSessionHas('error');
+
+    // The audit Operation must be finished (failed), never left stuck in 'running'.
+    $op = Operation::where('user_id', $user->id)->where('type', 'cron.create')->first();
+    expect($op)->not->toBeNull();
+    expect($op->status)->not->toBe('running');
+    expect($op->status)->toBe('failed');
+
+    // Transaction rolled back — no CronJob row remains.
+    expect(CronJob::where('user_id', $user->id)->exists())->toBeFalse();
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
