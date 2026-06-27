@@ -10,6 +10,7 @@ use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\StatsHistoryController;
 use App\Http\Controllers\WebsiteController;
 use App\Http\Middleware\AdminMiddleware;
+use App\Http\Requests\DbServiceRequest;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', function () {
@@ -86,6 +87,16 @@ Route::get('/stats/history', [StatsHistoryController::class, 'cpuAndMemory'])->m
 // Operations audit log [Admin]
 Route::get('/admin/operations', [\App\Http\Controllers\OperationsController::class, 'index'])
     ->middleware(['auth', AdminMiddleware::class])->name('operations.index');
+
+// DB Service Control [Admin] — Task 2 stub (Task 3 replaces closure with DbServiceController)
+Route::middleware(['auth', AdminMiddleware::class])->group(function () {
+    Route::post('/admin/databases/service', function (DbServiceRequest $request) {
+        return response()->json(['status' => 'ok']);
+    })->name('databases.service.action');
+    Route::get('/admin/databases/service/status', function () {
+        return response()->json(['statuses' => []]);
+    })->name('databases.service.status');
+});
 
 // Accounts
 Route::middleware('auth')->group(function () {
