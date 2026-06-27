@@ -100,7 +100,7 @@ function SiteBreakdownChart({ siteStats }) {
     });
     const rows = Object.values(latest);
     const data = {
-        labels: rows.map((r) => r.url ?? `site-${r.website_id}`),
+        labels: rows.map((r) => r.website?.url ?? `site-${r.website_id}`),
         datasets: [
             {
                 label: 'Disk (GB)',

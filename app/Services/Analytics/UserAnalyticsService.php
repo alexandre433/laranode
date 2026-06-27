@@ -27,6 +27,7 @@ class UserAnalyticsService
     public function getSiteStats(User $user, int $days = 30): Collection
     {
         return UserSiteStat::where('user_id', $user->id)
+            ->with('website:id,url')
             ->where('snapshotted_at', '>=', now()->subDays($days))
             ->orderBy('snapshotted_at')
             ->get();
