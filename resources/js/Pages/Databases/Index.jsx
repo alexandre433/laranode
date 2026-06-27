@@ -4,6 +4,7 @@ import { TbDatabase } from 'react-icons/tb';
 import { TiDelete } from 'react-icons/ti';
 import { toast } from 'react-toastify';
 import CreateDatabaseForm from './Partials/CreateDatabaseForm';
+import DbServiceControl from './Partials/DbServiceControl';
 import EditDatabaseForm from './Partials/EditDatabaseForm';
 import ConfirmationButton from '@/Components/ConfirmationButton';
 import { Tooltip } from 'react-tooltip';
@@ -85,6 +86,7 @@ export default function DatabasesIndex({ databases = [] }) {
                     </div>
                 )}
             </div>
+            {auth.user.role === 'admin' && <DbServiceControl />}
             <Tooltip id="tooltip-edit" />
         </AuthenticatedLayout>
     );
