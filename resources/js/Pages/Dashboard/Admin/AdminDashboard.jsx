@@ -7,7 +7,7 @@ import CPULive from './Components/CPULive';
 import MemoryLive from './Components/MemoryLive';
 import DiskLive from './Components/DiskLive';
 import NetworkLive from './Components/NetworkLive';
-import MySQLLive from './Components/MySQLLive';
+import DbEnginesLive from './Components/DbEnginesLive';
 import PHPFPMLive from './Components/PHPFPMLive';
 
 
@@ -76,7 +76,7 @@ export default function Dashboard({ initialStats }) {
                     </div>
 
                     <div className="mt-5 w-full grid grid-cols-1 xl:grid-cols-4 gap-4">
-                        <MySQLLive mysqlStats={liveStats.mysql} />
+                        <DbEnginesLive dbEngines={liveStats.dbEngines} />
                         <PHPFPMLive phpStats={liveStats.phpFpm} />
                     </div>
 
