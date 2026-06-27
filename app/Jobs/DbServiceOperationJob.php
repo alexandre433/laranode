@@ -19,8 +19,6 @@ class DbServiceOperationJob extends OperationJob
 
     protected function run(callable $emit): int
     {
-        $service = config('laranode.db_engines')[$this->engine]['service'];
-
         $emit("Running: systemctl {$this->action} {$this->engine}...");
 
         $result = Process::run(['sudo', config('laranode.laranode_bin_path').'/laranode-db-service.sh', $this->action, $this->engine]);
