@@ -18,8 +18,8 @@ SYSTEM_USER="$4"
 DOCUMENT_ROOT="$5"
 TEMPLATE_DIR="$6"
 
-# Reject leading-dash args
-for arg in "$SUBCMD" "$DOMAIN" "$PORT" "$SYSTEM_USER"; do
+# Reject leading-dash args (ALL args — punch-list #6)
+for arg in "$SUBCMD" "$DOMAIN" "$PORT" "$SYSTEM_USER" "$DOCUMENT_ROOT" "$TEMPLATE_DIR"; do
     case "$arg" in -*) echo "Invalid argument: $arg" >&2; exit 1 ;; esac
 done
 

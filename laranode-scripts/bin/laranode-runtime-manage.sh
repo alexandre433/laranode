@@ -31,6 +31,11 @@ if ! echo "$UNIT" | grep -qE '^laranode-(frankenphp|swoole)-[a-zA-Z0-9._-]+\.ser
     echo "Invalid unit name '$UNIT'. Must match laranode-(frankenphp|swoole)-<slug>.service" >&2
     exit 1
 fi
+# Reject consecutive dots in unit name (punch-list #4 — prevents foo..bar.service traversal)
+if echo "$UNIT" | grep -qE '\.\.'; then
+    echo "Invalid unit name '$UNIT': consecutive dots not allowed." >&2
+    exit 1
+fi
 
 # ---- dispatch ----
 if [ "$ACTION" = "remove" ]; then
