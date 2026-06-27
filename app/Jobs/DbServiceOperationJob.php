@@ -21,7 +21,7 @@ class DbServiceOperationJob extends OperationJob
     {
         $service = config('laranode.db_engines')[$this->engine]['service'];
 
-        $emit("Running: systemctl {$this->action} {$service}...");
+        $emit("Running: systemctl {$this->action} {$this->engine}...");
 
         $result = Process::run(['sudo', config('laranode.laranode_bin_path').'/laranode-db-service.sh', $this->action, $this->engine]);
 
@@ -31,7 +31,7 @@ class DbServiceOperationJob extends OperationJob
             throw new DbServiceException($result->errorOutput());
         }
 
-        $emit("systemctl {$this->action} {$service} completed.");
+        $emit("systemctl {$this->action} {$this->engine} completed.");
 
         return 0;
     }
