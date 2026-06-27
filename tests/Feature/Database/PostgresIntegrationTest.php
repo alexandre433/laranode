@@ -175,3 +175,18 @@ test('postgres full lifecycle: create index delete with security assertions', fu
     );
     expect($dbExists)->toBeNull();
 })->group('system');
+
+test('stats on a postgres database that no longer exists returns zero size (no 3D000 crash)', function () {
+    // Reproduces the Databases-page crash: a Database row whose underlying
+    // PostgreSQL database was dropped. pg_database_size(name) raised SQLSTATE
+    // 3D000 and took down the whole listing; stats() now scopes to existing
+    // databases and returns 0 instead of throwing.
+    $ghost = new Database;
+    $ghost->engine = 'postgres';
+    $ghost->name = 'ln_ghost_'.substr(md5(uniqid('', true)), 0, 8);
+
+    $stats = (new PostgresDriver)->stats($ghost);
+
+    expect($stats->sizeMb)->toBe(0.0);
+    expect($stats->tableCount)->toBe(0);
+})->group('system');
