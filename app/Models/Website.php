@@ -10,7 +10,7 @@ class Website extends Model
 {
     use HasFactory;
 
-    protected $appends = ['fullDocumentRoot', 'runtimeLabel'];
+    protected $appends = ['fullDocumentRoot', 'runtime_label'];
 
     protected $casts = [
         'ssl_enabled' => 'boolean',

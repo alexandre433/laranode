@@ -46,8 +46,7 @@ if [ "$RUNTIME" = "frankenphp" ]; then
     curl -sfL -o "$FRANKENPHP_TMP" "$FRANKENPHP_URL"
 
     echo "Verifying SHA-256 checksum..."
-    echo "${FRANKENPHP_SHA256}  ${FRANKENPHP_TMP}" | sha256sum -c -
-    if [ $? -ne 0 ]; then
+    if ! echo "${FRANKENPHP_SHA256}  ${FRANKENPHP_TMP}" | sha256sum -c -; then
         echo "SHA-256 mismatch — aborting install." >&2
         rm -f "$FRANKENPHP_TMP"
         exit 1
