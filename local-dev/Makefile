@@ -46,6 +46,10 @@ test-system:
 build-assets:
 	$(EXEC) 'cd /home/laranode_ln/panel && npm run build'
 
+# Clean-room test of the REAL production installer on a vanilla ubuntu:24.04.
+install-test:
+	bash local-dev/install-test/run.sh
+
 sync-scripts:
 	$(EXEC) 'cp -f /opt/laranode/bin-src/*.sh /opt/laranode/bin/ && cp -f /home/laranode_ln/panel/local-dev/bin/laranode-ssl-manager.sh /opt/laranode/bin/ && chmod -R 0755 /opt/laranode/bin'
 
