@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AccountsController;
 use App\Http\Controllers\BackupController;
+use App\Http\Controllers\CronJobsController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DatabasesController;
 use App\Http\Controllers\FilemanagerController;
@@ -92,6 +93,12 @@ Route::middleware('auth')->group(function () {
     Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
     Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
+});
+
+// Cron Jobs [Admin | User]
+Route::middleware(['auth'])->group(function () {
+    Route::resource('/cron-jobs', CronJobsController::class)->except(['create', 'edit', 'show']);
+    Route::post('/cron-jobs/{cronJob}/toggle', [CronJobsController::class, 'toggleActive'])->name('cron-jobs.toggle');
 });
 
 // Backups [Admin | User]
