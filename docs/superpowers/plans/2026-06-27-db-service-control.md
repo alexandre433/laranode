@@ -4,14 +4,17 @@
 
 **Goal:** Let panel admins start, stop, or restart any configured DB engine service from the Databases page. A new `laranode-db-service.sh` maps an engine key to a systemd service name and calls `systemctl <action> <service>`. Because `systemctl restart` can take 3–8 s, the action runs as an `OperationJob` (same pattern as `GenerateSslOperationJob` and `BackupJob`), returning an `operation_id` immediately so `OperationProgress` can stream live output via Reverb. No new migrations; the existing `operations` table carries the audit trail.
 
-**Architecture:** `POST /admin/databases/service` → `DbServiceRequest` (admin gate + allowlist) → `Operation::create` → `DbServiceOperationJob::dispatch` → JSON `{operation_id}` → `laranode-db-service.sh` via `Process::run` → `Operation` lifecycle (markRunning / appendOutput / markFinished) → `OperationUpdated` broadcast → `OperationProgress` UI. Read-only status comes from `DbServiceStatusService` (delegates to `EngineManager::available()`).
+**Architecture:** `POST /admin/databases/service` → `DbServiceRequest` (admin gate + allowlist) → `Operation::create` → `DbServiceOperationJob::dispatch($operation, $engine, $action)` → JSON `{operation_id}` → `laranode-db-service.sh` via `Process::run` → `Operation` lifecycle (markRunning / appendOutput / markFinished) → `OperationUpdated` broadcast → `OperationProgress` UI. Read-only status comes from `DbServiceStatusService` (delegates to `EngineManager::available()`).
 
 **Key constraints:**
 - Admin-only: `DbServiceRequest::authorize()` + `AdminMiddleware` on the route group.
 - Engine validated against `array_keys(config('laranode.db_engines'))` in PHP and against a hardcoded `case` block in the script — PHP never passes a raw service name to the script.
 - Action allowlist is exactly `['start', 'stop', 'restart']`.
 - Script validates both args (leading-dash guard + `case` blocks) before touching systemd.
+- **`DbServiceOperationJob` does NOT accept `$service` as a constructor param.** The job resolves the service name from `config('laranode.db_engines')[$this->engine]['service']` internally — eliminates engine/service mismatch footgun.
 - `DbServiceOperationJob` extends `OperationJob` (abstract base in `app/Jobs/OperationJob.php`); no lifecycle duplication.
+- **`doAction` in JSX has a `try/catch`.** On HTTP error: `setLoading(false)` + inline error message — buttons never stuck disabled permanently.
+- **Postgres retry in script is `if !` guarded** with explicit error echo on retry failure.
 - No new migrations; no new models; no changes to `EngineManager`, `DatabasesController`, or existing routes.
 - `SidebarNavi.jsx` is **not** modified — "Databases" nav link already exists.
 - `laranode-scripts/etc/sudoers.d/laranode-panel` gains two lines; `entrypoint-setup.sh` is unchanged (wildcard `*.sh` grant already covers the new script).
@@ -41,7 +44,8 @@
 - Leading-dash guard on both args: `[[ "$ACTION" == -* ]]` or `[[ "$ENGINE" == -* ]]` → exit 1.
 - `$ACTION` validated via `case` block: `start|stop|restart` pass; anything else exits 1 with "ERROR: invalid action".
 - `$ENGINE` validated via `case` block: `mysql → SERVICE=mysql`, `mariadb → SERVICE=mariadb`, `postgres → SERVICE=postgresql`; anything else exits 1 with "ERROR: unknown engine".
-- For `postgres`: on `systemctl "$ACTION" postgresql` non-zero exit, retries with `postgresql@16-main`; if retry also fails, exits non-zero. All other engines fail immediately on `systemctl` non-zero exit.
+- Both the `case "$ENGINE"` block and the postgres retry line carry `# Keep in sync with EngineManager::$extraCandidates in app/Databases/EngineManager.php` comments.
+- For `postgres`: on `systemctl "$ACTION" postgresql` non-zero exit, retry is wrapped in `if ! systemctl "$ACTION" "postgresql@16-main"; then echo "ERROR: systemctl $ACTION postgresql@16-main also failed" >&2; exit 1; fi`. Retry failure emits explicit human-readable error before exiting.
 - Output goes to stdout (captured by `appendOutput`). Prints `"Running: systemctl $ACTION $SERVICE"` before the call and `"Done: systemctl $ACTION $SERVICE"` on success.
 
 **Acceptance criteria for sudoers (modify `laranode-scripts/etc/sudoers.d/laranode-panel`):**
@@ -60,8 +64,9 @@
 - Test 2 (leading-dash action): `laranode-db-service.sh -p mysql` → exit non-zero.
 - Test 3 (leading-dash engine): `laranode-db-service.sh restart -mysql` → exit non-zero.
 - Test 4 (restart mysql): `laranode-db-service.sh restart mysql` → exit 0; `systemctl is-active mysql` returns `active`.
-- Test 5 (status round-trip): `GET /admin/databases/service/status` as admin → `statuses.mysql.active === true` in JSON response. (Can be done here or in Task 3's controller test — mark it pending until Task 3 is done.)
-- Standard suite (no flag): 4 tests marked skipped, zero failures.
+- Test 4b (restart postgres — covers the `postgresql@16-main` retry branch): `laranode-db-service.sh restart postgres` → exit 0; requires PostgreSQL installed in container; asserts the retry branch is exercised when `postgresql` alias is absent.
+- Test 5 (status round-trip): `GET /admin/databases/service/status` as admin → `statuses.mysql.active === true`. (Mark pending until Task 3 is done.)
+- Standard suite (no flag): all tests marked skipped, zero failures.
 - System suite: `LARANODE_SYSTEM_TESTS=1 php artisan test --filter=DbServiceSystemTest` → all passing inside container.
 
 - [ ] Write `DbServiceSystemTest.php` scaffold (tests skipped without flag)
@@ -94,9 +99,8 @@
 - Engine leading-dash: `engine=-mysql` → 422.
 - Action allowlist: `action=nuke` → 422.
 - Action leading-dash: `action=--help` → 422.
-- Valid payload `{engine: 'mysql', action: 'restart'}` as admin → not 403/422 (will be 200 once controller exists; at this stage test that authorize() + rules() pass by asserting the request validates without errors, or mock the controller).
-- Test using `$this->postJson('/admin/databases/service', [...])` as non-admin → 403.
-- Test layer: **Pest feature** (no real Linux required; `Process::fake()` not needed for pure validation tests — no Process calls happen in FormRequest).
+- Valid payload `{engine: 'mysql', action: 'restart'}` as admin → not 403/422.
+- Test layer: **Pest feature** (no real Linux required; no Process calls happen in FormRequest).
 
 - [ ] Write failing `DbServiceRequestTest.php`
 - [ ] Write `DbServiceRequest`
@@ -125,9 +129,9 @@
 - Constructor: `public function __construct(private EngineManager $engineManager) {}`
 - `action(DbServiceRequest $request): JsonResponse`:
   - Reads `$validated['engine']` and `$validated['action']`.
-  - Resolves service: `$service = config('laranode.db_engines')[$engine]['service']` (PHP-side secondary validation; engine is already allowlist-validated by FormRequest).
+  - Resolves service for the audit target column: `$service = config('laranode.db_engines')[$engine]['service']`.
   - Creates `Operation::create(['user_id' => $request->user()->id, 'type' => "db.service.{$action}", 'target' => "{$engine}:{$service}", 'status' => 'queued'])`.
-  - Dispatches `DbServiceOperationJob::dispatch($operation, $engine, $service, $action)`.
+  - **Dispatches `DbServiceOperationJob::dispatch($operation, $engine, $action)` — NO `$service` param.**
   - Returns `response()->json(['operation_id' => $operation->id])`.
   - Does NOT call `markRunning()` — that is `OperationJob::handle()`'s responsibility.
 - `status(): JsonResponse`:
@@ -148,12 +152,13 @@
 **Acceptance criteria for `DbServiceControllerTest.php` (all use `Process::fake()` and mock `EngineManager`):**
 - Admin gate on `action`: non-admin `POST /admin/databases/service` → 403.
 - Admin gate on `status`: non-admin `GET /admin/databases/service/status` → 403.
+- **Unauthenticated `action`**: `POST /admin/databases/service` unauthenticated → 302.
+- **Unauthenticated `status`**: `GET /admin/databases/service/status` unauthenticated → 302.
 - Engine allowlist rejection: admin, `engine=invalid_engine` → 422.
 - Engine leading-dash rejection: admin, `engine=-mysql` → 422.
 - Action allowlist rejection: admin, `action=nuke` → 422.
-- Successful dispatch: admin, `{engine: 'mysql', action: 'restart'}` → 200 JSON `{operation_id: <int>}`; `Operation` row exists with `type='db.service.restart'`, `target='mysql:mysql'`, `status='queued'`; `DbServiceOperationJob` dispatched (assert via `Queue::fake()` / `Bus::fake()`).
+- Successful dispatch: admin, `{engine: 'mysql', action: 'restart'}` → 200 JSON `{operation_id: <int>}`; `Operation` row exists with `type='db.service.restart'`, `target='mysql:mysql'`, `status='queued'`; `DbServiceOperationJob` dispatched (assert via `Queue::fake()` / `Bus::fake()`); **assert dispatched job has no `$service` property** (or that the constructor signature only takes `$engine` + `$action`).
 - Status endpoint: `GET /admin/databases/service/status` as admin → 200 JSON `{statuses: {mysql: {service: 'mysql', active: true}}}` (mock `EngineManager::available()` to return `['mysql' => 'mysql']`).
-- Status endpoint unauthenticated → 302 to login.
 - Test layer: **Pest feature** (mocked `EngineManager` via `app()->instance(EngineManager::class, $mock)` — same pattern as `DatabasesControllerTest.php`).
 
 - [ ] Write failing `DbServiceControllerTest.php`
@@ -176,33 +181,35 @@
 
 **Acceptance criteria for `DbServiceOperationJob`:**
 - Extends `OperationJob` (from `app/Jobs/OperationJob.php`).
-- Constructor:
+- Constructor accepts `Operation $operation`, `string $engine`, `string $action` **only — no `$service` param**:
   ```php
   public function __construct(
       Operation $operation,
       public string $engine,
-      public string $service,
       public string $action,
   ) {
       parent::__construct($operation);
   }
   ```
 - `protected function run(callable $emit): int`:
-  - `$emit("Running: systemctl {$this->action} {$this->service}...");`
+  - Resolves service internally: `$service = config('laranode.db_engines')[$this->engine]['service'];`
+  - `$emit("Running: systemctl {$this->action} {$service}...");`
   - `$result = Process::run(['sudo', config('laranode.laranode_bin_path') . '/laranode-db-service.sh', $this->action, $this->engine]);`
   - `$emit($result->output());`
   - If `$result->failed()`: `throw new DbServiceException($result->errorOutput());`
-  - `$emit("systemctl {$this->action} {$this->service} completed.");`
+  - `$emit("systemctl {$this->action} {$service} completed.");`
   - `return 0;`
-- PHP never passes `$this->service` (the raw service name) to the script; only `$this->action` and `$this->engine` are passed. The script resolves the service name itself.
+- **PHP passes only `$this->action` and `$this->engine` to the script.** `$service` (resolved internally) is used only for display strings, never passed to the subprocess.
 - `DbServiceException extends \Exception {}` declared in the same file.
 - The `OperationJob` base `handle()` method calls `markRunning()`, invokes `run()`, calls `markFinished($exit)`, and re-throws any `\Throwable`. No duplication in the subclass.
 
 **Acceptance criteria for `DbServiceOperationJobTest.php`:**
-- Success path: `Process::fake(['*' => Process::result(output: "Running...\nDone.", exitCode: 0)])`; `DbServiceOperationJob::dispatchSync($op, 'mysql', 'mysql', 'restart')` → `$op->fresh()->status === 'succeeded'`; `$op->fresh()->output` contains "Running:" and "completed."; exit code 0 in DB.
+- Success path: `Process::fake(['*' => Process::result(output: "Running...\nDone.", exitCode: 0)])`; `DbServiceOperationJob::dispatchSync($op, 'mysql', 'restart')` → `$op->fresh()->status === 'succeeded'`; `$op->fresh()->output` contains "Running:" and "completed."; exit code 0 in DB.
 - Failure path: `Process::fake(['*' => Process::result(output: '', errorOutput: 'Unit mysql not found', exitCode: 1)])`; `dispatchSync(...)` throws `DbServiceException`; `$op->fresh()->status === 'failed'`; output contains "ERROR: Unit mysql not found".
-- Output capture: verify `appendOutput` is called with the captured stdout of the script (assert `$op->fresh()->output` contains the faked output string).
-- Correct args to `Process::run`: `Process::fake()` with an assertion that the command array contains `'laranode-db-service.sh'`, `'restart'`, and `'mysql'` (engine, not service name).
+- Output capture: verify `$op->fresh()->output` contains the faked output string.
+- **Correct args to `Process::run` (mysql)**: assert command array contains `'laranode-db-service.sh'`, `'restart'`, `'mysql'` — the engine key, not the service name (for mysql these are the same, but the test proves the job never passes a service name).
+- **Correct args to `Process::run` (postgres)**: `DbServiceOperationJob::dispatchSync($op, 'postgres', 'restart')` → assert command array's third argument is `'postgres'` (not `'postgresql'`). This proves the job passes only the engine key and the script resolves `postgresql` internally.
+- **Output does not contain raw service name (postgres)**: for `engine='postgres'`, assert `$op->fresh()->output` does NOT contain the literal string `'postgresql'` — the raw service name must not appear in job output, only the engine key.
 - Test layer: **Pest feature** (uses `Process::fake()` + `RefreshDatabase`).
 
 - [ ] Write failing `DbServiceOperationJobTest.php`
@@ -224,21 +231,26 @@
 
 **Acceptance criteria for `DbServiceControl.jsx`:**
 - Imports: `useState`, `useEffect` from React; `axios`; `OperationProgress` from `@/Components/OperationProgress`.
-- State: `statuses` (object, default `{}`), `operationId` (null), `loading` (false).
+- State: `statuses` (object, default `{}`), `operationId` (null), `loading` (false), `error` (null).
 - On mount: `axios.get(route('databases.service.status'))` → `setStatuses(r.data.statuses ?? {})`.
 - Renders a table with one row per engine in `statuses`: columns Engine, Service, Status (green "active" / red "inactive" badge), and buttons "Start", "Stop", "Restart".
-- Button `onClick`: calls `axios.post(route('databases.service.action'), { engine, action })` → sets `operationId` from `r.data.operation_id`; sets `loading = true`. `loading` is cleared via `onDone`.
+- **`doAction` has `try/catch`:**
+  - `try`: `setLoading(true); setError(null); const r = await axios.post(...); setOperationId(r.data.operation_id);`
+  - `catch(err)`: `setLoading(false); setError(err.response?.data?.message ?? 'Request failed.');`
+  - `setLoading(false)` on success happens only via `onDone` — do NOT call it in the try block after the post, as the operation is still running.
 - All action buttons have `disabled={loading}` while an operation is in flight.
 - Renders `<OperationProgress operationId={operationId} onDone={handleDone} />` below the table when `operationId` is non-null.
 - `handleDone`: `setLoading(false); fetchStatuses();` — re-fetches status on completion to refresh active badges.
+- If `error` is non-null, renders error message above the table.
 - Component is self-contained; no new nav link needed.
 
 **Acceptance criteria for `DbServiceControl.test.jsx` (Vitest + RTL + `vi.mock('axios')`):**
 - Renders status table: mock `axios.get` returns `{statuses: {mysql: {service:'mysql', active:true}}}` → asserts "mysql", "active" text, and three buttons ("start", "stop", "restart") are in the document.
 - Active badge: `active: true` → element with green class present; `active: false` → "inactive" text with red class.
-- Dispatches action: mock `axios.post` returns `{operation_id: 42}` → click "restart" button → assert `axios.post` called with `{engine:'mysql', action:'restart'}`; `OperationProgress` rendered with `operationId=42` (mock `OperationProgress` via `vi.mock` or assert its props).
+- Dispatches action: mock `axios.post` returns `{operation_id: 42}` → click "restart" button → assert `axios.post` called with `{engine:'mysql', action:'restart'}`; `OperationProgress` rendered with `operationId=42`.
 - Buttons disabled during operation: after click (before `onDone`), all three buttons have `disabled` attribute.
 - Status refresh on done: after `onDone` fires, `axios.get` is called a second time.
+- **Error path**: mock `axios.post` to reject (e.g., `Promise.reject({ response: { data: { message: 'Forbidden' } } })`) → after click, assert `loading` is `false` (buttons are NOT disabled) and the error message "Forbidden" is rendered in the document. This covers the "buttons permanently stuck" bug.
 - Mock `OperationProgress` as a simple stub (`vi.mock('@/Components/OperationProgress', () => ({ default: ({ operationId }) => <div data-testid="op-progress">{operationId}</div> }))`).
 - Mock `route()` global: `global.route = (name) => ({ 'databases.service.status': '/admin/databases/service/status', 'databases.service.action': '/admin/databases/service' }[name])`.
 
@@ -268,11 +280,12 @@
 - Modify: `tests/Feature/Database/DbServiceSystemTest.php` (complete Test 5 from Task 1 scaffold once routes exist)
 
 **Acceptance criteria for completed system test suite:**
-- All 5 system tests pass inside the `local-dev` container under `LARANODE_SYSTEM_TESTS=1`:
+- All 6 system tests pass inside the `local-dev` container under `LARANODE_SYSTEM_TESTS=1`:
   - Test 1: `laranode-db-service.sh start invalid_engine` → exit non-zero.
   - Test 2: `laranode-db-service.sh -p mysql` → exit non-zero.
   - Test 3: `laranode-db-service.sh restart -mysql` → exit non-zero.
   - Test 4: `laranode-db-service.sh restart mysql` → exit 0; `systemctl is-active mysql` returns `active`.
+  - Test 4b: `laranode-db-service.sh restart postgres` → exit 0; covers the `postgresql@16-main` retry branch.
   - Test 5: `GET /admin/databases/service/status` as admin → `statuses.mysql.active === true`.
 - Standard suite (no flag): all system tests marked skipped, zero failures.
 
@@ -283,10 +296,10 @@
    - New test files: `DbServiceControllerTest`, `DbServiceOperationJobTest`, `DbServiceRequestTest`, `DbServiceSystemTest`.
 
 2. **Pest system suite** (inside `local-dev` container):
-   - `LARANODE_SYSTEM_TESTS=1 php artisan test --filter=DbServiceSystemTest` → 5 passing.
+   - `LARANODE_SYSTEM_TESTS=1 php artisan test --filter=DbServiceSystemTest` → 6 passing.
 
 3. **Vitest**:
-   - `npm run test` → `DbServiceControl.test.jsx` all green; existing `CreateDatabaseForm.test.jsx` still green.
+   - `npm run test` → `DbServiceControl.test.jsx` all green (including error-path test); existing `CreateDatabaseForm.test.jsx` still green.
 
 4. **Pint**:
    - `./vendor/bin/pint --test` → zero violations on all new PHP files.
@@ -306,8 +319,8 @@
 
 - [ ] Complete `DbServiceSystemTest.php` Test 5 (status endpoint round-trip)
 - [ ] Run standard Pest suite: zero failures
-- [ ] Run system Pest suite inside container: 5 passing
-- [ ] Run Vitest: all green
+- [ ] Run system Pest suite inside container: 6 passing
+- [ ] Run Vitest: all green (including error path)
 - [ ] Run Pint: zero violations
 - [ ] Run `npm run build`: exits 0
 - [ ] Verify `php artisan schedule:list` unchanged
@@ -338,10 +351,25 @@ No new migrations, no new models, no new nav items, no new Eloquent relations, n
 
 ---
 
+## Review Fixes Reflected in This Plan (2026-06-27)
+
+| # | Task | Change |
+|---|------|--------|
+| 1 | Task 4 | Dropped `$service` from `DbServiceOperationJob` constructor; job resolves from config |
+| 2 | Task 4 | Added postgres engine arg test (`'postgres'` not `'postgresql'` in Process::run) |
+| 3 | Task 4 | Added output-does-not-leak test for postgres engine |
+| 4 | Task 1 | Added Test 4b: system test for `laranode-db-service.sh restart postgres` (covers retry branch) |
+| 5 | Task 5 | Added `doAction` error-path Vitest test (axios reject → loading false + error rendered) |
+| 6 | Task 3 | Added unauthenticated → 302 test for `POST /admin/databases/service` (was missing; only status had it) |
+| 7 | Task 6 | Updated system suite count from 5 to 6 passing (added Test 4b) |
+| 8 | Task 5 | Added `error` state and `setError(null)` to `DbServiceControl.jsx` acceptance criteria |
+
+---
+
 ## Back-compat / Notes
 
 - `Operation` rows with `type=db.service.*` render automatically in `/admin/operations` via the existing generic paginated table — no `OperationsController` change.
 - `bootstrap/app.php` scheduler hook and `laranode-queue-worker.service` are unchanged; `DbServiceOperationJob` runs on the default queue.
 - `laranode-scripts/etc/sudoers.d/laranode-panel` is deployed by `laranode-installer.sh` via `install -m 440` (existing mechanism); the two new lines require a re-run of the installer or manual `install` on upgrade.
 - Existing `laranode-cron` sudoers drop-in is a separate file; unaffected.
-- `EngineManager::extraCandidates` (`postgres => ['postgresql@16-main']`) is the PHP-layer detection strategy; the script's postgres retry mirrors it independently as a defense-in-depth copy of the same knowledge.
+- `EngineManager::$extraCandidates` (`postgres => ['postgresql@16-main']`) is the PHP-layer detection strategy; the script's postgres retry mirrors it independently as defense-in-depth. Sync comments in the script point to `EngineManager.php` for future maintainers.

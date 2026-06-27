@@ -8,12 +8,13 @@
 
 **Key constraints:**
 - `SystemStatsService::getAllStats()` is the single source of truth for live dashboard stats; the `mysql` key is replaced by `dbEngines` in this branch — all consumers (`AdminDashboard.jsx`, `dashboard_stats_last_known` cache) are updated atomically.
-- `PHPManagerController::install()` uses `shell_exec("sudo bash {$scriptPath}")` pattern (existing); the new `isVersionInstalled()` guard must follow the same pattern (call `laranode-php-list.sh`), not inline a raw `dpkg` call.
-- `AccountsController::impersonate()` currently has no self-impersonation guard; the hard `abort(403)` is added before any call to `impersonate()`.
+- `PHPManagerController::install()` uses `shell_exec` in its existing `list()` method — do NOT replicate that pattern. The new `isVersionInstalled()` guard MUST use `Process::run(['sudo', 'bash', $scriptPath])` so it is testable with `Process::fake()`. This is both the project convention and a hard requirement for CI testability.
+- `AccountsController::impersonate()` currently has no self-impersonation guard; the hard `abort(403)` is added before any call to `impersonate()`. The `User` model also needs `canBeImpersonated(): bool { return !$this->isAdmin(); }` to block admin-to-admin impersonation.
 - `SidebarNavi.jsx` currently uses `isSidebarOpen` state (mobile-only toggle) and `TbBrandMysql` for the Databases link.
 - `AuthenticatedLayout.jsx` children wrapper is `<div className="ml-3 pr-3">` — D4 adds `mx-auto` (and optionally `max-w-screen-xl`) to this div only.
-- `Filemanager.jsx` path block is the `{goBack && goBack != "" && ...}` section at lines 279–289; the `path` state is the backend-sandboxed string returned by `FilemanagerController`.
-- Vitest + RTL for all frontend components; Pest 3 + RefreshDatabase for all backend changes; no new `LARANODE_SYSTEM_TESTS=1` tests required (D11 reuses the existing `laranode-php-list.sh` — no new shell script, only a new call site).
+- `Filemanager.jsx` path block is the `{goBack && goBack != "" && ...}` section at lines 279–289; the `path` state is the backend-sandboxed string returned by `FilemanagerController`. Breadcrumb only shows when `goBack` is truthy — root path shows no breadcrumb (this is by design).
+- `localStorage.getItem()` in `useState()` initializer is client-only — safe because Inertia is CSR (no SSR hydration mismatch risk).
+- Vitest + RTL for all frontend components; Pest 3 + RefreshDatabase for all backend changes; no new `LARANODE_SYSTEM_TESTS=1` tests required (D11 reuses the existing `laranode-php-list.sh` — no new shell script, only a new call site using `Process::run`).
 
 **Branch:** `feature/dashboard-ux-polish` (off `development`).
 **Suite:** `./vendor/bin/pest` (backend) + `npm run test` (frontend Vitest).
@@ -62,20 +63,21 @@ The existing `use Illuminate\Support\Facades\Cache;` is already present in this 
 
 **Test layer — Pest (TDD):**
 - `tests/Feature/Dashboard/DashboardStatsTest.php` (new)
-  - Test: dispatching `new SystemStatsEvent()` (with `Process::fake()`) writes `dashboard_stats_last_known` to Cache.
+  - **REQUIRED: `Process::fake()` stub scope.** `SystemStatsEvent::__construct()` calls `SystemStatsService::getAllStats()` which internally issues the following `Process::run()` calls: `top`, `free`, `df`, `uptime`, `ps`, `who`, `systemctl status apache2`, `systemctl status mysql`, and reads `/proc/net/dev`. Stub ALL of these with `Process::fake([...])` at the start of each test that constructs `SystemStatsEvent`. Do not leave any stub implicit — an unmatched call causes a real system call which will fail in CI.
+  - Test: dispatching `new SystemStatsEvent()` (with full `Process::fake()` as above) writes `dashboard_stats_last_known` to Cache.
   - Test: `GET /dashboard/admin` as admin returns Inertia component `Dashboard/Admin/AdminDashboard` with `initialStats` key in props (use `$response->assertInertia(fn($page) => $page->component('Dashboard/Admin/AdminDashboard')->has('initialStats'))`).
   - Write failing tests first, then implement.
 
 **Test layer — Vitest (TDD):**
 - `resources/js/Pages/Dashboard/Admin/AdminDashboard.test.jsx` (new)
   - Mock `window.Echo` (private channel that does nothing).
-  - Render `<AdminDashboard initialStats={{ cpuStats: { usage: '42', ... }, ... }} />`.
+  - Render `<AdminDashboard initialStats={{ cpuStats: { usage: '42', ... }, ... }} />` with a **non-empty** fixture. The assertion "shows CPU stat text without a spinner on first render" is only meaningful when `initialStats` is non-empty — the fixture must contain real-looking data matching the shape `AdminDashboard.jsx` reads.
   - Assert CPU usage text appears immediately without waiting for an event.
   - Render `<AdminDashboard initialStats={[]} />` — assert no crash.
   - Write failing tests first.
 
-- [ ] Write failing Pest tests (`DashboardStatsTest.php`)
-- [ ] Write failing Vitest tests (`AdminDashboard.test.jsx`)
+- [ ] Write failing Pest tests (`DashboardStatsTest.php`) with full `Process::fake()` stub list
+- [ ] Write failing Vitest tests (`AdminDashboard.test.jsx`) with non-empty `initialStats` fixture
 - [ ] Implement `SystemStatsEvent.php` cache write
 - [ ] Implement `DashboardController::admin()` `initialStats` prop
 - [ ] Implement `AdminDashboard.jsx` prop seeding
@@ -120,11 +122,11 @@ No backend change. No migration.
 - `resources/js/Pages/Dashboard/Admin/Components/TopProcesses.test.jsx` (new)
   - Import and render `TopProcessesChart` directly.
   - Render with sample `topStats` (10+ entries with mixed small %CPU) and `sortBy="cpu"`; assert `<canvas>` element is in the DOM.
-  - Render with `topStats` containing many small processes; assert "Other" appears in the chart data (inspect the chart instance or spy on chart data construction).
+  - **"Other" aggregation test (concrete approach):** Mock Chart.js using `vi.mock('chart.js')` before the render. After rendering, capture the `datasets` argument passed to the Chart.js constructor (e.g. via `vi.mocked(Chart).mock.calls[0][1].data`). Assert the `labels` array in the captured data contains `'Other'`. This is the only approach that verifies the aggregation logic without relying on DOM output from Chart.js internals.
   - Render with `topStats=[]`; assert no `<canvas>` element.
   - Write failing tests first.
 
-- [ ] Write failing Vitest tests (`TopProcesses.test.jsx`)
+- [ ] Write failing Vitest tests (`TopProcesses.test.jsx`) including mocked Chart.js "Other" assertion
 - [ ] Create `TopProcessesChart.jsx`
 - [ ] Integrate into `TopProcesses.jsx`
 - [ ] Verify Vitest tests pass
@@ -168,7 +170,7 @@ No change to `SystemStatsEvent.php` (it already calls `getAllStats()`).
 - Replace `<MySQLLive mysqlStats={liveStats.mysql} />` with `<DbEnginesLive dbEngines={liveStats.dbEngines} />`.
 
 `resources/js/Pages/Dashboard/Admin/Components/MySQLLive.jsx`:
-- Delete (or leave as a dead file with a redirect comment — deletion preferred). If deleted, verify no other file imports it before removing.
+- Delete (confirmed: imported only in `AdminDashboard.jsx` — deletion is safe). Verify no other importers before removing.
 
 **Acceptance criteria:**
 - `SystemStatsService::getDbEnginesStatus()` returns `{ mysql: { memory, cpuTime, uptime, pid } }` when only MySQL is active.
@@ -180,11 +182,10 @@ No change to `SystemStatsEvent.php` (it already calls `getAllStats()`).
 
 **Test layer — Pest (TDD):**
 - `tests/Feature/Dashboard/DbEnginesStatusTest.php` (new)
-  - Use `Process::fake()` to stub `systemctl is-active mysql` → `active`, others → `inactive`.
-  - Assert `(new SystemStatsService)->getDbEnginesStatus()` returns array with `mysql` key and expected shape keys (`pid`, `memory`, `cpuTime`, `uptime`).
-  - Use `Process::fake()` with both `mysql` and `postgresql` active.
-  - Assert both `mysql` and `postgres` keys present.
-  - Assert `getAllStats()` has `dbEngines` key and no `mysql` key at the top level.
+  - **REQUIRED: full `Process::fake()` stub scope.** `EngineManager::available()` calls `systemctl is-active` for each engine's primary service name AND any extra candidate service names (e.g. `postgresql@16-main` for the `postgres` engine). The `Process::fake()` stubs MUST cover the primary name AND ALL extra candidate names from `EngineManager`. Stub each explicitly: return `'active\n'` for the candidate under test, `'inactive\n'` for all others (including the extra candidates). Failure to stub extra candidates produces brittle tests that may pass for wrong reasons on some machines.
+  - Test: stub `systemctl is-active mysql` → `active`, all others (including extra candidates) → `inactive`; assert `(new SystemStatsService)->getDbEnginesStatus()` returns array with `mysql` key and shape keys (`pid`, `memory`, `cpuTime`, `uptime`).
+  - Test: stub both `mysql` and `postgresql` (+ all extra candidates) as active; assert both `mysql` and `postgres` keys present.
+  - Test: assert `getAllStats()` has `dbEngines` key and no `mysql` key at the top level.
   - Write failing tests first.
 
 **Test layer — Vitest (TDD):**
@@ -196,7 +197,7 @@ No change to `SystemStatsEvent.php` (it already calls `getAllStats()`).
   - Render with `dbEngines = {}` — assert nothing rendered (component returns null).
   - Write failing tests first.
 
-- [ ] Write failing Pest tests (`DbEnginesStatusTest.php`)
+- [ ] Write failing Pest tests (`DbEnginesStatusTest.php`) with full stub coverage for primary + extra candidate service names
 - [ ] Write failing Vitest tests (`DbEnginesLive.test.jsx`)
 - [ ] Implement `getServiceStatus()` + `getDbEnginesStatus()` in `SystemStatsService.php`
 - [ ] Update `getAllStats()` — swap `mysql` for `dbEngines`
@@ -262,6 +263,7 @@ No backend change. No test required (pure CSS layout — visual regression is th
 
 Lift collapse state into `AuthenticatedLayout.jsx`:
 - Add state: `const [isCollapsed, setIsCollapsed] = useState(() => localStorage.getItem('laranode_sidebar_collapsed') === 'true')`.
+  - **CSR note:** The `localStorage` initializer runs client-only. This is safe — Inertia is CSR and has no SSR pass. No guard is needed.
 - Pass as props to `SidebarNavi`: `<SidebarNavi isCollapsed={isCollapsed} setIsCollapsed={setIsCollapsed} />`.
 - Switch the content area margin: change `<div className="h-full ml-14 mt-14 mb-10 md:ml-64">` to `<div className={`h-full ${isCollapsed ? 'ml-14' : 'ml-64'} mt-14 mb-10`}>` (removes the responsive `md:ml-64` pair; a single dynamic value replaces it).
 
@@ -278,7 +280,7 @@ Lift collapse state into `AuthenticatedLayout.jsx`:
   }
   ```
   Remove the `md:hidden` class so it shows on all breakpoints.
-- When `isCollapsed` is true, item label `<span>` elements should be hidden. The existing `truncate` approach on `<span className="ml-2 text-sm tracking-wide truncate">` does not hide on collapse — add a conditional class: `${isCollapsed ? 'hidden' : ''}` or simply `hidden md:block`-style based on `isCollapsed`. Prefer the conditional: `className={`ml-2 text-sm tracking-wide truncate ${isCollapsed ? 'hidden' : ''}`}`. Apply to all nav `<span>` labels.
+- When `isCollapsed` is true, item label `<span>` elements should be hidden. Add conditional class: `className={`ml-2 text-sm tracking-wide truncate ${isCollapsed ? 'hidden' : ''}`}`. Apply to all nav `<span>` labels.
 
 **Acceptance criteria:**
 - On mount with `localStorage` empty, sidebar starts expanded (`w-64`).
@@ -293,13 +295,14 @@ Lift collapse state into `AuthenticatedLayout.jsx`:
   - Mock `window.localStorage` (or use `vitest`'s `jsdom` localStorage).
   - Mock `window.route` (Ziggy helper) to return `'/'` for any route call.
   - Render `<SidebarNavi isCollapsed={false} setIsCollapsed={mockFn} />`.
-  - Assert "Databases" link renders with an element that has the `TbDatabase` aria/role (or assert by test ID if added, or simply assert `TbBrandMysql` is absent and `TbDatabase` present).
+  - Assert "Databases" link renders with `TbDatabase` (not `TbBrandMysql`).
   - Render `<SidebarNavi isCollapsed={true} setIsCollapsed={mockFn} />`.
-  - Assert nav label spans are not visible (hidden class present or `getByText('Websites')` not in document).
+  - Assert nav label spans are not visible (hidden class present or text not in document).
   - Click the toggle button.
   - Assert `setIsCollapsed` mock was called with `true`.
   - Assert `localStorage.setItem` was called with `'laranode_sidebar_collapsed'` and `'true'`.
   - Write failing tests first.
+  - **Known gap:** There is no integration test between `AuthenticatedLayout` and `SidebarNavi`. The collapsed-on-reload persistence (i.e. that `AuthenticatedLayout` reads `localStorage` on mount and passes the correct initial `isCollapsed`) is not covered by this unit test — it is verified in the visual regression step (Task 10).
 
 - [ ] Write failing Vitest tests (`SidebarNavi.test.jsx`)
 - [ ] Implement D7 icon swap in `SidebarNavi.jsx` (TbDatabase)
@@ -328,7 +331,11 @@ Lift collapse state into `AuthenticatedLayout.jsx`:
 4. Table body rows `<tr ... className="border-b align-top cursor-pointer">`: add `dark:border-gray-700 dark:text-gray-200`.
 5. Pagination `<Link>` and `<span>` elements with `className="px-3 py-1 border rounded"`: add `dark:border-gray-600 dark:text-gray-300` on links, and `dark:border-gray-700 dark:text-gray-500` on disabled spans.
 6. The `<pre>` block (`bg-black text-green-300`) is intentionally terminal-themed and left unchanged.
-7. The `badge` map colour utilities are Tailwind colour classes — they render correctly in both modes without `dark:` overrides.
+7. **Badge map:** Add `dark:` variants to each badge entry. Light `bg-*-200` badges are low contrast on a dark background. Example pattern:
+   - `pending`: `bg-gray-200 text-gray-800` → add `dark:bg-gray-700 dark:text-gray-200`
+   - `running`: `bg-blue-200 text-blue-800` → add `dark:bg-blue-800 dark:text-blue-200`
+   - `succeeded`: `bg-green-200 text-green-800` → add `dark:bg-green-800 dark:text-green-200`
+   - `failed`: `bg-red-200 text-red-800` → add `dark:bg-red-800 dark:text-red-200`
 
 No backend change. No migration.
 
@@ -336,6 +343,7 @@ No backend change. No migration.
 - Operations page container is wrapped in `max-w-7xl px-4 my-8` (matches pattern in other pages like `Accounts/Index.jsx`).
 - Table header and rows have `dark:` variants for text and border colours.
 - Pagination links have `dark:` border and text variants.
+- Badge map has `dark:bg-*-800 dark:text-*-200` variants for all badge types.
 - `npm run build` succeeds.
 
 **Test layer — Vitest (TDD):**
@@ -345,10 +353,11 @@ No backend change. No migration.
   - Assert the operation row renders with the `succeeded` badge.
   - Assert "Previous" pagination is a `<span>` with `opacity-50` class (disabled).
   - Assert "Next" pagination is a `<Link>` (renders as `<a>`) with `href` present.
+  - **REQUIRED — dark mode regression guard:** Assert that `thead tr` has class string containing `dark:text-gray-300` and `dark:border-gray-700`. Use `element.className` or `classList` assertions. A test that only checks elements render gives no protection against the `dark:` classes being omitted on a future edit.
   - Write failing tests first.
 
-- [ ] Write failing Vitest tests (`Operations/Index.test.jsx`)
-- [ ] Implement dark-mode classes in `Operations/Index.jsx`
+- [ ] Write failing Vitest tests (`Operations/Index.test.jsx`) including dark class assertions
+- [ ] Implement dark-mode classes in `Operations/Index.jsx` (including badge map)
 - [ ] Implement container restructure (`max-w-7xl px-4 my-8`)
 - [ ] Verify Vitest tests pass
 - [ ] Commit: `feat(operations): dark-mode styles + max-w-7xl container (D6)`
@@ -380,7 +389,7 @@ Create `resources/js/Pages/Filemanager/Components/Breadcrumb.jsx`:
 - Replace the existing path display block (lines 279–289, the `{goBack && goBack != "" && ...}` section):
   - Keep the "Back" button `<div>` (double-click `cdIntoPath(goBack)`) — this is a separate element.
   - Replace the `<div className="bg-white dark:bg-gray-850 py-3 px-6 dark:text-gray-300 text-gray-900 flex items-center space-x-2">Path: {path}</div>` with `<Breadcrumb path={path} onNavigate={cdIntoPath} />`.
-- The `{goBack && ...}` condition wrapping remains — breadcrumb only shows when `goBack` is set (i.e. not at root).
+- The `{goBack && ...}` condition wrapping remains — breadcrumb only shows when `goBack` is set (i.e. not at root). Root path `'/'` shows no breadcrumb — this is by design (see spec D14 edge case note).
 
 **Scope — D10 (hint banner):**
 
@@ -424,7 +433,7 @@ Create `resources/js/Pages/Filemanager/Components/Breadcrumb.jsx`:
   - Write failing tests first.
 - `resources/js/Pages/Filemanager/Filemanager.test.jsx` (new)
   - Mock `fetch` to return `{ files: [], goBack: false }` (at root, no breadcrumb).
-  - Render `<Filemanager />` (needs to mock window.Echo is not needed since Filemanager does not use Echo).
+  - Render `<Filemanager />` (no Echo dependency since Filemanager does not use Echo).
   - Assert hint text "Double-click a folder to enter it" is present.
   - Click the dismiss button (`aria-label="Dismiss hint"`).
   - Assert hint no longer in DOM.
@@ -454,17 +463,17 @@ Create `resources/js/Pages/Filemanager/Components/Breadcrumb.jsx`:
 **Scope — backend:**
 
 `app/Http/Controllers/PHPManagerController.php`:
-- Add a private method `isVersionInstalled(string $version): bool`:
+- Add a private method `isVersionInstalled(string $version): bool` using `Process::run()` (NOT `shell_exec`):
   ```php
   private function isVersionInstalled(string $version): bool
   {
       $scriptPath = base_path('laranode-scripts/bin/laranode-php-list.sh');
-      $output = shell_exec("sudo bash {$scriptPath}");
-      $installed = json_decode($output, true) ?? [];
+      $result = Process::run(['sudo', 'bash', $scriptPath]);
+      $installed = json_decode($result->output(), true) ?? [];
       return collect($installed)->contains('version', $version);
   }
   ```
-  This reuses the identical `shell_exec` pattern already in `list()`.
+  Import `Illuminate\Support\Facades\Process`. Do NOT use `shell_exec` here — using `Process::run()` is required for `Process::fake()` testability and matches the project convention used in all service classes.
 - In `install()`, after `$version = $request->input('version');` and before calling the install script, add:
   ```php
   if ($this->isVersionInstalled($version)) {
@@ -505,12 +514,11 @@ Create `resources/js/Pages/Filemanager/Components/Breadcrumb.jsx`:
 
 **Test layer — Pest (TDD):**
 - `tests/Feature/PHP/PHPManagerInstallTest.php` (new)
-  - Authenticate as admin.
-  - `Process::fake()` is not directly applicable here since `PHPManagerController::install()` uses `shell_exec` — use `Mockery` or `PHPUnit` mocking to stub `shell_exec`, or use `Process::fake()` for the install script call but note `shell_exec` is separate.
-  - Alternative approach: extract `isVersionInstalled()` to be overridable in tests. Use partial mocking of `PHPManagerController` via `$this->instance(PHPManagerController::class, ...)` in Pest, or spy the private method if possible.
-  - Simpler: test the controller directly by passing a mock response from `laranode-php-list.sh`. Since `shell_exec` is a global function and hard to mock, test via the route with `Process::fake()` for the list call if refactored to `Process::run()`, OR use a test-only approach where `isVersionInstalled()` is extracted to a mockable service.
-  - **Recommended:** refactor `isVersionInstalled()` to use `Process::run(['sudo', 'bash', $scriptPath])` instead of `shell_exec` (consistent with the project's `Process` facade pattern used elsewhere). Then `Process::fake()` works cleanly.
-  - Tests: `POST /php/install` with mocked list showing `8.4` installed → assert 409; `POST /php/install` with mocked list showing `8.4` not installed → assert Process was called for the install script (200).
+  - `isVersionInstalled()` uses `Process::run()` — use `Process::fake()` to stub the `laranode-php-list.sh` call. This is the reason the method must NOT use `shell_exec`.
+  - `Process::fake()` stub for the list call: return JSON `[{"version":"8.4","status":"active","enabled":true}]` as the process output.
+  - `Process::fake()` stub for the install script call: return success output for the non-installed case.
+  - Test: authenticate as admin; POST to `php.install` with version `'8.4'` (present in faked list) → assert 409 with `message: "PHP 8.4 is already installed"`.
+  - Test: POST to `php.install` with version `'8.3'` (not in faked list) → assert `Process::ran()` for the install script; assert 200.
   - Write failing tests first.
 
 **Test layer — Vitest (TDD):**
@@ -522,11 +530,9 @@ Create `resources/js/Pages/Filemanager/Components/Breadcrumb.jsx`:
   - Render with `installedVersions=[]`; assert all options are enabled.
   - Write failing tests first.
 
-**Note on `Process` facade refactor:** `isVersionInstalled()` should call `Process::run(['sudo', 'bash', $scriptPath])` (not `shell_exec`) so it is testable with `Process::fake()`. This also applies the project convention (see `CreateCronJobService`, `SystemStatsService`, all service classes use `Process::run`). The `list()` method's existing `shell_exec` is a pre-existing inconsistency — do not fix it as part of this task (surgical change only).
-
-- [ ] Write failing Pest tests (`PHPManagerInstallTest.php`)
+- [ ] Write failing Pest tests (`PHPManagerInstallTest.php`) using `Process::fake()`
 - [ ] Write failing Vitest tests (`InstallPHPForm.test.jsx`)
-- [ ] Add `isVersionInstalled(string $version): bool` to `PHPManagerController` (use `Process::run` not `shell_exec`)
+- [ ] Add `isVersionInstalled(string $version): bool` to `PHPManagerController` using `Process::run` (NOT `shell_exec`)
 - [ ] Add `isVersionInstalled` guard to `install()` method (409 response)
 - [ ] Update `InstallPHPForm.jsx` to accept `installedVersions` prop + disable installed options
 - [ ] Update `PHP/Index.jsx` to pass `installedVersions={phpVersions}` to `<InstallPHPForm>`
@@ -537,12 +543,13 @@ Create `resources/js/Pages/Filemanager/Components/Breadcrumb.jsx`:
 
 ---
 
-### Task 9 — D13: Block self-impersonation (TDD, security)
+### Task 9 — D13: Block self-impersonation + admin-to-admin guard (TDD, security)
 
 **Items covered:** D13
 
 **Files:**
 - Modify: `app/Http/Controllers/AccountsController.php`
+- Modify: `app/Models/User.php`
 - Modify: `resources/js/Pages/Accounts/Index.jsx`
 - Create: `tests/Feature/Accounts/ImpersonateSelfTest.php`
 - Create (or extend): `resources/js/Pages/Accounts/Index.test.jsx`
@@ -557,12 +564,20 @@ if ($user->id === auth()->id()) {
 ```
 No other changes to this method. The `leaveImpersonation()` method is unchanged.
 
+`app/Models/User.php` — add `canBeImpersonated()` method to prevent admin-to-admin impersonation (lab404 calls this if defined):
+```php
+public function canBeImpersonated(): bool
+{
+    return !$this->isAdmin();
+}
+```
+Add this alongside the existing `canImpersonate()` method at line 68. If the business decision is to allow admin-to-admin impersonation, do NOT add this method — instead add a test asserting that admin-to-admin returns 302 (allowed) with a comment explaining the decision.
+
 **Scope — frontend (UX-only, not a security control):**
 
 `resources/js/Pages/Accounts/Index.jsx`:
-- The component already receives `accounts` prop but does not currently receive `auth`. Read auth from `usePage().props`:
-  - Add `import { usePage } from '@inertiajs/react'` if not already present (check: currently only `Link` and `Head` are imported from `@inertiajs/react`, and `router` is imported separately — `usePage` is not imported).
-  - Add `const { auth } = usePage().props;` inside the `Accounts` component body.
+- Add `import { usePage } from '@inertiajs/react'` if not already present (check: currently only `Link` and `Head` are imported from `@inertiajs/react`, and `router` is imported separately — `usePage` is not imported).
+- Add `const { auth } = usePage().props;` inside the `Accounts` component body.
 - Wrap the impersonate link (lines 101–109) in a conditional:
   ```jsx
   {account.id !== auth.user.id && (
@@ -579,17 +594,19 @@ No other changes to this method. The `leaveImpersonation()` method is unchanged.
 
 **Acceptance criteria (security):**
 - `GET /accounts/impersonate/{own_id}` (admin impersonating themselves) → 403.
-- `GET /accounts/impersonate/{other_user_id}` (admin impersonating another user) → redirect (succeeds).
+- `GET /accounts/impersonate/{other_non_admin_id}` (admin impersonating a regular user) → redirect (succeeds).
+- `GET /accounts/impersonate/{other_admin_id}` (admin impersonating another admin) → 403 (via `canBeImpersonated()` returning false) — OR 302 if `canBeImpersonated()` is not added and admin-to-admin is permitted (must be explicitly tested and commented).
 - Non-admin attempting impersonation → 403 (existing `AdminMiddleware` already blocks this; assert it still holds).
-- **The frontend conditional is UX-only. The 403 test is the authoritative security assertion.**
+- **The frontend conditional is UX-only. The 403 tests are the authoritative security assertions.**
 
 **Test layer — Pest (TDD, security test):**
 - `tests/Feature/Accounts/ImpersonateSelfTest.php` (new)
-  - Test: admin `actingAs($admin)` → `get(route('accounts.impersonate', $admin))` → assert 403.
-  - Test: admin `actingAs($admin)` → `get(route('accounts.impersonate', $otherUser))` → assert redirect (status 302, not 403).
-  - Test: non-admin `actingAs($user)` → `get(route('accounts.impersonate', $admin))` → assert 403 (middleware guard, already covered conceptually but assert explicitly).
-  - All three tests must pass before implementation is considered done.
-  - Write failing tests first (the self-impersonate test must fail without the guard).
+  - Test 1: admin `actingAs($admin)` → `get(route('accounts.impersonate', $admin))` → assert 403.
+  - Test 2: admin `actingAs($admin)` → `get(route('accounts.impersonate', $user))` where `$user` is a non-admin → assert redirect (status 302, not 403).
+  - Test 3: admin `actingAs($admin)` → `get(route('accounts.impersonate', $otherAdmin))` where `$otherAdmin` is another admin → assert 403 (if `canBeImpersonated()` added) OR assert 302 with an explicit comment documenting the allowed behaviour.
+  - Test 4: non-admin `actingAs($user)` → `get(route('accounts.impersonate', $admin))` → assert 403 (middleware guard).
+  - All four tests must pass before the task is considered done. Tests 1 and 3 must be written as failing tests before the guards are added.
+  - Write failing tests first (the self-impersonate test and admin-to-admin test must fail without the guards).
 
 **Test layer — Vitest (TDD):**
 - `resources/js/Pages/Accounts/Index.test.jsx` (new)
@@ -599,15 +616,16 @@ No other changes to this method. The `leaveImpersonation()` method is unchanged.
   - Assert the impersonate link for `account.id === 1` (own row, auth.user.id === 1) is NOT present.
   - Write failing tests first.
 
-- [ ] Write failing Pest tests (`ImpersonateSelfTest.php`)
+- [ ] Write failing Pest tests (`ImpersonateSelfTest.php`) — all 4 cases including admin-to-admin
 - [ ] Write failing Vitest tests (`Accounts/Index.test.jsx`)
 - [ ] Add `abort(403)` guard to `AccountsController::impersonate()`
+- [ ] Add `canBeImpersonated()` to `User` model (or document explicit decision to allow admin-to-admin)
 - [ ] Add `usePage` import + `auth` destructure to `Accounts/Index.jsx`
 - [ ] Wrap impersonate link in `account.id !== auth.user.id` conditional
-- [ ] Verify Pest tests pass (403 on self, 302 on other)
+- [ ] Verify Pest tests pass (403 on self, 403 on admin-to-admin, 302 on admin→user, 403 on non-admin)
 - [ ] Verify Vitest tests pass
 - [ ] Run Pint on PHP files
-- [ ] Commit: `fix(accounts): block self-impersonation with 403 guard + hide link for own row (D13)`
+- [ ] Commit: `fix(accounts): block self-impersonation + admin-to-admin guard (D13)`
 
 ---
 
@@ -620,7 +638,7 @@ No other changes to this method. The `leaveImpersonation()` method is unchanged.
 - [ ] Run full Vitest suite: `npm run test` — zero failures.
 - [ ] Run Pint on all modified PHP files: `./vendor/bin/pint` — zero formatting issues.
 - [ ] Run production asset build: `npm run build` — exits 0, no import errors.
-- [ ] Manual visual check (local-dev container or browser): admin dashboard shows stats on hard refresh (D1); top-processes chart visible with real data (D2); DB engine widget shows correct engine name (D3); content is centred on wide viewport (D4); sidebar collapses and label text hides, persists across reload (D5); Databases link shows cylinder icon not MySQL brand icon (D7); Operations page is readable in dark mode (D6); File manager hint banner appears and dismisses (D10); breadcrumb segments are clickable (D14); PHP install modal shows installed versions as disabled (D11); impersonate link absent on own row (D13).
+- [ ] Manual visual check (local-dev container or browser): admin dashboard shows stats on hard refresh (D1); top-processes chart visible with real data (D2); DB engine widget shows correct engine name (D3); content is centred on wide viewport (D4); sidebar collapses and label text hides, persists across reload (D5); Databases link shows cylinder icon not MySQL brand icon (D7); Operations page is readable in dark mode including badges (D6); File manager hint banner appears and dismisses (D10); breadcrumb segments are clickable (D14); PHP install modal shows installed versions as disabled (D11); impersonate link absent on own row (D13).
 - [ ] Assert no regression: `GET /admin/operations` → 200; `GET /php` → 200; `GET /accounts` → 200; `GET /filemanager` → 200; `GET /dashboard` → 200 (admin); `GET /dashboard` → 200 (user).
 
 ---
@@ -632,8 +650,8 @@ No other changes to this method. The `leaveImpersonation()` method is unchanged.
 | D3: `mysql` key removed from `getAllStats()`, replaced by `dbEngines` | Cache key `dashboard_stats_last_known` may hold stale shape after deploy | TTL is 90s; stale shape resolves itself within 90 seconds. `DbEnginesLive` renders nothing if `dbEngines` is undefined — no crash. |
 | D1: new `initialStats` Inertia prop | If cache cold, prop is `[]` — identical to prior behaviour | None needed. |
 | D5: `SidebarNavi` now requires `isCollapsed`/`setIsCollapsed` props | These are internal layout props; no external callers pass them | Props have no default, so TypeErrors possible if `SidebarNavi` is rendered without `AuthenticatedLayout`. Assert no standalone `SidebarNavi` usage in other layout files. |
-| D11: `isVersionInstalled` uses `Process::run` (not `shell_exec`) | New call to `laranode-php-list.sh` on every install attempt | Script is fast (dpkg query); acceptable overhead. |
-| D13: `abort(403)` is first check in `impersonate()` | Admin who accidentally clicks own row now gets a 403 page | Frontend conditional hides the link — 403 should only fire if bypassed. |
+| D11: `isVersionInstalled` uses `Process::run` (not `shell_exec`) | New call to `laranode-php-list.sh` on every install attempt | Script is fast (dpkg query); acceptable overhead. `Process::run` is the project convention. |
+| D13: `abort(403)` is first check in `impersonate()`; `canBeImpersonated()` blocks admin-to-admin | Admin who accidentally clicks own row now gets a 403 page | Frontend conditional hides the link — 403 should only fire if bypassed. |
 
 ---
 
@@ -646,6 +664,7 @@ app/Http/Controllers/DashboardController.php                           (modify: 
 app/Services/Dashboard/SystemStatsService.php                          (modify: getServiceStatus + getDbEnginesStatus, replace mysql key — D3)
 app/Http/Controllers/PHPManagerController.php                          (modify: isVersionInstalled guard via Process::run — D11)
 app/Http/Controllers/AccountsController.php                            (modify: abort(403) self-impersonate guard — D13)
+app/Models/User.php                                                    (modify: add canBeImpersonated() — D13)
 
 # Frontend — Dashboard
 resources/js/Pages/Dashboard/Admin/AdminDashboard.jsx                  (modify: initialStats prop seed — D1; swap DbEnginesLive — D3)
@@ -659,7 +678,7 @@ resources/js/Layouts/AuthenticatedLayout.jsx                           (modify: 
 resources/js/Layouts/Partials/SidebarNavi.jsx                          (modify: accept isCollapsed props, localStorage toggle — D5; TbDatabase for Databases link — D7)
 
 # Frontend — Operations
-resources/js/Pages/Operations/Index.jsx                                (modify: dark: variants, max-w-7xl container — D6)
+resources/js/Pages/Operations/Index.jsx                                (modify: dark: variants including badge map, max-w-7xl container — D6)
 
 # Frontend — PHP Manager
 resources/js/Pages/PHP/Index.jsx                                       (modify: pass installedVersions={phpVersions} to InstallPHPForm — D11)
@@ -673,17 +692,17 @@ resources/js/Pages/Filemanager/Filemanager.jsx                         (modify: 
 resources/js/Pages/Filemanager/Components/Breadcrumb.jsx               (new — D14)
 
 # Tests — Pest
-tests/Feature/Dashboard/DashboardStatsTest.php                         (new — D1)
-tests/Feature/Dashboard/DbEnginesStatusTest.php                        (new — D3)
-tests/Feature/PHP/PHPManagerInstallTest.php                            (new — D11)
-tests/Feature/Accounts/ImpersonateSelfTest.php                         (new — D13, security)
+tests/Feature/Dashboard/DashboardStatsTest.php                         (new — D1; requires full Process::fake() stub list)
+tests/Feature/Dashboard/DbEnginesStatusTest.php                        (new — D3; requires primary + extra candidate stubs)
+tests/Feature/PHP/PHPManagerInstallTest.php                            (new — D11; uses Process::fake() for list + install calls)
+tests/Feature/Accounts/ImpersonateSelfTest.php                         (new — D13, security; 4 test cases incl. admin-to-admin)
 
 # Tests — Vitest
-resources/js/Pages/Dashboard/Admin/AdminDashboard.test.jsx             (new — D1)
-resources/js/Pages/Dashboard/Admin/Components/TopProcesses.test.jsx    (new — D2)
+resources/js/Pages/Dashboard/Admin/AdminDashboard.test.jsx             (new — D1; non-empty initialStats fixture required)
+resources/js/Pages/Dashboard/Admin/Components/TopProcesses.test.jsx    (new — D2; Chart.js mocked, datasets assertion for "Other")
 resources/js/Pages/Dashboard/Admin/Components/DbEnginesLive.test.jsx   (new — D3)
 resources/js/Layouts/Partials/SidebarNavi.test.jsx                     (new — D5, D7)
-resources/js/Pages/Operations/Index.test.jsx                           (new — D6)
+resources/js/Pages/Operations/Index.test.jsx                           (new — D6; asserts dark: class strings on thead tr)
 resources/js/Pages/PHP/Partials/InstallPHPForm.test.jsx                (new — D11)
 resources/js/Pages/Accounts/Index.test.jsx                             (new — D13)
 resources/js/Pages/Filemanager/Filemanager.test.jsx                    (new — D10)
@@ -696,8 +715,9 @@ resources/js/Pages/Filemanager/Components/Breadcrumb.test.jsx          (new — 
 
 | Item | Server-side guard | Frontend guard | Test |
 |------|-------------------|----------------|------|
-| D13 self-impersonate | `abort(403)` in `AccountsController::impersonate()` (hard block) | Conditional render (UX only) | `ImpersonateSelfTest.php` asserts 403 |
-| D11 reinstall | 409 JSON response before script call | `disabled` option (UX only) | `PHPManagerInstallTest.php` asserts 409 |
-| D3 engine detection | Config-driven `EngineManager::available()`; no user input | N/A | `DbEnginesStatusTest.php` |
+| D13 self-impersonate | `abort(403)` in `AccountsController::impersonate()` (hard block) | Conditional render (UX only) | `ImpersonateSelfTest.php` Test 1 asserts 403 |
+| D13 admin-to-admin | `canBeImpersonated(): bool { return !$this->isAdmin(); }` on `User` model | N/A | `ImpersonateSelfTest.php` Test 3 asserts 403 (or documented 302) |
+| D11 reinstall | 409 JSON response before script call; `isVersionInstalled()` uses `Process::run()` | `disabled` option (UX only) | `PHPManagerInstallTest.php` asserts 409; uses `Process::fake()` |
+| D3 engine detection | Config-driven `EngineManager::available()`; no user input | N/A | `DbEnginesStatusTest.php`; full candidate stub coverage |
 | D5 sidebar state | `localStorage` client-side only; no auth data stored | N/A | Vitest localStorage assertion |
 | D10/D14 file manager | Flysystem sandbox unchanged; `cdIntoPath` is same as manual nav | N/A | Existing backend sandboxing |
