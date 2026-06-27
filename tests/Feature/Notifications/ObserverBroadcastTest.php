@@ -2,8 +2,6 @@
 
 use App\Events\NotificationCreated;
 use App\Models\User;
-use App\Observers\NotificationsObserver;
-use Illuminate\Notifications\DatabaseNotification;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
 
