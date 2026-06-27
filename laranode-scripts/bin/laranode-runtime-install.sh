@@ -27,7 +27,7 @@ fi
 if [ "$RUNTIME" = "frankenphp" ]; then
     FRANKENPHP_VERSION="v1.12.4"
     FRANKENPHP_SHA256="becd9efc79783a4946fb4802433dc00be32de7e025b60fcab53db4d283a136e9"
-    FRANKENPHP_URL="https://github.com/php/frankenphp/releases/download/${FRANKENPHP_VERSION}/frankenphp-linux-x86_64"
+    FRANKENPHP_URL="https://github.com/dunglas/frankenphp/releases/download/${FRANKENPHP_VERSION}/frankenphp-linux-x86_64"
     FRANKENPHP_BIN="/usr/local/bin/frankenphp"
     FRANKENPHP_TMP="/tmp/frankenphp"
 

@@ -19,8 +19,8 @@ PHP_VERSION="$5"
 DOCUMENT_ROOT="$6"
 TEMPLATE_DIR="$7"
 
-# Reject leading-dash args
-for arg in "$DOMAIN" "$RUNTIME" "$PORT" "$SYSTEM_USER" "$PHP_VERSION"; do
+# Reject leading-dash args (ALL args — punch-list #6)
+for arg in "$DOMAIN" "$RUNTIME" "$PORT" "$SYSTEM_USER" "$PHP_VERSION" "$DOCUMENT_ROOT" "$TEMPLATE_DIR"; do
     case "$arg" in -*) echo "Invalid argument: $arg" >&2; exit 1 ;; esac
 done
 
