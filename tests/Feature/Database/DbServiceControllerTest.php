@@ -112,6 +112,18 @@ test('admin POST with invalid action returns 422', function () {
     $response->assertJsonValidationErrors(['action']);
 });
 
+test('admin POST with leading-dash action returns 422', function () {
+    $admin = User::factory()->create(['role' => 'admin']);
+
+    $response = $this->actingAs($admin)->postJson('/admin/databases/service', [
+        'engine' => 'mysql',
+        'action' => '--help',
+    ]);
+
+    $response->assertStatus(422);
+    $response->assertJsonValidationErrors(['action']);
+});
+
 // ──────────────────────────────────────────────────────────────────
 // Successful dispatch
 // ──────────────────────────────────────────────────────────────────
