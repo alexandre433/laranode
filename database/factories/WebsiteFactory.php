@@ -22,6 +22,8 @@ class WebsiteFactory extends Factory
             'ssl_status' => 'inactive',
             'ssl_expires_at' => null,
             'ssl_generated_at' => null,
+            'runtime' => 'php-fpm',
+            'runtime_port' => null,
         ];
     }
 }
