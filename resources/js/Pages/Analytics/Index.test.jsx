@@ -53,7 +53,9 @@ const makeSiteStat = (id, website_id, url, disk_bytes) => ({
     id,
     website_id,
     user_id: 1,
-    url,
+    // Mirror the eager-loaded `website:id,url` relation the API returns,
+    // so the chart exercises the real r.website.url path (not a flat r.url).
+    website: { id: website_id, url },
     snapshotted_at: '2026-06-27T00:00:00Z',
     disk_bytes,
 });
