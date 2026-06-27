@@ -41,7 +41,7 @@ class CronJobsController extends Controller
         $op->markRunning();
 
         try {
-            DB::transaction(function () use ($user, $validated, $op) {
+            DB::transaction(function () use ($user, $validated) {
                 CronJob::create([
                     'user_id' => $user->id,
                     'schedule' => $validated['schedule'],
@@ -50,10 +50,10 @@ class CronJobsController extends Controller
                 ]);
 
                 (new CreateCronJobService)->handle($user);
-
-                $op->markFinished(0);
             });
 
+            // markFinished OUTSIDE the transaction — a rollback must not destroy the audit row.
+            $op->markFinished(0);
             session()->flash('success', 'Cron job created successfully.');
         } catch (CreateCronJobException $e) {
             $op->markFinished(1);
@@ -80,12 +80,13 @@ class CronJobsController extends Controller
         $op->markRunning();
 
         try {
-            DB::transaction(function () use ($user, $cronJob, $op) {
+            DB::transaction(function () use ($user, $cronJob) {
                 (new DeleteCronJobService)->handle($user, $cronJob);
                 $cronJob->delete();
-                $op->markFinished(0);
             });
 
+            // markFinished OUTSIDE the transaction — a rollback must not destroy the audit row.
+            $op->markFinished(0);
             session()->flash('success', 'Cron job deleted successfully.');
         } catch (DeleteCronJobException $e) {
             $op->markFinished(1);
@@ -112,16 +113,16 @@ class CronJobsController extends Controller
         $op->markRunning();
 
         try {
-            DB::transaction(function () use ($user, $cronJob, $originalActive, $op) {
+            DB::transaction(function () use ($user, $cronJob, $originalActive) {
                 $cronJob->update(['active' => ! $originalActive]);
                 (new CreateCronJobService)->handle($user);
-                $op->markFinished(0);
             });
 
+            // markFinished OUTSIDE the transaction — a rollback must not destroy the audit row.
+            // No manual revert needed: if the transaction rolled back, the DB column is still $originalActive.
+            $op->markFinished(0);
             session()->flash('success', 'Cron job '.($originalActive ? 'paused' : 'activated').' successfully.');
         } catch (CreateCronJobException $e) {
-            // Revert active state
-            $cronJob->update(['active' => $originalActive]);
             $op->markFinished(1);
             session()->flash('error', 'Failed to toggle cron job: '.$e->getMessage());
         }
