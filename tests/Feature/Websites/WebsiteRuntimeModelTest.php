@@ -48,3 +48,16 @@ test('runtime and runtime_port are fillable', function () {
     expect($website->runtime)->toBe('frankenphp')
         ->and($website->runtime_port)->toBe(9200);
 });
+
+test('runtime_label serializes under the snake_case key the frontend reads', function () {
+    $website = Website::factory()->make();
+    $website->runtime = 'frankenphp';
+
+    $array = $website->toArray();
+
+    // The Inertia/JSON payload key MUST be snake_case 'runtime_label' (the React
+    // page reads website.runtime_label), NOT camelCase 'runtimeLabel'.
+    expect($array)->toHaveKey('runtime_label')
+        ->and($array['runtime_label'])->toBe('FrankenPHP')
+        ->and($array)->not->toHaveKey('runtimeLabel');
+});
