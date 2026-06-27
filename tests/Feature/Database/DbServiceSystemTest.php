@@ -94,7 +94,14 @@ test('restart postgres exits 0 and covers postgresql@16-main retry branch', func
     expect(trim(implode('', $statusOut)))->toBe('active');
 });
 
-test('status endpoint returns mysql active - pending until Task 3', function () {
-    // TODO: complete once DbServiceController + routes are added in Task 3
-    $this->markTestSkipped('pending Task 3: DbServiceController + routes');
+test('status endpoint returns mysql active', function () {
+    /** @var \Tests\TestCase $this */
+    $admin = \App\Models\User::factory()->create(['role' => 'admin']);
+    $this->actingAs($admin);
+
+    $response = $this->getJson(route('databases.service.status'));
+
+    $response->assertStatus(200)
+        ->assertJsonStructure(['statuses'])
+        ->assertJsonPath('statuses.mysql.active', true);
 })->group('system');
