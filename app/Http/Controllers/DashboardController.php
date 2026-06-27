@@ -40,6 +40,21 @@ class DashboardController extends Controller
         return ['sortBy' => $r->sortBy];
     }
 
+    /**
+     * Re-probe the host for a GPU on demand (the dashboard cogwheel). Detection
+     * otherwise only runs at install, so a GPU added later isn't missed.
+     */
+    public function rescanGpu(\App\Services\Dashboard\GpuStatsService $gpu): \Illuminate\Http\RedirectResponse
+    {
+        $profile = $gpu->detect();
+
+        session()->flash('success', $profile['detected']
+            ? "Detected {$profile['vendor']} GPU: {$profile['name']}."
+            : 'No GPU detected on this server.');
+
+        return back();
+    }
+
     public function user()
     {
         $user = auth()->user();

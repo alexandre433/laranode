@@ -163,6 +163,10 @@ ADMIN_PASSWORD="${ADMIN_PASSWORD:-password}"
 log "seeding admin (${ADMIN_EMAIL})"
 php artisan tinker --execute="\App\Models\User::updateOrCreate(['username' => 'laranode'], ['name' => 'Admin', 'email' => '${ADMIN_EMAIL}', 'password' => bcrypt('${ADMIN_PASSWORD}'), 'role' => 'admin', 'ssh_access' => true, 'email_verified_at' => now()]);"
 
+# --- detect GPU once (stores the result; not re-probed every poll) ---
+log "detecting GPU"
+php artisan laranode:detect-gpu || true
+
 # --- provision test system users for CronJob system tests ---
 log "provisioning test system users (testuser_ln, testuser2_ln)"
 useradd -m -s /bin/bash testuser_ln 2>/dev/null || true

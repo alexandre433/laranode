@@ -307,6 +307,7 @@ php artisan migrate
 php artisan db:seed
 php artisan storage:link
 php artisan reverb:install
+php artisan laranode:detect-gpu
 
 sed -i "s#VITE_REVERB_HOST=.*#VITE_REVERB_HOST=$(curl icanhazip.com)#" ".env"
 sed -i "s#REVERB_HOST=.*#REVERB_HOST=$(curl icanhazip.com)#" ".env"
