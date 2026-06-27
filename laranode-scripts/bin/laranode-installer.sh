@@ -157,6 +157,26 @@ a2enconf php8.4-fpm
 
 echo -e "\033[34m"
 echo "--------------------------------------------------------------------------------"
+echo "Enabling proxy and proxy_http apache modules (required for FrankenPHP/Swoole)"
+echo "--------------------------------------------------------------------------------"
+echo -e "\033[0m"
+a2enmod proxy proxy_http
+
+echo -e "\033[34m"
+echo "--------------------------------------------------------------------------------"
+echo "Installing runtime sudoers drop-in"
+echo "--------------------------------------------------------------------------------"
+echo -e "\033[0m"
+PANEL_PATH=/home/laranode_ln/panel
+RUNTIMES_SUDOERS_SRC="${PANEL_PATH}/laranode-scripts/etc/sudoers.d/laranode-runtimes"
+if ! visudo -c -f "${RUNTIMES_SUDOERS_SRC}"; then
+    echo "ERROR: laranode-runtimes sudoers file failed syntax check — aborting install" >&2
+    exit 1
+fi
+install -m 440 "${RUNTIMES_SUDOERS_SRC}" /etc/sudoers.d/laranode-runtimes
+
+echo -e "\033[34m"
+echo "--------------------------------------------------------------------------------"
 echo "Restarting apache2"
 echo "--------------------------------------------------------------------------------"
 echo -e "\033[0m"
