@@ -118,3 +118,27 @@ test('User databases() relation is HasMany type', function () {
     $user = User::factory()->create();
     expect($user->databases())->toBeInstanceOf(\Illuminate\Database\Eloquent\Relations\HasMany::class);
 });
+
+test('admin UserSiteStat row does not bleed to other user via explicit where', function () {
+    $admin = User::factory()->isAdmin()->create();
+    $other = User::factory()->isNotAdmin()->create();
+    $adminSite = Website::factory()->for($admin)->create();
+    $otherSite = Website::factory()->for($other)->create();
+
+    UserSiteStat::create([
+        'website_id' => $adminSite->id,
+        'user_id' => $admin->id,
+        'snapshotted_at' => now(),
+        'disk_bytes' => 111,
+    ]);
+    UserSiteStat::create([
+        'website_id' => $otherSite->id,
+        'user_id' => $other->id,
+        'snapshotted_at' => now(),
+        'disk_bytes' => 222,
+    ]);
+
+    // explicit where — no scopeMine, no admin passthrough
+    $count = UserSiteStat::where('user_id', $admin->id)->count();
+    expect($count)->toBe(1);
+});
