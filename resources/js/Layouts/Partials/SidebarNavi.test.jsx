@@ -174,4 +174,35 @@ describe('D5 — collapsible sidebar', () => {
         expect(mockSetIsCollapsed).toHaveBeenCalledWith(false);
         expect(setItemSpy).toHaveBeenCalledWith('laranode_sidebar_collapsed', 'false');
     });
+
+    // When collapsed, the "Menu" heading and footer must fully hide (drop
+    // md:block). If they kept md:block they would consume the narrow w-14
+    // column and push the hamburger toggle past the overflow-x-hidden edge,
+    // leaving no visible button to re-expand the sidebar.
+    test('drops md:block on the Menu heading and footer when collapsed', () => {
+        render(<SidebarNavi isCollapsed={true} setIsCollapsed={vi.fn()} />);
+
+        const menuLabel = screen.getByText('Menu');
+        expect(menuLabel.className).toContain('hidden');
+        expect(menuLabel.className).not.toContain('md:block');
+
+        const footer = screen.getByText('LaraNode').closest('p');
+        expect(footer.className).toContain('hidden');
+        expect(footer.className).not.toContain('md:block');
+    });
+
+    test('keeps md:block on the Menu heading and footer when expanded', () => {
+        render(<SidebarNavi isCollapsed={false} setIsCollapsed={vi.fn()} />);
+
+        expect(screen.getByText('Menu').className).toContain('md:block');
+        expect(screen.getByText('LaraNode').closest('p').className).toContain('md:block');
+    });
+
+    test('toggle button stays the only button and is reachable when collapsed', () => {
+        render(<SidebarNavi isCollapsed={true} setIsCollapsed={vi.fn()} />);
+
+        // The hamburger is the single button; it must still render so the
+        // sidebar can be re-expanded.
+        expect(screen.getByRole('button')).toBeInTheDocument();
+    });
 });
