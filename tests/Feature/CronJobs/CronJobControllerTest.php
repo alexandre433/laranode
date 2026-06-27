@@ -329,3 +329,64 @@ test('POST /cron-jobs/{cronJob}/toggle by non-owner returns 403', function () {
     // active must remain unchanged
     expect($job->fresh()->active)->toBeTrue();
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Security guard tests — HTTP layer (AllowedCronCommand guards via controller)
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('POST /cron-jobs with php -r flag-smuggling returns 422', function () {
+    $user = User::factory()->isNotAdmin()->create(['username' => 'phprtestuser']);
+
+    $this->actingAs($user);
+
+    $response = $this->postJson('/cron-jobs', [
+        'schedule' => '* * * * *',
+        'command' => "php -r 'system(\"id\");'",
+    ]);
+
+    $response->assertStatus(422);
+    $response->assertJsonValidationErrors(['command']);
+});
+
+test('POST /cron-jobs with php -f flag-smuggling returns 422', function () {
+    $user = User::factory()->isNotAdmin()->create(['username' => 'phpftestuser']);
+
+    $this->actingAs($user);
+
+    $response = $this->postJson('/cron-jobs', [
+        'schedule' => '* * * * *',
+        'command' => 'php -f /home/'.$user->systemUsername.'/artisan',
+    ]);
+
+    $response->assertStatus(422);
+    $response->assertJsonValidationErrors(['command']);
+});
+
+test('POST /cron-jobs with path traversal outside homedir returns 422', function () {
+    $user = User::factory()->isNotAdmin()->create(['username' => 'pathtraversal']);
+
+    $this->actingAs($user);
+
+    $response = $this->postJson('/cron-jobs', [
+        'schedule' => '* * * * *',
+        'command' => 'php /home/'.$user->systemUsername.'/../other_ln/artisan',
+    ]);
+
+    $response->assertStatus(422);
+    $response->assertJsonValidationErrors(['command']);
+});
+
+test('POST /cron-jobs with path outside own homedir (other user) returns 422', function () {
+    $user = User::factory()->isNotAdmin()->create(['username' => 'pathscope']);
+    $other = User::factory()->isNotAdmin()->create(['username' => 'otherusr']);
+
+    $this->actingAs($user);
+
+    $response = $this->postJson('/cron-jobs', [
+        'schedule' => '* * * * *',
+        'command' => 'php /home/'.$other->systemUsername.'/artisan inspire',
+    ]);
+
+    $response->assertStatus(422);
+    $response->assertJsonValidationErrors(['command']);
+});
