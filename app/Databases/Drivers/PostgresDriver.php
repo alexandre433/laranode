@@ -94,8 +94,11 @@ class PostgresDriver implements DatabaseEngineDriver
     {
         $name = $database->name;
 
+        // Scope pg_database_size to existing databases only — calling it on a
+        // name that no longer exists raises SQLSTATE 3D000 and would crash the
+        // whole listing. A missing db yields no row → size 0.
         $row = DB::connection('pgsql_admin')->selectOne(
-            'SELECT pg_database_size(?) AS size_bytes',
+            'SELECT pg_database_size(datname) AS size_bytes FROM pg_database WHERE datname = ?',
             [$name]
         );
 
