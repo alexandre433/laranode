@@ -31,7 +31,9 @@ export default function CreateCronJobForm() {
     const handleSubmit = (e) => {
         e.preventDefault();
         setErrors({});
-        router.post(route('cron-jobs.store'), { schedule, command, label });
+        router.post(route('cron-jobs.store'), { schedule, command, label }, {
+            onError: (e) => setErrors(e),
+        });
     };
 
     return (

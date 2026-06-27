@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { test, expect, vi, beforeEach } from 'vitest';
 import CronJobsIndex from './Index';
@@ -156,7 +156,8 @@ test('submitting the form calls router.post with schedule, command and label', a
             schedule: '* * * * *',
             command: 'php /home/testuser_ln/artisan schedule:run',
             label: 'Scheduler',
-        }
+        },
+        expect.objectContaining({ onError: expect.any(Function) })
     );
 });
 
@@ -185,6 +186,24 @@ test('custom expression is sent to router.post when Custom preset used', async (
 
     expect(mockRouterPost).toHaveBeenCalledWith(
         '/cron-jobs',
-        expect.objectContaining({ schedule: '30 4 * * 0' })
+        expect.objectContaining({ schedule: '30 4 * * 0' }),
+        expect.objectContaining({ onError: expect.any(Function) })
     );
+});
+
+test('onError callback populates field-level error messages', async () => {
+    render(<CreateCronJobForm />);
+
+    await userEvent.click(screen.getByRole('button', { name: /add cron job/i }));
+
+    // Grab the onError callback passed to router.post and invoke it
+    const [, , options] = mockRouterPost.mock.calls[0];
+    act(() => {
+        options.onError({ schedule: 'Invalid cron expression.', command: 'Command not allowed.' });
+    });
+
+    await waitFor(() => {
+        expect(screen.getByText('Invalid cron expression.')).toBeInTheDocument();
+        expect(screen.getByText('Command not allowed.')).toBeInTheDocument();
+    });
 });
