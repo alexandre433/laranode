@@ -102,6 +102,15 @@ log "writing laranode-cron sudoers drop-in"
 cp -f "$PANEL/laranode-scripts/etc/sudoers.d/laranode-cron" /etc/sudoers.d/laranode-cron
 chmod 440 /etc/sudoers.d/laranode-cron
 
+# --- runtimes sudoers drop-in (grants www-data NOPASSWD for runtime scripts) ---
+log "writing laranode-runtimes sudoers drop-in"
+cp -f "$PANEL/laranode-scripts/etc/sudoers.d/laranode-runtimes" /etc/sudoers.d/laranode-runtimes
+chmod 440 /etc/sudoers.d/laranode-runtimes
+
+# --- enable Apache proxy modules (required for FrankenPHP/Swoole) ---
+log "enabling apache proxy modules"
+a2enmod proxy proxy_http
+
 # --- MySQL user + db (idempotent; grant for localhost and 127.0.0.1) ---
 log "creating mysql user + db"
 mysql -u root <<SQL

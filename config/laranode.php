@@ -36,6 +36,17 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Laranode FrankenPHP Apache Virtual Host Template
+    |--------------------------------------------------------------------------
+    |
+    | Path to the Apache vhost template used when a site runs under FrankenPHP.
+    | Uses mod_proxy to forward traffic to the FrankenPHP process on loopback,
+    | with a ProxyPass exception for ACME challenge renewals.
+    */
+    'apache_vhost_frankenphp_template' => base_path('laranode-scripts/templates/apache-vhost-frankenphp.template'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Laranode File Manager - Editable Mime Types
     |--------------------------------------------------------------------------
     |
