@@ -184,3 +184,88 @@ test('sslOverview rows include ssl_expires_at field (nullable)', function () {
             ->where('sslOverview.0.ssl_expires_at', null)
         );
 });
+
+// ─── Admin multi-tenant isolation (siteStats) ─────────────────────────────────
+
+test('admin user sees only their own siteStats rows and not other tenants', function () {
+    $admin = User::factory()->isAdmin()->create();
+    $other = User::factory()->isNotAdmin()->create();
+
+    $adminSite = Website::factory()->for($admin)->create();
+    $otherSite = Website::factory()->for($other)->create();
+
+    UserSiteStat::create([
+        'website_id' => $adminSite->id,
+        'user_id' => $admin->id,
+        'snapshotted_at' => now(),
+        'disk_bytes' => 1111,
+    ]);
+    UserSiteStat::create([
+        'website_id' => $otherSite->id,
+        'user_id' => $other->id,
+        'snapshotted_at' => now(),
+        'disk_bytes' => 9999,
+    ]);
+
+    $this->actingAs($admin)
+        ->withoutVite()
+        ->get(route('analytics.index'))
+        ->assertOk()
+        ->assertInertia(fn ($page) => $page
+            ->component('Analytics/Index')
+            ->has('siteStats', 1)
+        );
+});
+
+// ─── Admin multi-tenant isolation (sslOverview) ───────────────────────────────
+
+test('admin user sees only their own sslOverview sites and not other tenants', function () {
+    $admin = User::factory()->isAdmin()->create();
+    $other = User::factory()->isNotAdmin()->create();
+
+    Website::factory()->for($admin)->create(['ssl_enabled' => true, 'ssl_status' => 'active']);
+    Website::factory()->for($other)->create(['ssl_enabled' => true, 'ssl_status' => 'active']);
+    Website::factory()->for($other)->create(['ssl_enabled' => true, 'ssl_status' => 'active']);
+
+    $this->actingAs($admin)
+        ->withoutVite()
+        ->get(route('analytics.index'))
+        ->assertOk()
+        ->assertInertia(fn ($page) => $page
+            ->component('Analytics/Index')
+            ->has('sslOverview', 1)
+        );
+});
+
+// ─── Admin multi-tenant isolation (quotaSummary) ──────────────────────────────
+
+test('admin quotaSummary reflects only their own websites and databases not other tenants', function () {
+    $admin = User::factory()->isAdmin()->create([
+        'domain_limit' => 3,
+        'database_limit' => 5,
+    ]);
+    $other = User::factory()->isNotAdmin()->create();
+
+    // Admin owns 1 site and 1 database
+    Website::factory()->for($admin)->create();
+    Database::factory()->create(['user_id' => $admin->id]);
+
+    // Other tenant owns 2 sites and 3 databases — must NOT bleed into admin's quotaSummary
+    Website::factory()->for($other)->create();
+    Website::factory()->for($other)->create();
+    Database::factory()->create(['user_id' => $other->id]);
+    Database::factory()->create(['user_id' => $other->id]);
+    Database::factory()->create(['user_id' => $other->id]);
+
+    $this->actingAs($admin)
+        ->withoutVite()
+        ->get(route('analytics.index'))
+        ->assertOk()
+        ->assertInertia(fn ($page) => $page
+            ->component('Analytics/Index')
+            ->where('quotaSummary.websites_count', 1)
+            ->where('quotaSummary.websites_limit', 3)
+            ->where('quotaSummary.databases_count', 1)
+            ->where('quotaSummary.databases_limit', 5)
+        );
+});
