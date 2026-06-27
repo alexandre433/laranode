@@ -114,6 +114,11 @@ log "writing laranode-runtimes sudoers drop-in"
 cp -f "$PANEL/laranode-scripts/etc/sudoers.d/laranode-runtimes" /etc/sudoers.d/laranode-runtimes
 chmod 440 /etc/sudoers.d/laranode-runtimes
 
+# --- firewall (UFW) sudoers drop-in (firewall Actions call `sudo ufw` directly) ---
+log "writing laranode-ufw sudoers drop-in"
+cp -f "$PANEL/laranode-scripts/etc/sudoers.d/laranode-ufw" /etc/sudoers.d/laranode-ufw
+chmod 440 /etc/sudoers.d/laranode-ufw
+
 # --- enable Apache proxy modules (required for FrankenPHP/Swoole) ---
 log "enabling apache proxy modules"
 a2enmod proxy proxy_http
@@ -150,12 +155,13 @@ php artisan reverb:install --no-interaction || true
 [ -d public/build ] || npm run build
 
 # --- seed admin non-interactively (username 'laranode' to match systemUsername laranode_ln) ---
-log "seeding admin"
-php artisan tinker --execute "
-\App\Models\User::firstOrCreate(
-  ['username' => 'laranode'],
-  ['name' => 'Admin', 'email' => '${ADMIN_EMAIL}', 'password' => bcrypt('${ADMIN_PASSWORD}'), 'role' => 'admin', 'ssh_access' => true]
-);"
+# ADMIN_EMAIL/ADMIN_PASSWORD live in .env.docker (Laravel env), not the shell, so
+# default them here or the admin gets an empty email and you can't log in.
+# updateOrCreate (not firstOrCreate) repairs a stale row's email/password too.
+ADMIN_EMAIL="${ADMIN_EMAIL:-admin@laranode.test}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-password}"
+log "seeding admin (${ADMIN_EMAIL})"
+php artisan tinker --execute="\App\Models\User::updateOrCreate(['username' => 'laranode'], ['name' => 'Admin', 'email' => '${ADMIN_EMAIL}', 'password' => bcrypt('${ADMIN_PASSWORD}'), 'role' => 'admin', 'ssh_access' => true, 'email_verified_at' => now()]);"
 
 # --- provision test system users for CronJob system tests ---
 log "provisioning test system users (testuser_ln, testuser2_ln)"
