@@ -103,4 +103,9 @@ class User extends Authenticatable
     {
         return $this->hasMany(Website::class);
     }
+
+    public function databases(): \Illuminate\Database\Eloquent\Relations\HasMany
+    {
+        return $this->hasMany(Database::class);
+    }
 }
