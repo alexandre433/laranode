@@ -247,6 +247,14 @@ if ! visudo -c -f "${CRON_SUDOERS_SRC}"; then
 fi
 install -m 440 "${CRON_SUDOERS_SRC}" /etc/sudoers.d/laranode-cron
 
+# Install firewall (UFW) drop-in — firewall Actions call `sudo ufw` directly
+UFW_SUDOERS_SRC="${PANEL_PATH}/laranode-scripts/etc/sudoers.d/laranode-ufw"
+if ! visudo -c -f "${UFW_SUDOERS_SRC}"; then
+    echo "ERROR: ufw sudoers file failed syntax check — aborting install" >&2
+    exit 1
+fi
+install -m 440 "${UFW_SUDOERS_SRC}" /etc/sudoers.d/laranode-ufw
+
 echo -e "\033[34m"
 echo "--------------------------------------------------------------------------------"
 echo "Installing Composer"
