@@ -10,12 +10,13 @@ class Website extends Model
 {
     use HasFactory;
 
-    protected $appends = ['fullDocumentRoot'];
+    protected $appends = ['fullDocumentRoot', 'runtimeLabel'];
 
     protected $casts = [
         'ssl_enabled' => 'boolean',
         'ssl_expires_at' => 'datetime',
         'ssl_generated_at' => 'datetime',
+        'runtime_port' => 'integer',
     ];
 
     protected $fillable = [
@@ -27,6 +28,8 @@ class Website extends Model
         'ssl_status',
         'ssl_expires_at',
         'ssl_generated_at',
+        'runtime',
+        'runtime_port',
     ];
 
     public function getWebsiteRootAttribute(): string
@@ -38,6 +41,15 @@ class Website extends Model
     public function getFullDocumentRootAttribute(): string
     {
         return $this->user?->homedir.'/domains/'.$this->url.$this->document_root;
+    }
+
+    public function getRuntimeLabelAttribute(): string
+    {
+        return match ($this->runtime) {
+            'frankenphp' => 'FrankenPHP',
+            'swoole' => 'Swoole (Octane)',
+            default => 'PHP-FPM',
+        };
     }
 
     public function scopeMine(Builder $query): Builder
