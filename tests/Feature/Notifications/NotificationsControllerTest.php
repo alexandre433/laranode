@@ -88,3 +88,32 @@ test('PATCH /notifications/{id}/read sets read_at on the notification', function
         'read_at' => null,
     ]);
 });
+
+test('PATCH /notifications/{id}/read returns 404 when notification belongs to another user', function () {
+    $userA = User::factory()->create();
+    $userB = User::factory()->create();
+
+    $notificationId = Str::uuid()->toString();
+
+    \DB::table('notifications')->insert([
+        'id' => $notificationId,
+        'type' => 'App\\Notifications\\OperationFinishedNotification',
+        'notifiable_type' => User::class,
+        'notifiable_id' => $userA->id,
+        'data' => json_encode(['event_type' => 'operation.finished']),
+        'read_at' => null,
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    // userB cannot mark userA's notification as read
+    $this->actingAs($userB)
+        ->patchJson("/notifications/{$notificationId}/read")
+        ->assertStatus(404);
+
+    // Notification remains unread
+    $this->assertDatabaseHas('notifications', [
+        'id' => $notificationId,
+        'read_at' => null,
+    ]);
+});
