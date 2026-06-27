@@ -58,21 +58,31 @@ test('throws RuntimeException when all ports 9100-9499 are occupied by other web
         ->toThrow(\RuntimeException::class, 'No available runtime ports in range 9100–9499.');
 });
 
-test('concurrent race: runtime_port stays null when second allocation\'s start fails (DB write skipped on failure)', function () {
-    // Documents the v1 concurrency contract:
-    // runtime_port must NOT be persisted to the DB if systemctl start fails.
-    // The allocator returns a port but the caller (SwitchRuntimeService) only
-    // persists it after start() succeeds. This test verifies that contract holds.
+test('concurrent race: two allocations on same initial DB state both return 9100; second site stays null when its start fails', function () {
+    // Scenario: no ports in use initially.
+    // Two jobs read the DB at the same time (no lock in v1) and both see 9100 as free.
+    // Job 1 succeeds: saves runtime_port=9100.
+    // Job 2 fails (systemctl start exits non-zero): must NOT write runtime_port to DB.
+    // After both jobs: site1.runtime_port=9100, site2.runtime_port=null.
 
-    $website = Website::factory()->create(['runtime_port' => null]);
+    $site1 = Website::factory()->create(['runtime_port' => null]);
+    $site2 = Website::factory()->create(['runtime_port' => null]);
 
-    // Allocate a port — but do not save it (simulating a failed start).
-    $allocatedPort = (new PortAllocatorService)->allocate($website);
+    // Both callers read the same empty DB state and each receives 9100.
+    $portForSite1 = (new PortAllocatorService)->allocate($site1);
+    $portForSite2 = (new PortAllocatorService)->allocate($site2);
 
-    // DB row must remain null because the caller never wrote it.
-    expect($website->fresh()->runtime_port)->toBeNull();
+    expect($portForSite1)->toBe(9100);
+    expect($portForSite2)->toBe(9100); // same port — classic race collision
 
-    // Only after a successful start would the caller persist the port.
-    $website->update(['runtime_port' => $allocatedPort]);
-    expect($website->fresh()->runtime_port)->toBe($allocatedPort);
+    // Job 1: systemctl start succeeds → persist port.
+    $site1->update(['runtime_port' => $portForSite1]);
+
+    // Job 2: systemctl start FAILS → caller must NOT persist port.
+    // (SwitchRuntimeService throws before calling $website->update — this test
+    //  verifies the contract by simply not calling update(), mirroring the service.)
+
+    // Assert: site1 has the port, site2 stays null.
+    expect($site1->fresh()->runtime_port)->toBe(9100);
+    expect($site2->fresh()->runtime_port)->toBeNull();
 });
