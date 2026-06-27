@@ -4,7 +4,7 @@ import { RiDashboard3Fill, RiMvFill } from "react-icons/ri";
 import { ImProfile } from "react-icons/im";
 import { FaPhp, FaUsers } from "react-icons/fa6";
 import { VscFileSubmodule } from "react-icons/vsc";
-import { TbBrandMysql } from "react-icons/tb";
+import { TbBrandMysql, TbChartBar } from "react-icons/tb";
 import { MdSecurity, MdOutlineListAlt, MdSchedule } from "react-icons/md";
 import { IoLockClosedOutline } from "react-icons/io5";
 import { TbWorldWww } from "react-icons/tb";
@@ -107,6 +107,18 @@ const SidebarNavi = () => {
                             <VscFileSubmodule className="ml-3 w-5 h-5" />
                         </div>
                         <span className="ml-2 text-sm tracking-wide truncate">File Manager</span>
+                    </Link>
+                </li>
+
+                <li>
+                    <Link
+                        href={route('analytics.index')}
+                        className="relative flex flex-row items-center h-11 focus:outline-none hover:bg-gray-900 text-gray-300 border-l-4 border-transparent hover:border-indigo-900 pr-6"
+                    >
+                        <div>
+                            <TbChartBar className="ml-3 w-5 h-5" />
+                        </div>
+                        <span className="ml-2 text-sm tracking-wide truncate">Analytics</span>
                     </Link>
                 </li>
 
