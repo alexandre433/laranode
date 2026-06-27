@@ -13,9 +13,9 @@ use App\Http\Controllers\NotificationsController;
 use App\Http\Controllers\PHPManagerController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\StatsHistoryController;
+use App\Http\Controllers\DbServiceController;
 use App\Http\Controllers\WebsiteController;
 use App\Http\Middleware\AdminMiddleware;
-use App\Http\Requests\DbServiceRequest;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', function () {
@@ -92,14 +92,12 @@ Route::get('/stats/history', [StatsHistoryController::class, 'cpuAndMemory'])->m
 Route::get('/admin/operations', [\App\Http\Controllers\OperationsController::class, 'index'])
     ->middleware(['auth', AdminMiddleware::class])->name('operations.index');
 
-// DB Service Control [Admin] — Task 2 stub (Task 3 replaces closure with DbServiceController)
+// DB Service Control [Admin]
 Route::middleware(['auth', AdminMiddleware::class])->group(function () {
-    Route::post('/admin/databases/service', function (DbServiceRequest $request) {
-        return response()->json(['status' => 'ok']);
-    })->name('databases.service.action');
-    Route::get('/admin/databases/service/status', function () {
-        return response()->json(['statuses' => []]);
-    })->name('databases.service.status');
+    Route::post('/admin/databases/service', [DbServiceController::class, 'action'])
+        ->name('databases.service.action');
+    Route::get('/admin/databases/service/status', [DbServiceController::class, 'status'])
+        ->name('databases.service.status');
 });
 
 // Accounts
