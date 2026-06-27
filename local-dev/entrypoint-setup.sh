@@ -24,10 +24,17 @@ if ! dpkg -l postgresql-16 >/dev/null 2>&1; then
     apt-get install -y -qq postgresql-16 postgresql-client-16
 fi
 
+# --- install cron (crontab binary + daemon) if not present (cron-tasks feature) ---
+if ! command -v crontab >/dev/null 2>&1; then
+    log "installing cron"
+    apt-get update -qq
+    apt-get install -y -qq cron
+fi
+
 # --- core services ---
 log "enabling + starting core services"
 sed -i 's/ENABLED="false"/ENABLED="true"/' /etc/default/sysstat || true
-systemctl enable --now apache2 mysql php8.4-fpm sysstat
+systemctl enable --now apache2 mysql php8.4-fpm sysstat cron
 
 # --- PostgreSQL: start ---
 log "starting postgresql@16-main"
