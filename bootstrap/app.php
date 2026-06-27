@@ -26,7 +26,35 @@ return Application::configure(basePath: dirname(__DIR__))
         $schedule->command('model:prune', ['--model' => [
             \App\Models\Operation::class,
             \App\Models\Backup::class,
+            \App\Models\UserResourceSnapshot::class,
+            \App\Models\UserSiteStat::class,
         ]])->daily();
         $schedule->job(new \App\Jobs\RunScheduledBackupsJob)->everyMinute();
+
+        $schedule->call(function () {
+            \App\Models\User::chunkById(50, function ($users) {
+                foreach ($users as $user) {
+                    $operation = \App\Models\Operation::create([
+                        'user_id' => $user->id,
+                        'type' => 'analytics.resource-rollup',
+                        'target' => $user->username,
+                    ]);
+                    \App\Jobs\Analytics\RollupUserResourceSnapshotJob::dispatch($operation, $user);
+                }
+            });
+        })->daily()->name('analytics.resource-rollup');
+
+        $schedule->call(function () {
+            \App\Models\User::chunkById(50, function ($users) {
+                foreach ($users as $user) {
+                    $operation = \App\Models\Operation::create([
+                        'user_id' => $user->id,
+                        'type' => 'analytics.site-rollup',
+                        'target' => $user->username,
+                    ]);
+                    \App\Jobs\Analytics\RollupSiteStatsJob::dispatch($operation, $user);
+                }
+            });
+        })->hourly()->name('analytics.site-rollup');
     })
     ->create();
