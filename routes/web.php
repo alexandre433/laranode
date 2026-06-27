@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AccountsController;
+use App\Http\Controllers\AnalyticsController;
 use App\Http\Controllers\BackupController;
 use App\Http\Controllers\CronJobsController;
 use App\Http\Controllers\DashboardController;
@@ -111,5 +112,8 @@ Route::middleware(['auth'])->group(function () {
     Route::post('/backups/schedules', [BackupController::class, 'storeSchedule'])->name('backups.schedules.store');
     Route::delete('/backups/schedules/{scheduledBackup}', [BackupController::class, 'destroySchedule'])->name('backups.schedules.destroy');
 });
+
+// Analytics [Admin | User]
+Route::get('/analytics', [AnalyticsController::class, 'index'])->middleware(['auth'])->name('analytics.index');
 
 require __DIR__.'/auth.php';
