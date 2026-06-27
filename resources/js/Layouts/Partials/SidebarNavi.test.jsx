@@ -1,5 +1,5 @@
-import { render, screen } from '@testing-library/react';
-import { test, expect, vi } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/react';
+import { test, expect, vi, describe, beforeEach } from 'vitest';
 import SidebarNavi from './SidebarNavi';
 
 // Mock @inertiajs/react
@@ -20,7 +20,9 @@ vi.mock('react-icons/fa6', () => ({
 }));
 vi.mock('react-icons/vsc', () => ({ VscFileSubmodule: () => <span>VscFileSubmodule</span> }));
 vi.mock('react-icons/tb', () => ({
-    TbBrandMysql: () => <span>TbBrandMysql</span>,
+    // D7: TbDatabase replaces TbBrandMysql for the Databases link
+    TbDatabase: () => <span data-testid="icon-TbDatabase">TbDatabase</span>,
+    TbBrandMysql: () => <span data-testid="icon-TbBrandMysql">TbBrandMysql</span>,
     TbChartBar: () => <span>TbChartBar</span>,
     TbWorldWww: () => <span>TbWorldWww</span>,
 }));
@@ -50,8 +52,16 @@ global.route = (name) => {
     return map[name] ?? `/${name}`;
 };
 
+// Helper: default props for the new collapsible sidebar
+const defaultProps = {
+    isCollapsed: false,
+    setIsCollapsed: vi.fn(),
+};
+
+// ─── Existing tests (preserved) ───────────────────────────────────────────────
+
 test('Analytics link renders with correct href and label for authenticated user', () => {
-    render(<SidebarNavi />);
+    render(<SidebarNavi {...defaultProps} />);
 
     const analyticsLink = screen.getByRole('link', { name: /analytics/i });
     expect(analyticsLink).toBeInTheDocument();
@@ -59,14 +69,14 @@ test('Analytics link renders with correct href and label for authenticated user'
 });
 
 test('Analytics link text is exactly "Analytics"', () => {
-    render(<SidebarNavi />);
+    render(<SidebarNavi {...defaultProps} />);
 
     expect(screen.getByText('Analytics')).toBeInTheDocument();
 });
 
 test('Analytics link is visible to non-admin users', () => {
     // usePage mock returns role: 'user' — Analytics must still render
-    render(<SidebarNavi />);
+    render(<SidebarNavi {...defaultProps} />);
 
     expect(screen.getByRole('link', { name: /analytics/i })).toBeInTheDocument();
 });
@@ -83,12 +93,12 @@ test('Analytics link is visible to admin users', () => {
     // The module is already loaded; admin check for Analytics doesn't gate it,
     // so the standard render (user role) already covers visibility.
     // We assert the link still appears (no admin guard).
-    render(<SidebarNavi />);
+    render(<SidebarNavi {...defaultProps} />);
     expect(screen.getByRole('link', { name: /analytics/i })).toBeInTheDocument();
 });
 
 test('Analytics link appears after File Manager in the sidebar', () => {
-    render(<SidebarNavi />);
+    render(<SidebarNavi {...defaultProps} />);
 
     const links = screen.getAllByRole('link');
     const fileManagerIdx = links.findIndex((l) => l.textContent.includes('File Manager'));
@@ -96,4 +106,72 @@ test('Analytics link appears after File Manager in the sidebar', () => {
 
     expect(fileManagerIdx).toBeGreaterThanOrEqual(0);
     expect(analyticsIdx).toBeGreaterThan(fileManagerIdx);
+});
+
+// ─── D7: TbDatabase icon for Databases link ───────────────────────────────────
+
+describe('D7 — engine-agnostic DB icon', () => {
+    test('Databases link renders TbDatabase icon (not TbBrandMysql)', () => {
+        render(<SidebarNavi {...defaultProps} />);
+
+        // TbDatabase icon should be present
+        expect(screen.getByTestId('icon-TbDatabase')).toBeInTheDocument();
+        // TbBrandMysql icon should NOT be present anywhere in the sidebar
+        expect(screen.queryByTestId('icon-TbBrandMysql')).not.toBeInTheDocument();
+    });
+});
+
+// ─── D5: Collapsible sidebar ──────────────────────────────────────────────────
+
+describe('D5 — collapsible sidebar', () => {
+    beforeEach(() => {
+        localStorage.clear();
+    });
+
+    test('shows nav label spans when not collapsed (isCollapsed=false)', () => {
+        render(<SidebarNavi isCollapsed={false} setIsCollapsed={vi.fn()} />);
+
+        const dashboardSpan = screen.getByText('Dashboard');
+        expect(dashboardSpan).not.toHaveClass('hidden');
+
+        const databasesSpan = screen.getByText('Databases');
+        expect(databasesSpan).not.toHaveClass('hidden');
+    });
+
+    test('hides nav label spans when collapsed (isCollapsed=true)', () => {
+        render(<SidebarNavi isCollapsed={true} setIsCollapsed={vi.fn()} />);
+
+        const dashboardSpan = screen.getByText('Dashboard');
+        expect(dashboardSpan).toHaveClass('hidden');
+
+        const databasesSpan = screen.getByText('Databases');
+        expect(databasesSpan).toHaveClass('hidden');
+    });
+
+    test('calls setIsCollapsed(true) and sets localStorage when toggle clicked from expanded state', () => {
+        const mockSetIsCollapsed = vi.fn();
+        const setItemSpy = vi.spyOn(Storage.prototype, 'setItem');
+
+        render(<SidebarNavi isCollapsed={false} setIsCollapsed={mockSetIsCollapsed} />);
+
+        // Find the toggle button (hamburger)
+        const toggleBtn = screen.getByRole('button');
+        fireEvent.click(toggleBtn);
+
+        expect(mockSetIsCollapsed).toHaveBeenCalledWith(true);
+        expect(setItemSpy).toHaveBeenCalledWith('laranode_sidebar_collapsed', 'true');
+    });
+
+    test('calls setIsCollapsed(false) and sets localStorage when toggle clicked from collapsed state', () => {
+        const mockSetIsCollapsed = vi.fn();
+        const setItemSpy = vi.spyOn(Storage.prototype, 'setItem');
+
+        render(<SidebarNavi isCollapsed={true} setIsCollapsed={mockSetIsCollapsed} />);
+
+        const toggleBtn = screen.getByRole('button');
+        fireEvent.click(toggleBtn);
+
+        expect(mockSetIsCollapsed).toHaveBeenCalledWith(false);
+        expect(setItemSpy).toHaveBeenCalledWith('laranode_sidebar_collapsed', 'false');
+    });
 });
