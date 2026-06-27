@@ -8,8 +8,9 @@ use Illuminate\Contracts\Validation\ValidationRule;
 
 class AllowedCronCommand implements ValidationRule
 {
-    // Shell metacharacters that would allow injection
-    private const SHELL_METACHARACTERS = [';', '&&', '||', '|', '>', '<', '$(', '`'];
+    // Shell / crontab metacharacters that would allow command injection.
+    // Bare '&', '$', '\\' close denylist gaps; '%' is a crontab newline escape.
+    private const SHELL_METACHARACTERS = [';', '|', '&', '>', '<', '$', '`', '\\', '%'];
 
     public function __construct(private readonly User $user) {}
 
@@ -21,7 +22,15 @@ class AllowedCronCommand implements ValidationRule
             return;
         }
 
-        // Reject any shell metacharacters
+        // Reject control characters (newline/CR/tab/null/etc.) FIRST — these enable
+        // crontab line-injection and bypass whitespace tokenisation of the path.
+        if (preg_match('/[\x00-\x1F\x7F]/', $value)) {
+            $fail('The :attribute must not contain control characters.');
+
+            return;
+        }
+
+        // Reject any shell / crontab metacharacters
         foreach (self::SHELL_METACHARACTERS as $meta) {
             if (str_contains($value, $meta)) {
                 $fail('The :attribute must not contain shell metacharacters.');
