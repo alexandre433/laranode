@@ -7,6 +7,8 @@ use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DatabasesController;
 use App\Http\Controllers\FilemanagerController;
 use App\Http\Controllers\FirewallController;
+use App\Http\Controllers\NotificationPreferencesController;
+use App\Http\Controllers\NotificationsController;
 use App\Http\Controllers\PHPManagerController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\StatsHistoryController;
@@ -110,6 +112,17 @@ Route::middleware(['auth'])->group(function () {
     Route::get('/backups/{backup}/download', [BackupController::class, 'download'])->name('backups.download');
     Route::post('/backups/schedules', [BackupController::class, 'storeSchedule'])->name('backups.schedules.store');
     Route::delete('/backups/schedules/{scheduledBackup}', [BackupController::class, 'destroySchedule'])->name('backups.schedules.destroy');
+});
+
+// Notifications [Admin | User]
+// NOTE: read-all is registered BEFORE {id}/read so the literal segment is not consumed as {id}.
+Route::middleware('auth')->group(function () {
+    Route::get('/notifications', [NotificationsController::class, 'index'])->name('notifications.index');
+    Route::patch('/notifications/read-all', [NotificationsController::class, 'markAllRead'])->name('notifications.readAll');
+    Route::patch('/notifications/{id}/read', [NotificationsController::class, 'markRead'])->name('notifications.read');
+    Route::get('/profile/notifications', [NotificationPreferencesController::class, 'index'])->name('notifications.preferences');
+    Route::patch('/profile/notifications/webhook', [NotificationPreferencesController::class, 'updateWebhook'])->name('notifications.preferences.webhook');
+    Route::patch('/profile/notifications', [NotificationPreferencesController::class, 'update'])->name('notifications.preferences.update');
 });
 
 require __DIR__.'/auth.php';
