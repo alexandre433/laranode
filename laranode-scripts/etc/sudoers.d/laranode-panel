@@ -23,6 +23,7 @@ Defaults!/home/laranode_ln/panel/laranode-scripts/bin/laranode-update-php-versio
 Defaults!/home/laranode_ln/panel/laranode-scripts/bin/laranode-update-sh-access.sh !requiretty
 Defaults!/home/laranode_ln/panel/laranode-scripts/bin/laranode-update-sh-password.sh !requiretty
 Defaults!/home/laranode_ln/panel/laranode-scripts/bin/laranode-user-manager.sh !requiretty
+Defaults!/home/laranode_ln/panel/laranode-scripts/bin/laranode-db-service.sh !requiretty
 
 www-data ALL=(ALL) NOPASSWD: /home/laranode_ln/panel/laranode-scripts/bin/laranode-add-php-fpm-pool.sh
 www-data ALL=(ALL) NOPASSWD: /home/laranode_ln/panel/laranode-scripts/bin/laranode-add-vhost.sh
@@ -45,5 +46,6 @@ www-data ALL=(ALL) NOPASSWD: /home/laranode_ln/panel/laranode-scripts/bin/larano
 www-data ALL=(ALL) NOPASSWD: /home/laranode_ln/panel/laranode-scripts/bin/laranode-update-sh-access.sh
 www-data ALL=(ALL) NOPASSWD: /home/laranode_ln/panel/laranode-scripts/bin/laranode-update-sh-password.sh
 www-data ALL=(ALL) NOPASSWD: /home/laranode_ln/panel/laranode-scripts/bin/laranode-user-manager.sh
+www-data ALL=(ALL) NOPASSWD: /home/laranode_ln/panel/laranode-scripts/bin/laranode-db-service.sh
 www-data ALL=(ALL) NOPASSWD: /usr/sbin/a2dissite
 www-data ALL=(ALL) NOPASSWD: /bin/rm /etc/apache2/sites-available/*.conf
