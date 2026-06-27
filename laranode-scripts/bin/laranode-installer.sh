@@ -219,6 +219,14 @@ install -m 440 "${SUDOERS_SRC}" /etc/sudoers.d/laranode-panel
 # Remove legacy drop-in if it exists
 rm -f /etc/sudoers.d/laranode-postgres
 
+# Install cron drop-in
+CRON_SUDOERS_SRC="${PANEL_PATH}/laranode-scripts/etc/sudoers.d/laranode-cron"
+if ! visudo -c -f "${CRON_SUDOERS_SRC}"; then
+    echo "ERROR: cron sudoers file failed syntax check — aborting install" >&2
+    exit 1
+fi
+install -m 440 "${CRON_SUDOERS_SRC}" /etc/sudoers.d/laranode-cron
+
 echo -e "\033[34m"
 echo "--------------------------------------------------------------------------------"
 echo "Installing Composer"

@@ -56,6 +56,10 @@ log "populating $BIN"
 mkdir -p "$BIN"
 cp -f /opt/laranode/bin-src/*.sh "$BIN"/
 cp -f "$PANEL/local-dev/bin/laranode-ssl-manager.sh" "$BIN/laranode-ssl-manager.sh"
+# Copy any scripts added directly to the panel's bin dir (e.g. laranode-cron.sh)
+for f in "$PANEL/laranode-scripts/bin/"*.sh; do
+    [ -f "$f" ] && cp -f "$f" "$BIN/$(basename "$f")"
+done
 chmod -R 0755 "$BIN"
 
 # --- PostgreSQL: provision stats-reader role ---
@@ -131,6 +135,11 @@ php artisan tinker --execute "
   ['username' => 'laranode'],
   ['name' => 'Admin', 'email' => '${ADMIN_EMAIL}', 'password' => bcrypt('${ADMIN_PASSWORD}'), 'role' => 'admin', 'ssh_access' => true]
 );"
+
+# --- provision test system users for CronJob system tests ---
+log "provisioning test system users (testuser_ln, testuser2_ln)"
+useradd -m -s /bin/bash testuser_ln 2>/dev/null || true
+useradd -m -s /bin/bash testuser2_ln 2>/dev/null || true
 
 # --- apache default vhost (serves the panel from /public) ---
 cp -f laranode-scripts/templates/apache2-default.template /etc/apache2/sites-available/000-default.conf
