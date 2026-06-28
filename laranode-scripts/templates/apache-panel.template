@@ -1,0 +1,13 @@
+<VirtualHost *:__PORT__>
+    ServerAdmin webmaster@localhost
+    DocumentRoot __DOCROOT__
+
+    <Directory __DOCROOT__>
+        Options FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    ErrorLog /home/laranode_ln/panel/storage/logs/apache-error.log
+    CustomLog /home/laranode_ln/panel/storage/logs/apache-access.log combined
+</VirtualHost>
