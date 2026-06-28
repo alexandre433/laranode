@@ -19,7 +19,7 @@ export SCENARIO="nginx80"
 # nginx has bound :80 before the installer's preflight port-check runs.
 export PRESETUP='
     apt-get update -q >/dev/null 2>&1
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --quiet nginx >/dev/null 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --quiet nginx php8.3 >/dev/null 2>&1
     systemctl start nginx
     for _ in $(seq 1 15); do
         ss -tlnH "( sport = :80 )" | grep -q . && break
@@ -50,6 +50,19 @@ export POST_ASSERTS_CMD='
             exit 1
             ;;
     esac
+    alt=$(update-alternatives --query php 2>/dev/null | sed -n "s/^Value: //p")
+    if [ "$alt" = "/usr/bin/php8.3" ]; then
+        echo "PASS: system php alternative unchanged ($alt)"
+    else
+        echo "FAIL: system php alternative changed to ${alt:-<unset>} (expected /usr/bin/php8.3)" >&2
+        exit 1
+    fi
+    if [ -x /usr/bin/php8.4 ]; then
+        echo "PASS: /usr/bin/php8.4 installed"
+    else
+        echo "FAIL: /usr/bin/php8.4 not found" >&2
+        exit 1
+    fi
 '
 
 run_scenario

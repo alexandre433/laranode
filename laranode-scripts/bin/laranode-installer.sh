@@ -524,19 +524,49 @@ phase_webserver() {
 # ==============================================================================
 
 phase_php_node() {
-  log "Adding ppa:ondrej/php"
-  add-apt-repository -y ppa:ondrej/php
-  apt-get update -q
+  log "PHP 8.4 + Node"
 
-  log "Installing PHP 8.4 and required extensions"
+  # ---- PHP ----------------------------------------------------------------
+  log "Adding ppa:ondrej/php"
+  add-apt-repository -y ppa:ondrej/php \
+    || die "add-apt-repository ppa:ondrej/php failed — check network/GPG"
+  apt-get update -qq
+
+  # Capture the system php alternative BEFORE installing php8.4. ppa:ondrej/php
+  # registers php8.4 at a higher priority, so apt auto-mode would silently flip
+  # the system default. Record it now; restore it after if apt changed it.
+  local sys_php=""
+  sys_php=$(update-alternatives --query php 2>/dev/null | awk '/^Value:/{print $2}') || true
+
+  log "Installing php8.4 and extensions (additive)"
   apt-get install -y php8.4 php8.4-fpm php8.4-cli php8.4-common php8.4-curl php8.4-mbstring \
     php8.4-xml php8.4-bcmath php8.4-zip php8.4-mysql php8.4-sqlite3 php8.4-pgsql \
     php8.4-gd php8.4-imagick php8.4-intl php8.4-readline php8.4-tokenizer php8.4-fileinfo \
-    php8.4-soap php8.4-opcache unzip curl
+    php8.4-soap php8.4-opcache unzip curl \
+    || die "apt-get install php8.4 extensions failed"
+
+  # Restore the operator's prior alternative if apt auto-flipped it to 8.4. The
+  # panel always calls /usr/bin/php8.4 directly, so the system default must stay
+  # whatever the operator had.
+  if [ -n "$sys_php" ] && [ "$sys_php" != "/usr/bin/php8.4" ]; then
+    local after_php=""
+    after_php=$(update-alternatives --query php 2>/dev/null | awk '/^Value:/{print $2}') || true
+    if [ "$after_php" = "/usr/bin/php8.4" ]; then
+      update-alternatives --set php "$sys_php" \
+        || warn "could not restore php alternative to ${sys_php} — check manually"
+    fi
+    warn "System 'php' alternative left as ${sys_php}. Panel uses /usr/bin/php8.4 directly."
+  fi
+
+  # Create a /usr/local/bin/php symlink pinned to php8.4 so that panel CLI
+  # commands (composer, artisan) use php8.4 regardless of the system alternative.
+  # /usr/local/bin precedes /usr/bin in PATH, so this takes effect for all users
+  # without touching the operator's update-alternatives setting.
+  ln -sf /usr/bin/php8.4 /usr/local/bin/php
 
   log "Enabling PHP-FPM"
-  systemctl enable php8.4-fpm
-  systemctl start php8.4-fpm
+  systemctl enable php8.4-fpm || die "systemctl enable php8.4-fpm failed"
+  systemctl start php8.4-fpm  || die "systemctl start php8.4-fpm failed"
 
   # php8.4-fpm package provides /etc/apache2/conf-available/php8.4-fpm.conf;
   # a2enconf must run after the package is installed.
@@ -549,9 +579,23 @@ phase_php_node() {
   curl -sS https://getcomposer.org/installer \
     | php -- --install-dir=/usr/local/bin --filename=composer
 
-  log "Installing Node.js 22"
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-  apt-get install -y nodejs
+  # ---- Node ---------------------------------------------------------------
+  if have_cmd node; then
+    local node_ver=""
+    node_ver=$(node -v | tr -d 'v')
+    warn "node already present (v${node_ver}); skipping nodesource setup"
+    version_ge "${node_ver}" "20" \
+      || die "panel build needs Node >=20; found v${node_ver} — install/upgrade and re-run"
+  else
+    log "Installing Node 22 via nodesource"
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+      || die "nodesource setup_22.x script failed"
+    apt-get install -y nodejs || die "apt-get install nodejs failed"
+    local installed_ver=""
+    installed_ver=$(node -v | tr -d 'v')
+    [ "${installed_ver%%.*}" = "22" ] \
+      || die "expected Node major 22 after nodesource install; got v${installed_ver}"
+  fi
 }
 
 # ==============================================================================
