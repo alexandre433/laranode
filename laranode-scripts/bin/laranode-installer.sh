@@ -7,8 +7,8 @@ export DEBIAN_FRONTEND=noninteractive
 LARANODE_REPO="${LARANODE_REPO:-https://github.com/alexandre433/laranode.git}"
 
 # ---- Resolved globals (set by preflight, read by subsequent phases) ----
-DB_ENGINE=mysql
-HTTP_PORT=80
+DB_ENGINE=""    # mysql | pgsql
+HTTP_PORT=""    # 80 | 8080 (or operator-chosen)
 PANEL_PATH=/home/laranode_ln/panel
 
 # ---- Cross-phase state (set by phase_database, read by phase_app + phase_summary) ----
@@ -65,14 +65,105 @@ persist_secret() {
   chmod 600 /root/.laranode-credentials
 }
 
-# ==============================================================================
-# Phase 0 — Preflight (stub: resolve globals; later tasks expand this)
-# ==============================================================================
-
+# ------------------------------------------------------------------------------
+# Phase 0 — Preflight: detect, resolve choices, print plan, confirm.
+# NO mutations — apt/systemctl/file writes happen only in later phases.
+# ------------------------------------------------------------------------------
 preflight() {
-  DB_ENGINE=mysql
-  HTTP_PORT=80
-  PANEL_PATH=/home/laranode_ln/panel
+  log "Preflight: surveying environment"
+
+  # ---- Web server on :80 -------------------------------------------------------
+  local port80_free=1
+  local port80_holder="none"
+  if port_in_use 80; then
+    port80_free=0
+    # Best-effort identification; cosmetic only — never fails the install.
+    local _ss_out
+    _ss_out=$(ss -tlnp '( sport = :80 )' 2>/dev/null || true)
+    if   echo "$_ss_out" | grep -qi 'nginx';  then port80_holder="nginx"
+    elif echo "$_ss_out" | grep -qi 'apache'; then port80_holder="apache2"
+    else                                           port80_holder="unknown"
+    fi
+    warn ":80 is held by ${port80_holder} — panel will be placed on a different port"
+  fi
+
+  # ---- MySQL -------------------------------------------------------------------
+  local mysql_note="absent"
+  if have_cmd mysql; then
+    if mysql -u root -e 'SELECT 1' >/dev/null 2>&1; then
+      mysql_note="present (root via auth_socket)"
+    else
+      mysql_note="present (root password required)"
+    fi
+  fi
+
+  # ---- Postgres clusters -------------------------------------------------------
+  local pg_note="absent"
+  if have_cmd pg_lsclusters; then
+    local _pg_count
+    _pg_count=$(pg_lsclusters --no-header 2>/dev/null | grep -c . || true)
+    if [ "${_pg_count:-0}" -gt 0 ]; then
+      pg_note="${_pg_count} cluster(s) found"
+    fi
+  fi
+
+  # ---- PHP ---------------------------------------------------------------------
+  local php_note="absent"
+  if have_cmd php; then
+    local _php_ver
+    _php_ver=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)
+    php_note="system php ${_php_ver} (unchanged)"
+  fi
+
+  # ---- Node --------------------------------------------------------------------
+  local node_note="absent"
+  if have_cmd node; then
+    local _node_ver
+    _node_ver=$(node --version 2>/dev/null | sed 's/^v//' || true)
+    node_note="node v${_node_ver} (reused if major >= 20)"
+  fi
+
+  # ---- UFW ---------------------------------------------------------------------
+  local ufw_note="inactive"
+  if have_cmd ufw && ufw status 2>/dev/null | grep -q 'Status: active'; then
+    ufw_note="active"
+  fi
+
+  # ---- Resolve DB_ENGINE -------------------------------------------------------
+  DB_ENGINE=$(choose LARANODE_DB_ENGINE mysql "DB engine (mysql|pgsql)")
+  case "$DB_ENGINE" in
+    mysql|pgsql) ;;
+    *) die "LARANODE_DB_ENGINE must be 'mysql' or 'pgsql', got: ${DB_ENGINE}" ;;
+  esac
+
+  # ---- Resolve HTTP_PORT -------------------------------------------------------
+  if [ "$port80_free" = 1 ]; then
+    HTTP_PORT=80
+  else
+    HTTP_PORT=$(choose LARANODE_HTTP_PORT 8080 "Panel port (:80 busy — suggest 8080)")
+    HTTP_PORT="${HTTP_PORT:-8080}"
+  fi
+
+  # ---- Build and print the plan ------------------------------------------------
+  local _port_desc
+  if [ "$port80_free" = 1 ]; then
+    _port_desc="port=80"
+  else
+    _port_desc="port=${HTTP_PORT} (:80 held by ${port80_holder}, left untouched)"
+  fi
+
+  local _plan
+  _plan="panel DB=${DB_ENGINE} · ${_port_desc} · web=apache"
+  _plan+=" · php8.4 added (${php_note})"
+  _plan+=" · ${node_note}"
+  _plan+=" · mysql: ${mysql_note}"
+  _plan+=" · pg: ${pg_note}"
+  _plan+=" · ufw: ${ufw_note}"
+
+  log "PLAN: ${_plan}"
+
+  # ---- Confirm -----------------------------------------------------------------
+  confirm "Proceed with install?" || die "Aborted by operator."
 }
 
 # ==============================================================================
