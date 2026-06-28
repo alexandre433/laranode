@@ -365,7 +365,9 @@ SQL
 
   # Add entry only if no specific host line for laranode@127.0.0.1/32 exists.
   # We do NOT remove the default 'host all all 127.0.0.1/32 scram-sha-256'
-  # catchall — we merely add a more specific entry ahead of it.
+  # catchall. The appended line lands after that catchall (first-match-wins), so
+  # the catchall actually matches first — harmless because both require
+  # scram-sha-256, and the smoke-test below confirms laranode can authenticate.
   if ! grep -qE '^host[[:space:]]+laranode[[:space:]]+laranode[[:space:]]+127\.0\.0\.1/32' \
       "$HBA_CONF"; then
     echo "host    laranode        laranode        127.0.0.1/32            scram-sha-256" \
@@ -413,8 +415,12 @@ SQL
   env_set DB_PASSWORD   "$DB_PASS"      "${PANEL_PATH}/.env"
 
   # Stats-reader admin connection (config/database.php 'pgsql_admin' reads PGSQL_*).
+  # PGSQL_USERNAME is required: pgsql_admin defaults to 'postgres', so without it
+  # the stats connection would try the postgres user with the reader's password
+  # and fail scram-sha-256 auth.
   env_set PGSQL_HOST     127.0.0.1            "${PANEL_PATH}/.env"
   env_set PGSQL_PORT     "$PG_PORT"           "${PANEL_PATH}/.env"
+  env_set PGSQL_USERNAME laranode_pg_reader   "${PANEL_PATH}/.env"
   env_set PGSQL_PASSWORD "$PGSQL_READER_PASS" "${PANEL_PATH}/.env"
 
   # ── persist secrets ───────────────────────────────────────────────────────
