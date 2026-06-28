@@ -23,7 +23,10 @@ services:
       - /run/lock
       - /tmp
     ports:
-      - "80:80"
+      # Container Apache always listens on 80; host exposes 9080 by default so it
+      # doesn't collide with anything already on host :80 (e.g. Laragon nginx).
+      # Override: $env:LARANODE_HTTP_PORT=9090; make up  → browse http://localhost:9090
+      - "${LARANODE_HTTP_PORT:-9080}:80"
       - "443:443"
       - "8080:8080"
       - "5173:5173"
