@@ -637,7 +637,7 @@ phase_app() {
 
   # APP_URL — write only when absent or the Laravel placeholder http://localhost.
   local cur_app_url=""
-  cur_app_url="$(grep -E '^APP_URL=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")"
+  cur_app_url="$(grep -E '^APP_URL=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")" || true
   if [ -z "$cur_app_url" ] || [ "$cur_app_url" = "http://localhost" ]; then
     env_set APP_URL "$host_val" "${PANEL_PATH}/.env"
     log "APP_URL set to ${host_val}"
@@ -665,14 +665,14 @@ phase_app() {
 
   # REVERB_HOST / VITE_REVERB_HOST — set only when absent or 'localhost'.
   local cur_reverb=""
-  cur_reverb="$(grep -E '^REVERB_HOST=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")"
+  cur_reverb="$(grep -E '^REVERB_HOST=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")" || true
   if [ -z "$cur_reverb" ] || [ "$cur_reverb" = "localhost" ]; then
     env_set REVERB_HOST "$bare_host" "${PANEL_PATH}/.env"; log "REVERB_HOST set to ${bare_host}"
   else
     log "REVERB_HOST already '${cur_reverb}' — preserving"
   fi
   local cur_vite=""
-  cur_vite="$(grep -E '^VITE_REVERB_HOST=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")"
+  cur_vite="$(grep -E '^VITE_REVERB_HOST=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")" || true
   if [ -z "$cur_vite" ] || [ "$cur_vite" = "localhost" ]; then
     env_set VITE_REVERB_HOST "$bare_host" "${PANEL_PATH}/.env"; log "VITE_REVERB_HOST set to ${bare_host}"
   else
@@ -750,7 +750,7 @@ phase_services() {
 phase_summary() {
   log "Install summary"
   local panel_url=""
-  panel_url="$(grep -E '^APP_URL=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")"
+  panel_url="$(grep -E '^APP_URL=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")" || true
   persist_secret "# Laranode panel — URL: ${panel_url} — DB engine: ${DB_ENGINE}"
 
   echo "========================================================================"
