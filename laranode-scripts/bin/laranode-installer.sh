@@ -456,6 +456,9 @@ phase_webserver() {
     printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
     chmod +x /usr/sbin/policy-rc.d
     _added_policy=1
+    # Safety net: if an apt-get below aborts under set -e, still remove the guard
+    # we created (the explicit rm after the installs handles the success path).
+    trap 'rm -f /usr/sbin/policy-rc.d' EXIT
   fi
   apt-get install -y apache2
   apt-get install -y certbot python3-certbot-apache
@@ -612,6 +615,10 @@ SQL
   if [ "${HTTP_PORT:-80}" -eq 8080 ]; then
     env_set REVERB_SERVER_PORT 8081 "${PANEL_PATH}/.env"
     env_set REVERB_PORT        8081 "${PANEL_PATH}/.env"
+    # Client-facing port baked into the JS bundle by `npm run build` below; must
+    # match REVERB_PORT or the browser connects to the wrong port and websockets
+    # silently fail.
+    env_set VITE_REVERB_PORT   8081 "${PANEL_PATH}/.env"
   fi
 
   php artisan laranode:detect-gpu
