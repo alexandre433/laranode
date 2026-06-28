@@ -273,6 +273,158 @@ _mysql_branch() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# _pgsql_branch — PostgreSQL provisioning for phase_database
+#
+# Cluster discovery: uses pg_lsclusters (single auto; multiple require
+# LARANODE_PG_PORT). Enables the versioned postgresql@<ver>-<name> unit.
+# Idempotent laranode role+DB; scoped pg_hba.conf scram-sha-256 entry.
+# Stats-reader laranode_pg_reader bound to resolved port.
+# Writes DB_* + PGSQL_* to .env via env_set.
+# ─────────────────────────────────────────────────────────────────────────────
+_pgsql_branch() {
+  log "Database — PostgreSQL"
+
+  # ── packages ─────────────────────────────────────────────────────────────
+  # Install only postgresql + postgresql-client; postgresql-common (which
+  # provides pg_lsclusters/pg_ctlcluster) is pulled in as a dependency.
+  apt-get install -y postgresql postgresql-client
+
+  # ── cluster discovery ─────────────────────────────────────────────────────
+  # After apt install, Ubuntu 24.04 creates and starts a default cluster
+  # (typically 16/main). We enumerate via pg_lsclusters so the logic works
+  # even if the version or cluster name differs.
+  local clusters cluster_count
+  clusters=$(pg_lsclusters --no-header 2>/dev/null | grep -v '^[[:space:]]*$' || true)
+  # grep -c exits 1 on zero matches; || true keeps set -e happy
+  cluster_count=$(echo "$clusters" | grep -c . || true)
+
+  local PG_VER PG_CLUSTER_NAME PG_PORT
+  if [ "$cluster_count" -eq 0 ]; then
+    die "PostgreSQL installed but no cluster found — run pg_createcluster and re-run"
+  elif [ "$cluster_count" -eq 1 ]; then
+    PG_VER=$(echo "$clusters"          | awk '{print $1}')
+    PG_CLUSTER_NAME=$(echo "$clusters" | awk '{print $2}')
+    PG_PORT=$(echo "$clusters"         | awk '{print $3}')
+  else
+    # Multiple clusters: require LARANODE_PG_PORT to disambiguate
+    [ -n "${LARANODE_PG_PORT:-}" ] \
+      || die "Multiple PostgreSQL clusters found. Set LARANODE_PG_PORT to disambiguate:"$'\n'"$(pg_lsclusters --no-header)"
+    PG_PORT="$LARANODE_PG_PORT"
+    local matched
+    matched=$(echo "$clusters" | awk -v p="$PG_PORT" '$3 == p {print; exit}')
+    [ -n "$matched" ] \
+      || die "No PostgreSQL cluster found on port $PG_PORT — verify with pg_lsclusters"
+    PG_VER=$(echo "$matched"          | awk '{print $1}')
+    PG_CLUSTER_NAME=$(echo "$matched" | awk '{print $2}')
+  fi
+
+  log "PostgreSQL: ver=$PG_VER cluster=$PG_CLUSTER_NAME port=$PG_PORT"
+
+  # ── enable + start the versioned unit ────────────────────────────────────
+  systemctl enable --now "postgresql@${PG_VER}-${PG_CLUSTER_NAME}"
+
+  # ── generate panel DB password ─────────────────────────────────────────
+  local DB_PASS DB_PASS_TAG
+  DB_PASS=$(openssl rand -base64 18)
+  # Dollar-quote tag: random lowercase alphanum so it never collides with the
+  # base64 password (which cannot contain lowercase alpha runs of 8 chars
+  # identically — but we tag anyway for correctness).
+  DB_PASS_TAG=$(head -c 16 /dev/urandom | base64 | tr -dc 'a-z0-9' | head -c 8)
+
+  # ── idempotent role (laranode LOGIN) ─────────────────────────────────────
+  # Dollar-quote the password to survive special chars from openssl rand.
+  # \$\$ in an unquoted heredoc produces $$ in the SQL (dollar-quote delimiter).
+  sudo -u postgres psql -p "$PG_PORT" -v ON_ERROR_STOP=1 --dbname=postgres <<SQL
+DO \$\$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'laranode') THEN
+        CREATE ROLE laranode LOGIN;
+    END IF;
+END\$\$;
+ALTER ROLE laranode PASSWORD \$${DB_PASS_TAG}\$${DB_PASS}\$${DB_PASS_TAG}\$;
+SQL
+
+  # ── idempotent database (laranode OWNER laranode) ─────────────────────────
+  # CREATE DATABASE cannot run inside a transaction block (DO$$), so we run it
+  # as a standalone statement guarded by || true, then assert existence.
+  sudo -u postgres psql -p "$PG_PORT" \
+    -c "CREATE DATABASE laranode OWNER laranode;" 2>/dev/null || true
+  sudo -u postgres psql -p "$PG_PORT" -At \
+    -c "SELECT 1 FROM pg_database WHERE datname='laranode';" \
+    | grep -q 1 \
+    || die "PostgreSQL database 'laranode' was not created — check cluster logs"
+  sudo -u postgres psql -p "$PG_PORT" \
+    -c "GRANT ALL PRIVILEGES ON DATABASE laranode TO laranode;" >/dev/null
+
+  # ── pg_hba.conf — scram-sha-256 entry for laranode on 127.0.0.1/32 ───────
+  # Resolve the cluster's actual hba_file path (varies by ver/cluster name).
+  local HBA_CONF
+  HBA_CONF=$(sudo -u postgres psql -p "$PG_PORT" -At \
+    -c "SHOW hba_file;" 2>/dev/null) \
+    || die "Cannot query hba_file from PostgreSQL on port $PG_PORT"
+
+  # Add entry only if no specific host line for laranode@127.0.0.1/32 exists.
+  # We do NOT remove the default 'host all all 127.0.0.1/32 scram-sha-256'
+  # catchall — we merely add a more specific entry ahead of it.
+  if ! grep -qE '^host[[:space:]]+laranode[[:space:]]+laranode[[:space:]]+127\.0\.0\.1/32' \
+      "$HBA_CONF"; then
+    echo "host    laranode        laranode        127.0.0.1/32            scram-sha-256" \
+      >> "$HBA_CONF"
+    sudo -u postgres psql -p "$PG_PORT" \
+      -c "SELECT pg_reload_conf();" >/dev/null
+  fi
+
+  # ── smoke-test: panel user connects via 127.0.0.1 with password ──────────
+  PGPASSWORD="$DB_PASS" psql -h 127.0.0.1 -p "$PG_PORT" \
+    -U laranode -d laranode -c "SELECT 1;" >/dev/null \
+    || die "Panel DB user 'laranode' cannot connect via 127.0.0.1:${PG_PORT} — check pg_hba.conf"
+
+  # ── stats-reader role (laranode_pg_reader) — bound to the RESOLVED port ───
+  # The pgsql_admin connection in config/database.php reads PGSQL_* keys.
+  # We must target the same cluster port that the panel uses, not :5432 blindly.
+  local PGSQL_READER_PASS PGSQL_PG_TAG
+  PGSQL_READER_PASS=$(openssl rand -base64 18)
+  PGSQL_PG_TAG=$(head -c 16 /dev/urandom | base64 | tr -dc 'a-z0-9' | head -c 8)
+
+  sudo -u postgres psql -p "$PG_PORT" -v ON_ERROR_STOP=1 --dbname=postgres <<SQL
+DO \$\$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'laranode_pg_reader') THEN
+        CREATE ROLE laranode_pg_reader LOGIN;
+    END IF;
+END\$\$;
+ALTER ROLE laranode_pg_reader PASSWORD \$${PGSQL_PG_TAG}\$${PGSQL_READER_PASS}\$${PGSQL_PG_TAG}\$;
+GRANT CONNECT ON DATABASE postgres TO laranode_pg_reader;
+GRANT pg_read_all_stats TO laranode_pg_reader;
+SQL
+
+  # ── write .env keys via env_set ───────────────────────────────────────────
+  # phase_database runs before phase_app, so .env may not exist yet. Seed it
+  # from .env.example first (full template) so env_set updates existing keys
+  # instead of leaving a stub .env that phase_app would then preserve as-is.
+  [ -f "${PANEL_PATH}/.env" ] || cp "${PANEL_PATH}/.env.example" "${PANEL_PATH}/.env"
+
+  # Panel's own DB connection (config/database.php 'pgsql' block reads DB_*).
+  env_set DB_CONNECTION pgsql           "${PANEL_PATH}/.env"
+  env_set DB_HOST       127.0.0.1       "${PANEL_PATH}/.env"
+  env_set DB_PORT       "$PG_PORT"      "${PANEL_PATH}/.env"
+  env_set DB_DATABASE   laranode        "${PANEL_PATH}/.env"
+  env_set DB_USERNAME   laranode        "${PANEL_PATH}/.env"
+  env_set DB_PASSWORD   "$DB_PASS"      "${PANEL_PATH}/.env"
+
+  # Stats-reader admin connection (config/database.php 'pgsql_admin' reads PGSQL_*).
+  env_set PGSQL_HOST     127.0.0.1            "${PANEL_PATH}/.env"
+  env_set PGSQL_PORT     "$PG_PORT"           "${PANEL_PATH}/.env"
+  env_set PGSQL_PASSWORD "$PGSQL_READER_PASS" "${PANEL_PATH}/.env"
+
+  # ── persist secrets ───────────────────────────────────────────────────────
+  persist_secret "PostgreSQL panel password  (laranode):           $DB_PASS"
+  persist_secret "PostgreSQL reader password (laranode_pg_reader): $PGSQL_READER_PASS"
+
+  log "PostgreSQL setup complete — port=$PG_PORT db/user=laranode"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # phase_database — dispatch to the engine-specific branch
 # DB_ENGINE is resolved (and validated to mysql|pgsql) by preflight.
 # ─────────────────────────────────────────────────────────────────────────────
