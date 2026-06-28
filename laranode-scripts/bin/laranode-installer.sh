@@ -173,7 +173,7 @@ preflight() {
 phase_packages() {
   log "Installing base tools"
   apt-get update -q
-  apt-get install -y software-properties-common git curl ca-certificates sudo openssl
+  apt-get install -y software-properties-common git curl ca-certificates sudo openssl iproute2
 
   log "Installing sysstat"
   apt-get install -y sysstat
@@ -448,20 +448,72 @@ phase_database() {
 
 phase_webserver() {
   log "Installing Apache Web Server"
+  # Suppress service auto-start during apt: on a host where :80 is already held
+  # (e.g. nginx) Apache's default 'Listen 80' would fail to bind and abort the
+  # install under set -e. We configure ports first, then start Apache ourselves.
+  local _added_policy=0
+  if [ ! -e /usr/sbin/policy-rc.d ]; then
+    printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
+    chmod +x /usr/sbin/policy-rc.d
+    _added_policy=1
+  fi
   apt-get install -y apache2
-  systemctl enable apache2
-  systemctl start apache2
+  apt-get install -y certbot python3-certbot-apache
+  [ "$_added_policy" -eq 1 ] && rm -f /usr/sbin/policy-rc.d
 
   log "Enabling required Apache modules"
-  a2enmod proxy_fcgi
-  a2enmod rewrite
-  a2enmod setenvif
-  a2enmod headers
-  a2enmod ssl
-  a2enmod proxy proxy_http
+  a2enmod proxy_fcgi rewrite setenvif headers ssl proxy proxy_http >/dev/null
 
-  log "Installing Certbot"
-  apt-get install -y certbot python3-certbot-apache
+  [ -n "${HTTP_PORT:-}" ]  || die "HTTP_PORT not set — preflight must run first"
+  [ -n "${PANEL_PATH:-}" ] || die "PANEL_PATH not set — preflight must run first"
+
+  # Render the panel vhost from the template. NEVER writes 000-default.conf.
+  local tmpl="${PANEL_PATH}/laranode-scripts/templates/apache-panel.template"
+  local dest="/etc/apache2/sites-available/laranode.conf"
+  [ -f "$tmpl" ] || die "apache-panel.template missing at ${tmpl}"
+  sed -e "s|__PORT__|${HTTP_PORT}|g" \
+      -e "s|__DOCROOT__|${PANEL_PATH}/public|g" \
+      "$tmpl" > "$dest"
+
+  # Panel never uses the stock default site.
+  a2dissite 000-default >/dev/null 2>&1 || true
+
+  # When :80 is held by another server (HTTP_PORT != 80), make Apache listen
+  # ONLY on HTTP_PORT so it never competes for :80. Leave the other server alone.
+  local ports_conf="/etc/apache2/ports.conf"
+  if [ "$HTTP_PORT" -ne 80 ]; then
+    sed -i -E "s/^[[:space:]]*Listen[[:space:]]+80[[:space:]]*\$/Listen ${HTTP_PORT}/" "$ports_conf"
+    grep -qE "^[[:space:]]*Listen[[:space:]]+${HTTP_PORT}([[:space:]]|\$)" "$ports_conf" \
+      || printf 'Listen %s\n' "${HTTP_PORT}" >> "$ports_conf"
+  fi
+
+  a2ensite laranode || die "a2ensite laranode failed"
+  apachectl configtest || die "Apache config test failed — review ${dest}"
+
+  systemctl enable apache2 >/dev/null 2>&1 || true
+  systemctl restart apache2 || die "apache2 start/restart failed after enabling laranode.conf"
+  svc_active apache2 || die "apache2 is not active after restart"
+
+  # Confirm the socket is open (full HTTP 200 check is phase_services, after the
+  # app is bootstrapped). This surfaces port-fork bugs early.
+  ss -tlnH "( sport = :${HTTP_PORT} )" | grep -q . \
+    || die "Apache is not listening on :${HTTP_PORT} after restart"
+
+  # Firewall — allow-only (never 'ufw enable'); have_cmd-gated (no fail-open),
+  # port-aware. Real ufw failures still surface under set -e; absent => loud warn.
+  # Reverb shifts to :8081 when HTTP_PORT=8080 (see phase_app env_set).
+  local _reverb_port=8080
+  [ "${HTTP_PORT}" -eq 8080 ] && _reverb_port=8081
+  if have_cmd ufw; then
+    ufw allow "${HTTP_PORT}"    # panel HTTP
+    ufw allow "${_reverb_port}" # Reverb websockets
+    ufw allow 443               # HTTPS / certbot
+    ufw allow 22                # SSH
+  else
+    warn "ufw not installed — firewall rules NOT configured. Configure the host firewall manually before exposing the panel."
+  fi
+
+  log "Apache panel vhost active on :${HTTP_PORT}"
 }
 
 # ==============================================================================
@@ -553,15 +605,19 @@ SQL
   php artisan db:seed --force
   php artisan storage:link
   php artisan reverb:install --no-interaction
+
+  # Reverb defaults to :8080. When Apache already owns :8080 (HTTP_PORT=8080
+  # because :80 was occupied), shift Reverb to :8081 to avoid a port collision.
+  # REVERB_SERVER_PORT = binding port; REVERB_PORT = client-facing port.
+  if [ "${HTTP_PORT:-80}" -eq 8080 ]; then
+    env_set REVERB_SERVER_PORT 8081 "${PANEL_PATH}/.env"
+    env_set REVERB_PORT        8081 "${PANEL_PATH}/.env"
+  fi
+
   php artisan laranode:detect-gpu
 
   sed -i "s#VITE_REVERB_HOST=.*#VITE_REVERB_HOST=$(curl -s icanhazip.com)#" "${PANEL_PATH}/.env"
   sed -i "s#REVERB_HOST=.*#REVERB_HOST=$(curl -s icanhazip.com)#" "${PANEL_PATH}/.env"
-
-  # NOTE: writes to 000-default.conf — known bug (CRITICAL, ticket #hardening).
-  # Preserved verbatim in this task; Task 7 replaces with laranode.conf.
-  cp "${PANEL_PATH}/laranode-scripts/templates/apache2-default.template" \
-    /etc/apache2/sites-available/000-default.conf
 
   log "Building frontend assets"
   npm install
@@ -578,21 +634,6 @@ phase_services() {
     /etc/systemd/system/laranode-queue-worker.service
   cp "${PANEL_PATH}/laranode-scripts/templates/laranode-reverb.service" \
     /etc/systemd/system/laranode-reverb.service
-
-  log "Adding UFW rules for SSH / HTTP / HTTPS / Reverb"
-  # Gate on ufw presence so set -e does not abort on hosts without it, WITHOUT
-  # fail-open suppression: when ufw exists real failures still surface (set -e);
-  # when absent, warn loudly rather than silently leaving the host unfirewalled.
-  # Task 7 relocates these into phase_webserver and makes the panel rule
-  # HTTP_PORT-aware.
-  if have_cmd ufw; then
-    ufw allow 22
-    ufw allow 80
-    ufw allow 443
-    ufw allow 8080
-  else
-    warn "ufw not installed — firewall rules NOT configured. Configure the host firewall manually before exposing the panel."
-  fi
 
   log "Setting file permissions"
   mkdir -p /home/laranode_ln/logs

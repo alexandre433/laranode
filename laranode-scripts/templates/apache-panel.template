@@ -8,6 +8,6 @@
         Require all granted
     </Directory>
 
-    ErrorLog /home/laranode_ln/panel/storage/logs/apache-error.log
-    CustomLog /home/laranode_ln/panel/storage/logs/apache-access.log combined
+    ErrorLog ${APACHE_LOG_DIR}/laranode-error.log
+    CustomLog ${APACHE_LOG_DIR}/laranode-access.log combined
 </VirtualHost>

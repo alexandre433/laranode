@@ -164,6 +164,17 @@ run_scenario() {
         "${POST_ASSERT_FN}" "${cname}" || ok=0
     fi
 
+    # ── POST_ASSERTS_CMD — optional extra bash run INSIDE the container ──────
+    # Runs only when standard assertions already passed, so a failure here is
+    # clearly the scenario-specific check, not the baseline gate.
+    if [ "${ok:-0}" = 1 ] && [ -n "${POST_ASSERTS_CMD:-}" ]; then
+        echo "[post] Running scenario-specific assertions..."
+        docker exec "${cname}" bash -c "${POST_ASSERTS_CMD}" || {
+            echo "FAIL: post-assertion failed for scenario '${SCENARIO}'"
+            ok=0
+        }
+    fi
+
     if [ "$ok" = 1 ]; then
         echo "RESULT[$scenario]: PASS"
         _cleanup
