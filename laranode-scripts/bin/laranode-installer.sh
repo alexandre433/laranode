@@ -11,10 +11,6 @@ DB_ENGINE=""    # mysql | pgsql
 HTTP_PORT=""    # 80 | 8080 (or operator-chosen)
 PANEL_PATH=/home/laranode_ln/panel
 
-# ---- Cross-phase state (set by phase_database, read by phase_app + phase_summary) ----
-LARANODE_RANDOM_PASS=""
-ROOT_RANDOM_PASS=""
-
 # ==============================================================================
 # Helpers
 # ==============================================================================
@@ -558,12 +554,6 @@ phase_php_node() {
     warn "System 'php' alternative left as ${sys_php}. Panel uses /usr/bin/php8.4 directly."
   fi
 
-  # Create a /usr/local/bin/php symlink pinned to php8.4 so that panel CLI
-  # commands (composer, artisan) use php8.4 regardless of the system alternative.
-  # /usr/local/bin precedes /usr/bin in PATH, so this takes effect for all users
-  # without touching the operator's update-alternatives setting.
-  ln -sf /usr/bin/php8.4 /usr/local/bin/php
-
   log "Enabling PHP-FPM"
   systemctl enable php8.4-fpm || die "systemctl enable php8.4-fpm failed"
   systemctl start php8.4-fpm  || die "systemctl start php8.4-fpm failed"
@@ -577,7 +567,7 @@ phase_php_node() {
 
   log "Installing Composer"
   curl -sS https://getcomposer.org/installer \
-    | php -- --install-dir=/usr/local/bin --filename=composer
+    | php8.4 -- --install-dir=/usr/local/bin --filename=composer
 
   # ---- Node ---------------------------------------------------------------
   if have_cmd node; then
@@ -603,75 +593,122 @@ phase_php_node() {
 # ==============================================================================
 
 phase_app() {
-  log "Installing PHP dependencies"
-  cd "${PANEL_PATH}"
-  composer install --no-interaction
+  log "App provisioning"
 
-  [ -f .env ] || cp .env.example .env
-  # DB_* (incl. DB_PASSWORD) are owned by phase_database/_mysql_branch via env_set;
-  # do not rewrite DB_PASSWORD here (the old LARANODE_RANDOM_PASS global is gone).
-  sed -i "s#APP_URL=.*#APP_URL=\"http://$(curl -s icanhazip.com)\"#" .env
-  php artisan key:generate --force
+  [ -f "${PANEL_PATH}/composer.json" ] \
+    || die "composer.json not found at ${PANEL_PATH} — repo clone missing or PANEL_PATH wrong"
+  cd "${PANEL_PATH}"
+
+  log "Installing PHP dependencies (composer install)"
+  /usr/bin/php8.4 /usr/local/bin/composer install --no-interaction --optimize-autoloader
+
+  # .env — copy example only when absent; never clobber existing config.
+  if [ ! -f "${PANEL_PATH}/.env" ]; then
+    cp "${PANEL_PATH}/.env.example" "${PANEL_PATH}/.env"
+    log ".env created from .env.example"
+  else
+    log ".env already present — preserving existing configuration"
+  fi
+
+  # APP_KEY — generate ONLY when absent/blank; never --force-rotate a valid key.
+  if grep -q '^APP_KEY=base64:' "${PANEL_PATH}/.env"; then
+    log "APP_KEY already set — preserving (idempotent re-run)"
+  else
+    log "APP_KEY not set — generating"
+    /usr/bin/php8.4 artisan key:generate --force
+  fi
+
+  # Resolve canonical panel hostname: LARANODE_APP_URL > public IP.
+  local host_val=""
+  if [ -n "${LARANODE_APP_URL:-}" ]; then
+    host_val="${LARANODE_APP_URL%/}"
+    log "Using LARANODE_APP_URL: ${host_val}"
+  else
+    local public_ip=""
+    public_ip="$(curl -fsS icanhazip.com 2>/dev/null | tr -d '[:space:]')" || true
+    [ -n "$public_ip" ] \
+      || die "Public IP lookup failed (curl icanhazip.com empty). Set LARANODE_APP_URL=http://<host>."
+    host_val="http://${public_ip}"
+    log "Resolved public IP: ${public_ip} -> APP_URL=${host_val}"
+  fi
+  [[ "$host_val" =~ ^https?://.+$ ]] \
+    || die "Resolved APP_URL '${host_val}' is not a valid URL. Set LARANODE_APP_URL=http://<hostname>."
+  local bare_host="${host_val#http://}"; bare_host="${bare_host#https://}"
+
+  # APP_URL — write only when absent or the Laravel placeholder http://localhost.
+  local cur_app_url=""
+  cur_app_url="$(grep -E '^APP_URL=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")"
+  if [ -z "$cur_app_url" ] || [ "$cur_app_url" = "http://localhost" ]; then
+    env_set APP_URL "$host_val" "${PANEL_PATH}/.env"
+    log "APP_URL set to ${host_val}"
+  else
+    log "APP_URL already '${cur_app_url}' — preserving (re-run safe)"
+  fi
 
   log "Installing sudoers drop-ins for www-data"
+  local drop SRC
   for drop in laranode-panel laranode-cron laranode-runtimes laranode-ufw; do
     SRC="${PANEL_PATH}/laranode-scripts/etc/sudoers.d/${drop}"
-    if ! visudo -c -f "${SRC}"; then
-      echo "ERROR: sudoers file ${drop} failed syntax check — aborting" >&2
-      exit 1
-    fi
+    visudo -c -f "${SRC}" >/dev/null \
+      || die "sudoers file ${drop} failed syntax check — aborting"
     install -m 440 "${SRC}" "/etc/sudoers.d/${drop}"
   done
   rm -f /etc/sudoers.d/laranode-postgres
 
-  log "Provisioning PostgreSQL stats-reader role (laranode_pg_reader)"
-  # Enable the versioned PG unit for Ubuntu 24.04; fall back to the generic unit.
-  systemctl enable --now postgresql@16-main 2>/dev/null \
-    || systemctl enable --now postgresql \
-    || true
+  log "Running database migrations"
+  /usr/bin/php8.4 artisan migrate --force \
+    || die "artisan migrate --force failed — verify DB_* in .env and phase_database logs"
 
-  PGSQL_READER_PASS=$(openssl rand -base64 18)
-  PGSQL_PG_TAG=$(head -c 16 /dev/urandom | base64 | tr -dc 'a-z' | head -c 8)
-  sudo -u postgres psql -v ON_ERROR_STOP=1 --dbname=postgres <<SQL
-DO \$\$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'laranode_pg_reader') THEN
-        CREATE ROLE laranode_pg_reader LOGIN;
-    END IF;
-END\$\$;
-ALTER ROLE laranode_pg_reader PASSWORD \$${PGSQL_PG_TAG}\$${PGSQL_READER_PASS}\$${PGSQL_PG_TAG}\$;
-GRANT CONNECT ON DATABASE postgres TO laranode_pg_reader;
-GRANT pg_read_all_stats TO laranode_pg_reader;
-SQL
+  # One-time installs (idempotent: non-zero on re-run is expected/tolerated).
+  /usr/bin/php8.4 artisan storage:link 2>/dev/null || true
+  /usr/bin/php8.4 artisan reverb:install --no-interaction 2>/dev/null || true
 
-  sed -i "s#^PGSQL_PASSWORD=.*#PGSQL_PASSWORD=\"${PGSQL_READER_PASS}\"#" "${PANEL_PATH}/.env" \
-    || echo "PGSQL_PASSWORD=\"${PGSQL_READER_PASS}\"" >> "${PANEL_PATH}/.env"
+  # REVERB_HOST / VITE_REVERB_HOST — set only when absent or 'localhost'.
+  local cur_reverb=""
+  cur_reverb="$(grep -E '^REVERB_HOST=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")"
+  if [ -z "$cur_reverb" ] || [ "$cur_reverb" = "localhost" ]; then
+    env_set REVERB_HOST "$bare_host" "${PANEL_PATH}/.env"; log "REVERB_HOST set to ${bare_host}"
+  else
+    log "REVERB_HOST already '${cur_reverb}' — preserving"
+  fi
+  local cur_vite=""
+  cur_vite="$(grep -E '^VITE_REVERB_HOST=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")"
+  if [ -z "$cur_vite" ] || [ "$cur_vite" = "localhost" ]; then
+    env_set VITE_REVERB_HOST "$bare_host" "${PANEL_PATH}/.env"; log "VITE_REVERB_HOST set to ${bare_host}"
+  else
+    log "VITE_REVERB_HOST already '${cur_vite}' — preserving"
+  fi
 
-  log "Migrating database, seeding, and building assets"
-  php artisan migrate --force
-  php artisan db:seed --force
-  php artisan storage:link
-  php artisan reverb:install --no-interaction
-
-  # Reverb defaults to :8080. When Apache already owns :8080 (HTTP_PORT=8080
-  # because :80 was occupied), shift Reverb to :8081 to avoid a port collision.
-  # REVERB_SERVER_PORT = binding port; REVERB_PORT = client-facing port.
+  # Reverb defaults to :8080. When the panel itself is on :8080 (because :80 was
+  # occupied), shift Reverb to :8081 to avoid a collision. Idempotent via env_set.
   if [ "${HTTP_PORT:-80}" -eq 8080 ]; then
     env_set REVERB_SERVER_PORT 8081 "${PANEL_PATH}/.env"
     env_set REVERB_PORT        8081 "${PANEL_PATH}/.env"
-    # Client-facing port baked into the JS bundle by `npm run build` below; must
-    # match REVERB_PORT or the browser connects to the wrong port and websockets
-    # silently fail.
     env_set VITE_REVERB_PORT   8081 "${PANEL_PATH}/.env"
   fi
 
-  php artisan laranode:detect-gpu
+  # GPU detection — best-effort.
+  /usr/bin/php8.4 artisan laranode:detect-gpu 2>/dev/null || true
 
-  sed -i "s#VITE_REVERB_HOST=.*#VITE_REVERB_HOST=$(curl -s icanhazip.com)#" "${PANEL_PATH}/.env"
-  sed -i "s#REVERB_HOST=.*#REVERB_HOST=$(curl -s icanhazip.com)#" "${PANEL_PATH}/.env"
+  # First-run seed sentinel: seed ONLY when the users table is empty.
+  log "Checking first-run seed sentinel (users table row count)"
+  local user_count=1
+  user_count="$(/usr/bin/php8.4 artisan tinker --execute="echo App\\Models\\User::count();" 2>/dev/null | tail -1 | tr -d ' \r\n')" || user_count=1
+  if [ "$user_count" = "0" ]; then
+    log "Users table empty — running db:seed (first install)"
+    /usr/bin/php8.4 artisan db:seed --force || die "artisan db:seed --force failed"
+  else
+    log "Users table has ${user_count} row(s) — skipping seed (idempotent re-run)"
+  fi
 
-  log "Building frontend assets"
+  log "Building front-end assets"
   npm install
+  # phase_services `find -type f -exec chmod 660` strips exec bits from npm
+  # binaries on a previous install. Restore u+x on bin-script files so that
+  # npm run build succeeds on idempotent re-runs. chmod -R silently skips
+  # symlinks, so we target the actual files via find.
+  find "${PANEL_PATH}/node_modules" -type f -path "*/bin/*" \
+    -exec chmod u+x {} \; 2>/dev/null || true
   npm run build
 }
 
@@ -711,16 +748,21 @@ phase_services() {
 # ==============================================================================
 
 phase_summary() {
+  log "Install summary"
+  local panel_url=""
+  panel_url="$(grep -E '^APP_URL=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")"
+  persist_secret "# Laranode panel — URL: ${panel_url} — DB engine: ${DB_ENGINE}"
+
   echo "========================================================================"
+  echo "  Laranode install complete"
   echo "========================================================================"
-  echo -e "\033[32m --- NOTES ---\033[0m"
-  echo "MySQL Root Password:      ${ROOT_RANDOM_PASS}"
-  echo "Laranode MySQL Username:  laranode"
-  echo "Laranode MySQL Password:  ${LARANODE_RANDOM_PASS}"
-  echo -e "\033[32m --- IMPORTANT ---\033[0m"
-  echo "Final Step: create an admin account by running:"
-  echo -e "\033[33m cd /home/laranode_ln/panel && php artisan laranode:create-admin \033[0m"
-  echo "========================================================================"
+  echo "  Panel URL:    ${panel_url}"
+  echo "  DB engine:    ${DB_ENGINE}"
+  echo ""
+  echo "  All generated credentials saved to: /root/.laranode-credentials (chmod 600)"
+  echo ""
+  echo "  Final step — create the panel admin account:"
+  echo "    cd ${PANEL_PATH} && /usr/bin/php8.4 artisan laranode:create-admin"
   echo "========================================================================"
 }
 

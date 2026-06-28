@@ -108,7 +108,7 @@ run_scenario() {
 
     echo "[$scenario][5/6] Seeding admin account..."
     docker exec "$cname" bash -lc \
-        'cd /home/laranode_ln/panel && php artisan tinker --execute='\''
+        'cd /home/laranode_ln/panel && /usr/bin/php8.4 artisan tinker --execute='\''
             App\Models\User::updateOrCreate(
                 ["username" => "laranode"],
                 ["name" => "Admin", "email" => "admin@laranode.test",
@@ -151,7 +151,7 @@ run_scenario() {
 
     # --- Admin login check ---
     login=$(docker exec "$cname" bash -lc \
-        'cd /home/laranode_ln/panel && php artisan tinker --execute='\''
+        'cd /home/laranode_ln/panel && /usr/bin/php8.4 artisan tinker --execute='\''
             echo Illuminate\Support\Facades\Auth::attempt(
                 ["email" => "admin@laranode.test", "password" => "password"]
             ) ? "yes" : "no";

@@ -23,7 +23,7 @@ export LARANODE_HTTP_PORT
 COMPOSE = docker compose -f local-dev/docker-compose.yml
 EXEC = $(COMPOSE) exec laranode bash -lc
 
-.PHONY: up provision sh verify test test-system build-assets sync-scripts logs nuke ssl-test install-test install-test-matrix install-test-templates install-test-unit
+.PHONY: up provision sh verify test test-system build-assets sync-scripts logs nuke ssl-test install-test install-test-matrix install-test-templates install-test-unit install-test-rerun
 
 up:
 	$(COMPOSE) up -d --build
@@ -69,6 +69,9 @@ install-test-templates:
 
 install-test-unit:
 	bash local-dev/install-test/unit/test-helpers.sh
+
+install-test-rerun:
+	bash local-dev/install-test/run.sh rerun
 
 sync-scripts:
 	$(EXEC) 'cp -f /opt/laranode/bin-src/*.sh /opt/laranode/bin/ && cp -f /home/laranode_ln/panel/local-dev/bin/laranode-ssl-manager.sh /opt/laranode/bin/ && chmod -R 0755 /opt/laranode/bin'
