@@ -1,50 +1,73 @@
 #!/usr/bin/env bash
-# Host-side unit tests for the installer.
-# No container, no root, no network — runs in seconds.
-#
-# Usage: bash local-dev/install-test/unit/test-helpers.sh
-#
-# Task 1: file-existence + syntax checks only.
-# Task 3 will extend with: source installer (via source-guard), then assert
-# env_set add+replace, version_ge true/false, choose precedence (env>default
-# when not a TTY).
+# local-dev/install-test/unit/test-helpers.sh
+# Sources the installer (source-guard keeps main() silent) and asserts the
+# three pure-bash helpers that later tasks rely on. No Docker, no root, ~1 s.
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-INSTALLER="$REPO_ROOT/laranode-scripts/bin/laranode-installer.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALLER="${SCRIPT_DIR}/../../../laranode-scripts/bin/laranode-installer.sh"
 
-PASS=0
-FAIL=0
+# Source the installer — source-guard must prevent main() from running
+# shellcheck source=/dev/null
+source "$INSTALLER"
 
-_ok() {
-    echo "  PASS: $*"
-    PASS=$((PASS + 1))
-}
+PASS=0; FAIL=0
+pass()  { echo "  PASS: $1"; PASS=$((PASS + 1)); }
+flunk() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
-_fail() {
-    echo "  FAIL: $*"
-    FAIL=$((FAIL + 1))
-}
+# ---- env_set ----------------------------------------------------------------
+echo "=== env_set ==="
 
-echo "=== laranode installer unit tests ==="
+TMP=$(mktemp)
+printf 'EXISTING=old\nOTHER=keep\n' > "$TMP"
+
+env_set NEW_KEY myval "$TMP"
+grep -q '^NEW_KEY="myval"$' "$TMP" \
+  && pass "env_set: adds new key"      || flunk "env_set: adds new key"
+
+env_set EXISTING replaced "$TMP"
+grep -q '^EXISTING="replaced"$' "$TMP" \
+  && pass "env_set: replaces existing" || flunk "env_set: replaces existing"
+grep -q '^EXISTING=old$' "$TMP" \
+  && flunk "env_set: stale value gone" || pass  "env_set: stale value gone"
+grep -q '^OTHER=keep$' "$TMP" \
+  && pass "env_set: untouched sibling" || flunk "env_set: untouched sibling"
+
+rm -f "$TMP"
+
+# ---- version_ge -------------------------------------------------------------
+echo "=== version_ge ==="
+
+version_ge 22.3 20  && pass "version_ge 22.3>=20 (true)"  || flunk "version_ge 22.3>=20 (true)"
+version_ge 18.0 20  && flunk "version_ge 18.0>=20 (false)" || pass  "version_ge 18.0>=20 (false)"
+version_ge 20.0 20  && pass "version_ge 20.0>=20 equal"    || flunk "version_ge 20.0>=20 equal"
+version_ge 1.9 1.10 && flunk "version_ge 1.9>=1.10 (false)" || pass "version_ge 1.9>=1.10 (false)"
+
+# ---- choose -----------------------------------------------------------------
+echo "=== choose ==="
+
+# env var beats default
+MYVAR=from_env
+result=$(choose MYVAR default_val "Enter val")
+[ "$result" = "from_env" ] \
+  && pass "choose: env var beats default" || flunk "choose: env var beats default"
+unset MYVAR
+
+# default used when no TTY (stdin is a pipe here)
+result=$(echo "" | choose MYVAR default_val "Enter val")
+[ "$result" = "default_val" ] \
+  && pass "choose: default in non-tty"   || flunk "choose: default in non-tty"
+
+# LARANODE_UNATTENDED=1 also forces default
+LARANODE_UNATTENDED=1
+result=$(choose MYVAR default_val "Enter val")
+[ "$result" = "default_val" ] \
+  && pass "choose: default when UNATTENDED=1" || flunk "choose: default when UNATTENDED=1"
+unset LARANODE_UNATTENDED
+
+# ---- summary ----------------------------------------------------------------
 echo ""
-
-# T1 — installer file exists
-if [ -f "$INSTALLER" ]; then
-    _ok "installer file exists"
-else
-    _fail "installer file not found: $INSTALLER"
-fi
-
-# T2 — installer passes bash syntax check (bash -n)
-# NOTE: we do NOT source the file here because the source-guard (BASH_SOURCE[0]
-# check) is added in Task 3. Until then, sourcing would execute the full install.
-if bash -n "$INSTALLER" 2>/dev/null; then
-    _ok "installer bash -n syntax OK"
-else
-    _fail "installer failed bash -n syntax check"
-fi
-
-echo ""
-echo "Results: $PASS passed, $FAIL failed."
-[ "$FAIL" -eq 0 ]
+echo "Results: passed=$PASS  failed=$FAIL"
+[ "$FAIL" -eq 0 ] && echo "ALL PASS" && exit 0
+echo "FAILURES: $FAIL"
+exit 1
