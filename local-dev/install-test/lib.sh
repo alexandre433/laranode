@@ -18,6 +18,12 @@ export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
 _LIB_IMAGE=jrei/systemd-ubuntu:24.04
 _LIB_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Persistent composer cache shared across every clean-room run. Packages that
+# download successfully once are reused forever, so a re-run only re-fetches the
+# few that hit the codeload HTTP/2 400 flake — the matrix converges and speeds up
+# over time instead of re-downloading ~150 packages per container.
+_LIB_COMPOSER_CACHE="${LARANODE_COMPOSER_CACHE:-$HOME/.cache/laranode-it-composer}"
+mkdir -p "$_LIB_COMPOSER_CACHE" 2>/dev/null || true
 
 run_scenario() {
     local scenario="${SCENARIO:?SCENARIO env var must be set}"
@@ -49,6 +55,7 @@ run_scenario() {
         --cap-add NET_ADMIN --cap-add NET_RAW --stop-signal SIGRTMIN+3 \
         -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
         -v "$_LIB_REPO":/src:ro \
+        -v "$_LIB_COMPOSER_CACHE":/composer-cache \
         --tmpfs /run --tmpfs /run/lock --tmpfs /tmp \
         "$_LIB_IMAGE" >/dev/null || _fail "container did not start"
 
@@ -81,15 +88,17 @@ run_scenario() {
 
     echo "[$scenario][4/6] Running installer (env: $installer_env)..."
     # Composer reliability (test-harness only — no effect on the production
-    # installer's behavior): anonymous downloads from codeload.github.com
-    # intermittently return HTTP/2 400 under rate limiting, flaking the
-    # clean-room `composer install`. Authenticate composer with the host's
-    # GitHub token (gh CLI or $LARANODE_GH_TOKEN) so requests use the 5000/hr
-    # authenticated limit instead of 60/hr anonymous; also force HTTP/1.1.
-    # The token is read at runtime, passed via `docker exec -e` (never written
-    # to disk or committed), and is optional — empty falls back to anonymous.
+    # installer's behavior). codeload.github.com intermittently returns HTTP/2
+    # 400 on dist (legacy.zip) downloads, and a single failure aborts the whole
+    # `composer install`. Two mitigations:
+    #   1) COMPOSER_CACHE_DIR -> the persistent /composer-cache mount, so a
+    #      re-run only re-fetches packages that failed last time and converges.
+    #   2) COMPOSER_AUTH from the host GitHub token (gh CLI or $LARANODE_GH_TOKEN)
+    #      -> 5000/hr authenticated rate limit instead of 60/hr anonymous.
+    # Token is read at runtime, passed via `docker exec -e` (never written to
+    # disk or committed), and optional — empty falls back to anonymous.
     local _gh_token="${LARANODE_GH_TOKEN:-$(gh auth token 2>/dev/null || true)}"
-    local -a _composer_env=(-e COMPOSER_DISABLE_HTTP2=1)
+    local -a _composer_env=(-e COMPOSER_CACHE_DIR=/composer-cache)
     if [ -n "$_gh_token" ]; then
         _composer_env+=(-e "COMPOSER_AUTH={\"github-oauth\":{\"github.com\":\"${_gh_token}\"}}")
     fi
