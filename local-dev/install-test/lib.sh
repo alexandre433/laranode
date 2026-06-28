@@ -80,8 +80,12 @@ run_scenario() {
     fi
 
     echo "[$scenario][4/6] Running installer (env: $installer_env)..."
+    # COMPOSER_DISABLE_HTTP2=1: codeload.github.com intermittently returns
+    # HTTP/2 400 on anonymous dist (legacy.zip) downloads, flaking the clean-room
+    # composer install. Forcing HTTP/1.1 avoids it. Test-harness only — does not
+    # change the production installer's behavior.
     docker exec "$cname" bash -c \
-        "$installer_env bash /home/laranode_ln/panel/laranode-scripts/bin/laranode-installer.sh" \
+        "COMPOSER_DISABLE_HTTP2=1 $installer_env bash /home/laranode_ln/panel/laranode-scripts/bin/laranode-installer.sh" \
         || _fail "installer exited non-zero"
 
     echo "[$scenario][5/6] Seeding admin account..."
