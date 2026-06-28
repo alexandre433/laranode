@@ -198,26 +198,90 @@ phase_fetch_panel() {
 }
 
 # ==============================================================================
-# Phase 3 — Database (MySQL only in this task; engine branching is Task 6)
+# Phase 3 — Database
 # ==============================================================================
 
-phase_database() {
-  log "Installing MySQL Server"
+# ─────────────────────────────────────────────────────────────────────────────
+# _mysql_branch — MySQL provisioning for phase_database
+#
+# Auth strategy (in order):
+#   1. Try unix socket: mysql -u root -e 'SELECT 1'
+#   2. If that fails, require LARANODE_MYSQL_ROOT_PASSWORD (env/prompt/die).
+#
+# NEVER alters root credentials.  Only the 'laranode' service account is
+# touched.  All SQL ops are idempotent so re-runs converge cleanly.
+# DB_* written to .env only after all SQL ops succeed.
+# ─────────────────────────────────────────────────────────────────────────────
+_mysql_branch() {
+  log "Database — MySQL: installing mysql-server"
   apt-get install -y mysql-server
-  systemctl enable mysql
-  systemctl start mysql
+  # enable+start is idempotent whether mysql was just installed or pre-existed.
+  systemctl enable --now mysql
 
-  log "Creating Laranode MySQL user and database"
-  LARANODE_RANDOM_PASS=$(openssl rand -base64 12)
-  ROOT_RANDOM_PASS=$(openssl rand -base64 12)
+  # ── Authenticate as root ────────────────────────────────────────────────
+  local -a root_args=(-u root)
 
-  mysql -u root -e "CREATE USER 'laranode'@'localhost' IDENTIFIED BY '${LARANODE_RANDOM_PASS}';"
-  mysql -u root -e "GRANT ALL PRIVILEGES ON *.* TO 'laranode'@'localhost' WITH GRANT OPTION;"
-  mysql -u root -e "FLUSH PRIVILEGES;"
-  mysql -u root -e "CREATE DATABASE laranode;"
-  # NOTE: rotating root password here is a known bug (CRITICAL, ticket #hardening).
-  # Preserved verbatim in this task; Task 5 removes it.
-  mysql -u root -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${ROOT_RANDOM_PASS}';"
+  if ! mysql -u root -e 'SELECT 1' >/dev/null 2>&1; then
+    # Socket auth is unavailable (root has a password set).
+    local root_pw
+    root_pw=$(choose LARANODE_MYSQL_ROOT_PASSWORD "" \
+      "Enter the existing MySQL root password")
+    [ -n "${root_pw}" ] \
+      || die "MySQL root socket auth failed and LARANODE_MYSQL_ROOT_PASSWORD is not set — cannot provision the panel database"
+    root_args=(-u root -p"${root_pw}")
+    mysql "${root_args[@]}" -e 'SELECT 1' >/dev/null 2>&1 \
+      || die "MySQL root auth failed with provided password — check LARANODE_MYSQL_ROOT_PASSWORD"
+    log "MySQL root auth: caching_sha2_password / native_password (socket unavailable)"
+  else
+    log "MySQL root auth: unix socket (auth_socket)"
+  fi
+
+  # ── Generate a fresh panel service-account password ─────────────────────
+  # Always regenerate on each run so .env and the DB stay in sync.
+  local db_pass
+  db_pass=$(openssl rand -base64 18)
+
+  # ── Idempotent user + database + grants ─────────────────────────────────
+  # CREATE USER IF NOT EXISTS creates on first run only.
+  # ALTER USER (no IF NOT EXISTS) always syncs the password → .env match.
+  # CREATE DATABASE IF NOT EXISTS is a no-op on re-run.
+  # GRANT is idempotent in MySQL 8+.
+  # NEVER ALTER USER root here or anywhere else in the installer.
+  mysql "${root_args[@]}" -e "
+    CREATE USER IF NOT EXISTS 'laranode'@'localhost' IDENTIFIED BY '${db_pass}';
+    ALTER  USER              'laranode'@'localhost' IDENTIFIED BY '${db_pass}';
+    CREATE DATABASE IF NOT EXISTS laranode
+           CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    GRANT ALL PRIVILEGES ON *.* TO 'laranode'@'localhost' WITH GRANT OPTION;
+    FLUSH PRIVILEGES;
+  " || die "MySQL: failed to provision laranode user/database — see output above"
+
+  # ── Write .env (only after all DB ops succeeded) ─────────────────────────
+  # phase_database runs before phase_app, so .env may not exist yet. Seed it
+  # from .env.example first (full template) so env_set updates existing keys
+  # instead of leaving a stub .env that phase_app would then preserve as-is.
+  [ -f "${PANEL_PATH}/.env" ] || cp "${PANEL_PATH}/.env.example" "${PANEL_PATH}/.env"
+  env_set DB_CONNECTION mysql        "${PANEL_PATH}/.env"
+  env_set DB_HOST       127.0.0.1    "${PANEL_PATH}/.env"
+  env_set DB_PORT       3306         "${PANEL_PATH}/.env"
+  env_set DB_DATABASE   laranode     "${PANEL_PATH}/.env"
+  env_set DB_USERNAME   laranode     "${PANEL_PATH}/.env"
+  env_set DB_PASSWORD   "${db_pass}" "${PANEL_PATH}/.env"
+
+  persist_secret "MySQL laranode user password: ${db_pass}"
+  log "Database — MySQL: done"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# phase_database — dispatch to the engine-specific branch
+# DB_ENGINE is resolved (and validated to mysql|pgsql) by preflight.
+# ─────────────────────────────────────────────────────────────────────────────
+phase_database() {
+  case "${DB_ENGINE}" in
+    mysql) _mysql_branch ;;
+    pgsql) _pgsql_branch ;;   # Task 6
+    *)     die "Unknown DB_ENGINE '${DB_ENGINE}' — expected mysql or pgsql" ;;
+  esac
 }
 
 # ==============================================================================
@@ -287,7 +351,8 @@ phase_app() {
   composer install --no-interaction
 
   [ -f .env ] || cp .env.example .env
-  sed -i "s#DB_PASSWORD=.*#DB_PASSWORD=\"${LARANODE_RANDOM_PASS}\"#" .env
+  # DB_* (incl. DB_PASSWORD) are owned by phase_database/_mysql_branch via env_set;
+  # do not rewrite DB_PASSWORD here (the old LARANODE_RANDOM_PASS global is gone).
   sed -i "s#APP_URL=.*#APP_URL=\"http://$(curl -s icanhazip.com)\"#" .env
   php artisan key:generate --force
 

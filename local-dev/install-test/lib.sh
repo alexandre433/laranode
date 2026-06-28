@@ -159,6 +159,11 @@ run_scenario() {
     printf "   %-32s %s\n" "admin login" "$login"
     echo "$login" | grep -q yes || ok=0
 
+    # ── Scenario-specific extra assertions (optional) ──────────────────────
+    if [ -n "${POST_ASSERT_FN:-}" ] && declare -f "${POST_ASSERT_FN}" >/dev/null 2>&1; then
+        "${POST_ASSERT_FN}" "${cname}" || ok=0
+    fi
+
     if [ "$ok" = 1 ]; then
         echo "RESULT[$scenario]: PASS"
         _cleanup
