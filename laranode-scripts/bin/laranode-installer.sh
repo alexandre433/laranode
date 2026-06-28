@@ -266,13 +266,19 @@ phase_services() {
     /etc/systemd/system/laranode-reverb.service
 
   log "Adding UFW rules for SSH / HTTP / HTTPS / Reverb"
-  # ufw may be absent on some hosts; suppress "command not found" so set -e
-  # does not abort the install (preserves pre-set-e behavior). Task 7 relocates
-  # these into phase_webserver and makes the panel port HTTP_PORT-aware.
-  ufw allow 22   >/dev/null 2>&1 || true
-  ufw allow 80   >/dev/null 2>&1 || true
-  ufw allow 443  >/dev/null 2>&1 || true
-  ufw allow 8080 >/dev/null 2>&1 || true
+  # Gate on ufw presence so set -e does not abort on hosts without it, WITHOUT
+  # fail-open suppression: when ufw exists real failures still surface (set -e);
+  # when absent, warn loudly rather than silently leaving the host unfirewalled.
+  # Task 7 relocates these into phase_webserver and makes the panel rule
+  # HTTP_PORT-aware.
+  if have_cmd ufw; then
+    ufw allow 22
+    ufw allow 80
+    ufw allow 443
+    ufw allow 8080
+  else
+    warn "ufw not installed — firewall rules NOT configured. Configure the host firewall manually before exposing the panel."
+  fi
 
   log "Setting file permissions"
   mkdir -p /home/laranode_ln/logs
