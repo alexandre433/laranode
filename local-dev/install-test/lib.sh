@@ -80,12 +80,21 @@ run_scenario() {
     fi
 
     echo "[$scenario][4/6] Running installer (env: $installer_env)..."
-    # COMPOSER_DISABLE_HTTP2=1: codeload.github.com intermittently returns
-    # HTTP/2 400 on anonymous dist (legacy.zip) downloads, flaking the clean-room
-    # composer install. Forcing HTTP/1.1 avoids it. Test-harness only — does not
-    # change the production installer's behavior.
-    docker exec "$cname" bash -c \
-        "COMPOSER_DISABLE_HTTP2=1 $installer_env bash /home/laranode_ln/panel/laranode-scripts/bin/laranode-installer.sh" \
+    # Composer reliability (test-harness only — no effect on the production
+    # installer's behavior): anonymous downloads from codeload.github.com
+    # intermittently return HTTP/2 400 under rate limiting, flaking the
+    # clean-room `composer install`. Authenticate composer with the host's
+    # GitHub token (gh CLI or $LARANODE_GH_TOKEN) so requests use the 5000/hr
+    # authenticated limit instead of 60/hr anonymous; also force HTTP/1.1.
+    # The token is read at runtime, passed via `docker exec -e` (never written
+    # to disk or committed), and is optional — empty falls back to anonymous.
+    local _gh_token="${LARANODE_GH_TOKEN:-$(gh auth token 2>/dev/null || true)}"
+    local -a _composer_env=(-e COMPOSER_DISABLE_HTTP2=1)
+    if [ -n "$_gh_token" ]; then
+        _composer_env+=(-e "COMPOSER_AUTH={\"github-oauth\":{\"github.com\":\"${_gh_token}\"}}")
+    fi
+    docker exec "${_composer_env[@]}" "$cname" bash -c \
+        "$installer_env bash /home/laranode_ln/panel/laranode-scripts/bin/laranode-installer.sh" \
         || _fail "installer exited non-zero"
 
     echo "[$scenario][5/6] Seeding admin account..."
