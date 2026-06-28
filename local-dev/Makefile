@@ -68,7 +68,7 @@ install-test-templates:
 	bash local-dev/install-test/unit/test-templates.sh
 
 install-test-unit:
-	bash local-dev/install-test/unit/test-templates.sh
+	bash local-dev/install-test/unit/test-helpers.sh
 
 sync-scripts:
 	$(EXEC) 'cp -f /opt/laranode/bin-src/*.sh /opt/laranode/bin/ && cp -f /home/laranode_ln/panel/local-dev/bin/laranode-ssl-manager.sh /opt/laranode/bin/ && chmod -R 0755 /opt/laranode/bin'
