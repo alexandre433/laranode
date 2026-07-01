@@ -62,6 +62,59 @@ Run all four in the lab container, e.g. `docker exec laranode-lab bash -lc 'cd /
 
 System-touching features (sudo scripts, `systemctl`, `/proc`, `certbot`, `ufw`) only run on a real Linux host. On Windows/macOS dev machines those `Process` calls fail — exercise that behavior on a Linux VPS, not locally. DB is MySQL in prod (`.env.example`).
 
+## Installer
+
+`laranode-scripts/bin/laranode-installer.sh` is a single-file, phased bash script
+(`set -euo pipefail`; a source-guard at the bottom lets unit tests source it without
+running `main`). It is **safe to run on hosts that already have services** — it never
+rotates the system MySQL root password, never overwrites `000-default.conf`, and falls
+back to `:8080` when `:80` is occupied.
+
+### Env-var interface
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `LARANODE_DB_ENGINE` | `mysql` | `mysql` or `pgsql` — only that engine's server package is installed |
+| `LARANODE_HTTP_PORT` | auto (80 free → 80, else 8080) | Apache port the panel listens on |
+| `LARANODE_MYSQL_ROOT_PASSWORD` | — | Required when existing MySQL root uses password auth (not `auth_socket`) |
+| `LARANODE_PG_PORT` | auto (single cluster) | Disambiguate when multiple Postgres clusters exist on the same host |
+| `LARANODE_APP_URL` | public IP via `icanhazip.com` | Sets `APP_URL`, `REVERB_HOST`, `VITE_REVERB_HOST` in `.env` |
+| `LARANODE_REPO` | GitHub fork URL | Clone source; the install-test harness overrides this to the injected tree path |
+| `LARANODE_UNATTENDED` | `0` | `1` = take all defaults, suppress all prompts and `confirm` gates |
+
+### Safe on hosts with existing services
+
+| Pre-existing condition | Installer behaviour |
+|------------------------|---------------------|
+| Apache / nginx on :80 | Panel vhost written to `laranode.conf` on :8080; existing server fully untouched |
+| MySQL with a root password | Authenticates with `LARANODE_MYSQL_ROOT_PASSWORD`; root password **never changed** |
+| Multiple Postgres clusters | `LARANODE_PG_PORT` required; only that cluster's socket is touched |
+| System `php` not 8.4 | `php8.4` packages installed additively; system default left unchanged; panel calls/units use `/usr/bin/php8.4` |
+| Node ≥ 20 already present | Warns and skips nodesource; existing Node binary used as-is |
+
+Re-running the installer on an already-provisioned panel is **idempotent**: `APP_KEY` is
+not regenerated if already set to a `base64:` value, `APP_URL` is not overwritten if
+already a non-placeholder value, and `db:seed` is skipped when the `users` table is
+non-empty. (Note: a re-run that does not pass `LARANODE_HTTP_PORT` will see the panel's
+own Apache holding `:80` and select `:8080`; pass the original port to keep it in place.)
+
+### Install-test matrix
+
+Clean-room integration tests in `local-dev/install-test/` boot one vanilla
+`jrei/systemd-ubuntu:24.04` container per scenario, inject the repo, run the real
+installer, and assert services active + HTTP 200 + admin login. Run from the repo root:
+
+    make -f local-dev/Makefile install-test-unit       # host helper unit tests (no container, ~1 s)
+    make -f local-dev/Makefile install-test-templates  # host template-content tests (no container)
+    make -f local-dev/Makefile install-test            # baseline scenario only
+    make -f local-dev/Makefile install-test-matrix     # all 5 scenarios (~30-90 min)
+
+Scenarios: `baseline` | `nginx80` | `mysql-rootpw` | `pgsql` | `rerun`.
+Run or debug a single scenario:
+
+    bash local-dev/install-test/run.sh pgsql
+    KEEP=1 bash local-dev/install-test/run.sh pgsql   # keep container after run
+
 ## Architecture
 
 ### Request layering
