@@ -105,13 +105,17 @@ test('RestoreJob (db type) calls CreateDatabaseService and marks operation succe
     // A Database panel row was created for the new target.
     expect(DatabaseModel::where('name', 'newdb')->exists())->toBeTrue();
 
-    // restore-db.sh was invoked via Process.
+    // restore-db.sh was invoked via Process, restoring as the new DB user
+    // (never OS root) with the password carried by the 0600 .cnf file.
+    // argv order must match the script usage: cnfFile, dumpFile, dbName, dbUser.
     Process::assertRan(function (\Illuminate\Process\PendingProcess $process) {
         $cmd = $process->command;
 
         return is_array($cmd)
             && ($cmd[0] ?? '') === 'sudo'
-            && str_contains($cmd[1] ?? '', 'laranode-restore-db.sh');
+            && str_contains($cmd[1] ?? '', 'laranode-restore-db.sh')
+            && ($cmd[4] ?? '') === 'newdb'
+            && ($cmd[5] ?? '') === 'newdb_u';
     });
 });
 

@@ -118,6 +118,7 @@ class RestoreJob extends OperationJob
                 $cnfPath,
                 $tempFile,
                 $newTarget,
+                $newDbUser,
             ]);
 
             if ($result->failed()) {

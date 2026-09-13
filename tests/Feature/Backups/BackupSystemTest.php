@@ -109,17 +109,27 @@ test('MysqlBackupDriver dumps a real MySQL DB via --defaults-extra-file', functi
 })->group('system');
 
 // ---------------------------------------------------------------------------
-// Test 2: laranode-backup-files.sh tars a real directory
+// Test 2: laranode-backup-files.sh tars a real panel-managed site root
+//
+// The script runs as root and its hardening only accepts a
+// /home/<user>_ln/domains/<domain> site root plus a 'laranode-backup-' temp
+// archive — the exact shapes TarFilesAction/BackupJob pass in production. The
+// fixture therefore has to live under /home, not in the system temp dir.
 // ---------------------------------------------------------------------------
 test('laranode-backup-files.sh archives a directory and produces a valid gzipped tar', function () {
-    // Create a temp directory with known test files.
-    $siteRoot = sys_get_temp_dir().'/laranode-bkp-site-'.uniqid();
-    mkdir($siteRoot, 0755, true);
+    // Real panel layout: {homedir}/domains/{url} for user 'ln_bkptest'.
+    $siteRoot = '/home/ln_bkptest_ln/domains/example.com';
+    @mkdir($siteRoot, 0755, true);
     file_put_contents($siteRoot.'/index.html', '<html>hello</html>');
     file_put_contents($siteRoot.'/README.txt', 'test content for backup');
 
-    $outFile = sys_get_temp_dir().'/laranode-bkp-files-'.uniqid().'.tar.gz';
-    $sysUser = 'root'; // container runs as root; chown is a no-op on an already-root-owned file
+    // Mirror BackupJob: tempnam(sys_get_temp_dir(), 'laranode-backup-'), then
+    // rename to the '.tar.gz' path the archive is actually written to.
+    $outBase = tempnam(sys_get_temp_dir(), 'laranode-backup-');
+    $outFile = $outBase.'.tar.gz';
+    rename($outBase, $outFile);
+
+    $sysUser = 'ln_bkptest_ln'; // script only accepts '{username}_ln' system users
 
     try {
         $scriptPath = base_path('laranode-scripts/bin/laranode-backup-files.sh');
@@ -146,7 +156,9 @@ test('laranode-backup-files.sh archives a directory and produces a valid gzipped
     } finally {
         @unlink($siteRoot.'/index.html');
         @unlink($siteRoot.'/README.txt');
-        @rmdir($siteRoot);
+        @rmdir($siteRoot);                 // .../domains/example.com
+        @rmdir(dirname($siteRoot));        // .../domains
+        @rmdir(dirname($siteRoot, 2));     // /home/ln_bkptest_ln
         @unlink($outFile);
     }
 })->group('system');
@@ -284,11 +296,13 @@ test('RestoreJob restores a real dump into a new DB name via CreateDatabaseServi
 })->group('system');
 
 // ---------------------------------------------------------------------------
-// Test 4: the privileged scripts reject argv flag-smuggling and bad identifiers
-// before performing any privileged work (security hardening guards).
+// Test 4: the privileged scripts reject argv flag-smuggling, bad identifiers,
+// arbitrary host paths, and non-panel system users before performing any
+// privileged work (security hardening guards).
 // ---------------------------------------------------------------------------
 test('backup/restore scripts reject argv-smuggling and invalid identifiers', function () {
     $bin = base_path('laranode-scripts/bin');
+    $tmp = rtrim(sys_get_temp_dir(), '/');
 
     $run = function (array $args) use ($bin) {
         $script = array_shift($args);
@@ -305,12 +319,29 @@ test('backup/restore scripts reject argv-smuggling and invalid identifiers', fun
 
     // Leading-dash argument is rejected (argv flag smuggling) on every script.
     expect($run(['laranode-db-backup.sh', 'mysql', '-x', 'user', 'cnf', 'out']))->toBe(1);
-    expect($run(['laranode-restore-db.sh', '-x', 'dump', 'db']))->toBe(1);
+    expect($run(['laranode-restore-db.sh', '-x', 'dump', 'db', 'dbuser']))->toBe(1);
     expect($run(['laranode-backup-files.sh', '/tmp', '-x', 'root']))->toBe(1);
     expect($run(['laranode-restore-files.sh', '-x', '/tmp/dest', 'root']))->toBe(1);
 
     // Invalid identifiers (non-alphanumeric) are rejected before any tool runs.
+    // The file-restore case uses otherwise-valid paths so the identifier guard is
+    // what rejects it (the archive-path guard is exercised separately below).
     expect($run(['laranode-db-backup.sh', 'mysql', 'bad;name', 'user', 'cnf', 'out']))->toBe(1);
-    expect($run(['laranode-restore-db.sh', 'cnf', 'dump', 'bad name']))->toBe(1);
-    expect($run(['laranode-restore-files.sh', '/tmp/x.tgz', '/tmp/dest', 'bad/user']))->toBe(1);
+    expect($run(['laranode-restore-db.sh', 'cnf', 'dump', 'bad name', 'dbuser']))->toBe(1);
+    expect($run(['laranode-restore-db.sh', 'cnf', 'dump', 'db', 'bad/user']))->toBe(1);
+    expect($run(['laranode-restore-files.sh', $tmp.'/laranode-restore-x.tar.gz', '/home/ln_bkptest_ln/domains/example.com', 'bad/user']))->toBe(1);
+
+    // Host-path abuse: the file scripts run as root, so the site root / dest dir
+    // must be a panel-managed website root — '/' and '/etc' are refused (they
+    // would archive /etc/shadow or hand /etc to the site user).
+    expect($run(['laranode-backup-files.sh', '/', $tmp.'/laranode-backup-x.tar.gz', 'ln_bkptest_ln']))->toBe(1);
+    expect($run(['laranode-restore-files.sh', $tmp.'/laranode-restore-x.tar.gz', '/etc', 'ln_bkptest_ln']))->toBe(1);
+
+    // 'root' is never a panel account (always '{username}_ln') — rejected explicitly.
+    expect($run(['laranode-backup-files.sh', '/home/ln_bkptest_ln/domains/example.com', $tmp.'/laranode-backup-x.tar.gz', 'root']))->toBe(1);
+    expect($run(['laranode-restore-files.sh', $tmp.'/laranode-restore-x.tar.gz', '/home/ln_bkptest_ln/domains/example.com', 'root']))->toBe(1);
+
+    // Archive path outside the system temp dir (or with the wrong prefix) is refused.
+    expect($run(['laranode-backup-files.sh', '/home/ln_bkptest_ln/domains/example.com', '/etc/shadow.tar.gz', 'ln_bkptest_ln']))->toBe(1);
+    expect($run(['laranode-restore-files.sh', '/etc/shadow.tar.gz', '/home/ln_bkptest_ln/domains/example.com', 'ln_bkptest_ln']))->toBe(1);
 })->group('system');
