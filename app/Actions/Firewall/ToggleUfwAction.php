@@ -9,15 +9,16 @@ class ToggleUfwAction
 {
     public function execute(bool $enable): string
     {
-        if ($enable) {
-            $proc = Process::run(['sudo', 'ufw', '--force', 'enable']);
-        } else {
-            // disable may prompt; confirm automatically
-            $proc = Process::run(['bash', '-lc', 'yes | sudo ufw disable']);
-        }
+        // The wrapper passes --force for both directions (disable would otherwise prompt).
+        $proc = Process::run([
+            'sudo',
+            config('laranode.laranode_bin_path').'/laranode-ufw.sh',
+            $enable ? 'enable' : 'disable',
+        ]);
         if ($proc->failed()) {
-            throw new RuntimeException('UFW toggle failed: ' . $proc->errorOutput());
+            throw new RuntimeException('UFW toggle failed: '.$proc->errorOutput());
         }
+
         return trim($proc->output());
     }
 }

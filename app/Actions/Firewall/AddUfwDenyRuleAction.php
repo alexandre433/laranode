@@ -13,13 +13,13 @@ class AddUfwDenyRuleAction
         if ($ruleSpec === '') {
             throw new RuntimeException('Empty rule spec');
         }
-    
+
         $parts = preg_split('/\s+/', trim($ruleSpec));
-        $parts = array_filter($parts, fn($v) => $v !== '');
-        $proc = Process::run(array_merge(['sudo', 'ufw', 'deny'], $parts));
-        
+        $parts = array_filter($parts, fn ($v) => $v !== '');
+        $proc = Process::run(array_merge(['sudo', config('laranode.laranode_bin_path').'/laranode-ufw.sh', 'deny'], $parts));
+
         if ($proc->failed()) {
-            throw new RuntimeException('UFW deny failed: ' . $proc->errorOutput());
+            throw new RuntimeException('UFW deny failed: '.$proc->errorOutput());
         }
     }
 }

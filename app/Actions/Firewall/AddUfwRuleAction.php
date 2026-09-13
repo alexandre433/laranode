@@ -15,11 +15,11 @@ class AddUfwRuleAction
         }
 
         $parts = preg_split('/\s+/', trim($ruleSpec));
-        $parts = array_filter($parts, fn($v) => $v !== '');
-        $proc = Process::run(array_merge(['sudo', 'ufw', 'allow'], $parts));
+        $parts = array_filter($parts, fn ($v) => $v !== '');
+        $proc = Process::run(array_merge(['sudo', config('laranode.laranode_bin_path').'/laranode-ufw.sh', 'allow'], $parts));
 
         if ($proc->failed()) {
-            throw new RuntimeException('UFW allow failed: ' . $proc->errorOutput());
+            throw new RuntimeException('UFW allow failed: '.$proc->errorOutput());
         }
     }
 }
