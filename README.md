@@ -24,7 +24,7 @@ Laranode is a simple but powerful open-source alternative to cPanel and Plesk, d
 
 ✅ **Multi-Engine Database Management** – Create and manage MySQL, MariaDB, and PostgreSQL databases, with per-engine service control (start/stop/restart).
 
-✅ **Automated Backups** – Scheduled or on-demand database and file backups to local disk or S3-compatible storage, with retention and restore.
+✅ **Automated Backups** – Scheduled or on-demand database and file backups to local disk or S3-compatible storage, with retention and restore. (Database backups currently cover MySQL/MariaDB; PostgreSQL dump/restore is not implemented yet.)
 
 ✅ **Cron Job Manager** – Create and manage per-user scheduled tasks from the web UI.
 
@@ -49,8 +49,26 @@ Laranode can be installed on a FRESH VPS or dedicated server.
 ### Quick Install
 Run on a clean Ubuntu 24.04 server as root:
 ```bash
-curl -sSL https://raw.githubusercontent.com/alexandre433/laranode/refs/heads/main/laranode-scripts/bin/laranode-installer.sh | bash
+curl -sSL https://raw.githubusercontent.com/crivion/laranode/refs/heads/main/laranode-scripts/bin/laranode-installer.sh | bash
 ```
+
+### Upgrading an existing install
+
+The installer is for fresh servers — it rotates the MySQL root password, seeds the
+database and generates the app key, none of which is safe to repeat. To upgrade a
+host that already runs Laranode, run the idempotent upgrade script instead:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/crivion/laranode/refs/heads/main/laranode-scripts/bin/laranode-upgrade.sh | sudo bash
+```
+
+(or `sudo /home/laranode_ln/panel/laranode-scripts/bin/laranode-upgrade.sh` on a host that already has the checkout.)
+
+It pulls the new code and re-applies everything a plain `git pull` does not give
+you: new packages, the sudoers drop-ins, the PostgreSQL stats-reader role, new
+`.env` keys, the systemd units (including the scheduler timer), migrations and a
+frontend rebuild. It never rotates the MySQL root password, never re-seeds, and
+never regenerates `APP_KEY`, so it is safe to run more than once.
 
 ## Getting Started
 Once installed, access Laranode via your browser:
