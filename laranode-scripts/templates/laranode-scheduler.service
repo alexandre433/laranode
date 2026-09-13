@@ -1,0 +1,10 @@
+[Unit]
+Description=Laranode Scheduler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=laranode_ln
+Group=laranode_ln
+Type=oneshot
+ExecStart=/usr/bin/php /home/laranode_ln/panel/artisan schedule:run --no-interaction

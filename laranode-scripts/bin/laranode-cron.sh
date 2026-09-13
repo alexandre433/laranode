@@ -13,7 +13,13 @@ set -euo pipefail
 #   - Each line in <tmp_file> must be: 5 schedule fields <TAB> command (no embedded newlines).
 #   - Command portion must start with 'php /home/<system_user>/' (allowlist: php only, v1).
 #   - Flag-smuggling: any argument starting with '-' is rejected.
-#   - sudoers grants only (www-data) not (ALL); sudo only elevates to www-data.
+#   - This script runs as ROOT under the NOPASSWD sudoers drop-in: every crontab
+#     read/write below uses `crontab -u <user>`, which requires root. The caller's
+#     identity gives us no protection, so safety rests entirely on this script's
+#     own guards: username allowlist (^[a-zA-Z0-9_]+$), mandatory _ln suffix,
+#     target user must exist, root is refused, each cron line must be exactly 5
+#     schedule fields + TAB + a command beginning with 'php /home/<system_user>/',
+#     and any argument starting with '-' is rejected.
 
 MARKER="# laranode-managed"
 

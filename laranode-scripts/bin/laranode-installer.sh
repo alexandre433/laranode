@@ -8,7 +8,7 @@ export DEBIAN_FRONTEND=noninteractive
 # Where the panel lives, and where to clone it from. LARANODE_REPO is overridable
 # so the clean-room installer test can inject a local checkout instead of GitHub.
 PANEL_PATH=/home/laranode_ln/panel
-LARANODE_REPO="${LARANODE_REPO:-https://github.com/alexandre433/laranode.git}"
+LARANODE_REPO="${LARANODE_REPO:-https://github.com/crivion/laranode.git}"
 
 # ==============================================================================
 # 1. System packages (no repo needed yet)
@@ -235,6 +235,14 @@ SQL
 sed -i "s#^PGSQL_PASSWORD=.*#PGSQL_PASSWORD=\"${PGSQL_READER_PASS}\"#" "${PANEL_PATH}/.env" || \
     echo "PGSQL_PASSWORD=\"${PGSQL_READER_PASS}\"" >> "${PANEL_PATH}/.env"
 
+# pgsql_admin must authenticate as the role created above — .env.example ships
+# PGSQL_USERNAME=postgres, which would pair the reader's password with the wrong role.
+if grep -q '^PGSQL_USERNAME=' "${PANEL_PATH}/.env"; then
+    sed -i "s#^PGSQL_USERNAME=.*#PGSQL_USERNAME=\"laranode_pg_reader\"#" "${PANEL_PATH}/.env"
+else
+    echo "PGSQL_USERNAME=\"laranode_pg_reader\"" >> "${PANEL_PATH}/.env"
+fi
+
 # ==============================================================================
 # 4. App provisioning: DB, assets, reverb, GPU, vhost
 # ==============================================================================
@@ -269,12 +277,16 @@ npm run build
 
 echo -e "\033[34m"
 echo "--------------------------------------------------------------------------------"
-echo "Adding systemd services (queue worker and reverb)"
+echo "Adding systemd services (queue worker, reverb and scheduler)"
 echo "--------------------------------------------------------------------------------"
 echo -e "\033[0m"
 
 cp "${PANEL_PATH}/laranode-scripts/templates/laranode-queue-worker.service" /etc/systemd/system/laranode-queue-worker.service
 cp "${PANEL_PATH}/laranode-scripts/templates/laranode-reverb.service" /etc/systemd/system/laranode-reverb.service
+# Scheduler: the timer drives `artisan schedule:run` every minute (scheduled
+# backups, retention, analytics rollups, SSL-expiry notifications, model:prune).
+cp "${PANEL_PATH}/laranode-scripts/templates/laranode-scheduler.service" /etc/systemd/system/laranode-scheduler.service
+cp "${PANEL_PATH}/laranode-scripts/templates/laranode-scheduler.timer" /etc/systemd/system/laranode-scheduler.timer
 
 echo -e "\033[34m"
 echo "--------------------------------------------------------------------------------"
@@ -303,6 +315,8 @@ systemctl enable laranode-queue-worker.service
 systemctl enable laranode-reverb.service
 systemctl start laranode-queue-worker.service
 systemctl start laranode-reverb.service
+# Enabling the timer arms the scheduler; it pulls in the oneshot service itself.
+systemctl enable --now laranode-scheduler.timer
 systemctl restart apache2
 systemctl restart php8.4-fpm
 

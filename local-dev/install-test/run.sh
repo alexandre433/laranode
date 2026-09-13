@@ -26,7 +26,7 @@ fail() { echo "FAIL: $1"; [ "$KEEP" = 1 ] && echo "(container kept: docker exec 
 
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 
-echo "[1/5] Booting clean $IMAGE with systemd..."
+echo "[1/6] Booting clean $IMAGE with systemd..."
 docker run -d --name "$NAME" --privileged --cgroupns=host \
     --cap-add NET_ADMIN --cap-add NET_RAW --stop-signal SIGRTMIN+3 \
     -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
@@ -40,7 +40,7 @@ for _ in $(seq 1 30); do
     sleep 2
 done
 
-echo "[2/5] Injecting working tree (fresh — no host vendor/.env/cache)..."
+echo "[2/6] Injecting working tree (fresh — no host vendor/.env/cache)..."
 docker exec "$NAME" mkdir -p /home/laranode_ln/panel
 docker exec "$NAME" bash -c 'tar -C /src \
     --exclude=./vendor --exclude=./node_modules --exclude=./.git \
@@ -50,35 +50,58 @@ docker exec "$NAME" bash -c 'tar -C /src \
 # carried over from the host so the fresh .env/key actually take effect.
 docker exec "$NAME" bash -c 'rm -f /home/laranode_ln/panel/bootstrap/cache/*.php' || true
 
-echo "[3/5] Running the REAL installer (installs everything; can take 10+ min)..."
+echo "[3/6] Running the REAL installer (installs everything; can take 10+ min)..."
 docker exec "$NAME" bash /home/laranode_ln/panel/laranode-scripts/bin/laranode-installer.sh \
     || fail "installer exited non-zero"
 
-echo "[4/5] Seeding an admin..."
+echo "[4/6] Seeding an admin..."
 docker exec "$NAME" bash -lc 'cd /home/laranode_ln/panel && php artisan tinker --execute="App\Models\User::updateOrCreate([\"username\"=>\"laranode\"],[\"name\"=>\"Admin\",\"email\"=>\"admin@laranode.test\",\"password\"=>bcrypt(\"password\"),\"role\"=>\"admin\",\"ssh_access\"=>true,\"email_verified_at\"=>now()]);"' \
     || fail "admin creation failed"
 
-echo "[5/5] Assertions:"
-ok=1
-for svc in apache2 mysql php8.4-fpm laranode-reverb laranode-queue-worker; do
-    st=$(docker exec "$NAME" systemctl is-active "$svc" 2>/dev/null || echo inactive)
-    printf "   %-26s %s\n" "$svc" "$st"
-    [ "$st" = active ] || ok=0
-done
-pg=$(docker exec "$NAME" bash -c 'systemctl is-active postgresql@16-main 2>/dev/null || systemctl is-active postgresql 2>/dev/null || echo inactive')
-printf "   %-26s %s\n" "postgresql" "$pg"
-[ "$pg" = active ] || ok=0
+# Shared assertions — run once after the install and again after the upgrade.
+assert_system() {
+    local label="$1" ok=1 out
+    echo "$label"
+    for svc in apache2 mysql php8.4-fpm laranode-reverb laranode-queue-worker laranode-scheduler.timer; do
+        st=$(docker exec "$NAME" systemctl is-active "$svc" 2>/dev/null || echo inactive)
+        printf "   %-26s %s\n" "$svc" "$st"
+        [ "$st" = active ] || ok=0
+    done
+    pg=$(docker exec "$NAME" bash -c 'systemctl is-active postgresql@16-main 2>/dev/null || systemctl is-active postgresql 2>/dev/null || echo inactive')
+    printf "   %-26s %s\n" "postgresql" "$pg"
+    [ "$pg" = active ] || ok=0
 
-code=$(docker exec "$NAME" curl -s -o /dev/null -w '%{http_code}' http://localhost/login 2>/dev/null || echo 000)
-printf "   %-26s %s\n" "GET /login" "$code"
-[ "$code" = 200 ] || ok=0
+    code=$(docker exec "$NAME" curl -s -o /dev/null -w '%{http_code}' http://localhost/login 2>/dev/null || echo 000)
+    printf "   %-26s %s\n" "GET /login" "$code"
+    [ "$code" = 200 ] || ok=0
 
-login=$(docker exec "$NAME" bash -lc 'cd /home/laranode_ln/panel && php artisan tinker --execute="echo Illuminate\Support\Facades\Auth::attempt([\"email\"=>\"admin@laranode.test\",\"password\"=>\"password\"])?\"yes\":\"no\";"' 2>/dev/null | tail -1)
-printf "   %-26s %s\n" "admin login" "$login"
-echo "$login" | grep -q yes || ok=0
+    login=$(docker exec "$NAME" bash -lc 'cd /home/laranode_ln/panel && php artisan tinker --execute="echo Illuminate\Support\Facades\Auth::attempt([\"email\"=>\"admin@laranode.test\",\"password\"=>\"password\"])?\"yes\":\"no\";"' 2>/dev/null | tail -1)
+    printf "   %-26s %s\n" "admin login" "$login"
+    echo "$login" | grep -q yes || ok=0
 
-if [ "$ok" = 1 ]; then
-    echo "RESULT: PASS — clean from-scratch install works."
+    return $((1 - ok))
+}
+
+assert_system "[5/6] Assertions (fresh install):"
+ok=$?
+
+echo "[6/6] Upgrading the freshly installed host with laranode-upgrade.sh..."
+docker exec "$NAME" bash /home/laranode_ln/panel/laranode-scripts/bin/laranode-upgrade.sh \
+    || fail "upgrade script exited non-zero on an existing install"
+
+pguser=$(docker exec "$NAME" bash -c "grep '^PGSQL_USERNAME=' /home/laranode_ln/panel/.env" 2>/dev/null)
+printf "   %-26s %s\n" "PGSQL_USERNAME" "${pguser#PGSQL_USERNAME=}"
+echo "$pguser" | grep -q laranode_pg_reader || ok=1
+
+# The upgrade must not have re-seeded or rotated anything one-time.
+users=$(docker exec "$NAME" bash -lc 'cd /home/laranode_ln/panel && php artisan tinker --execute="echo App\Models\User::where(\"username\",\"laranode\")->count();"' 2>/dev/null | tail -1)
+printf "   %-26s %s\n" "admin rows after upgrade" "$users"
+[ "$users" = 1 ] || ok=1
+
+assert_system "   Assertions (after upgrade):" || ok=1
+
+if [ "$ok" = 0 ]; then
+    echo "RESULT: PASS — clean from-scratch install works, and the upgrade path is idempotent."
     cleanup
     exit 0
 else

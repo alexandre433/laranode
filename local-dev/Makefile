@@ -30,7 +30,7 @@ sh:
 	$(COMPOSE) exec laranode bash
 
 verify:
-	$(EXEC) 'ps -p 1 -o comm=; systemctl is-system-running || true; for s in apache2 mysql php8.4-fpm laranode-reverb laranode-queue-worker; do printf "%s: " "$$s"; systemctl is-active $$s; done'
+	$(EXEC) 'ps -p 1 -o comm=; systemctl is-system-running || true; for s in apache2 mysql php8.4-fpm laranode-reverb laranode-queue-worker laranode-scheduler.timer; do printf "%s: " "$$s"; systemctl is-active $$s; done'
 	@echo "--- HTTP check ---"
 	@curl -s -o /dev/null -w "panel http status: %{http_code}\n" http://localhost || true
 

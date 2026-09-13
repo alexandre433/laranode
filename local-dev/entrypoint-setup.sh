@@ -86,10 +86,8 @@ GRANT CONNECT ON DATABASE postgres TO laranode_pg_reader;
 GRANT pg_read_all_stats TO laranode_pg_reader;
 SQL
 
-# Apply postgres sudoers drop-in
-log "writing postgres sudoers"
-cp -f "$PANEL/laranode-scripts/bin/laranode-postgres-sudoers" /etc/sudoers.d/laranode-postgres
-chmod 440 /etc/sudoers.d/laranode-postgres
+# ... (the postgres script is authorized by the laranode-panel drop-in below,
+# exactly like the installer does it — no separate drop-in)
 
 # Smoke test (BIN is now populated above)
 log "postgres smoke test"
@@ -97,27 +95,30 @@ sudo "$BIN/laranode-postgres.sh" create-db ln_smoke_test UTF8 en_US.UTF-8
 sudo "$BIN/laranode-postgres.sh" drop-db ln_smoke_test
 log "postgres smoke test PASSED"
 
-# --- container sudoers (www-data runs the scripts; mirrors installer line 172 + new path) ---
-log "writing sudoers"
-cat > /etc/sudoers.d/laranode <<EOF
-www-data ALL=(ALL) NOPASSWD: $BIN/*.sh, /usr/sbin/a2dissite, /bin/rm /etc/apache2/sites-available/*.conf
-EOF
-chmod 440 /etc/sudoers.d/laranode
-
-# --- cron sudoers drop-in (grants www-data NOPASSWD for laranode-cron.sh at panel path) ---
-log "writing laranode-cron sudoers drop-in"
-cp -f "$PANEL/laranode-scripts/etc/sudoers.d/laranode-cron" /etc/sudoers.d/laranode-cron
-chmod 440 /etc/sudoers.d/laranode-cron
-
-# --- runtimes sudoers drop-in (grants www-data NOPASSWD for runtime scripts) ---
-log "writing laranode-runtimes sudoers drop-in"
-cp -f "$PANEL/laranode-scripts/etc/sudoers.d/laranode-runtimes" /etc/sudoers.d/laranode-runtimes
-chmod 440 /etc/sudoers.d/laranode-runtimes
-
-# --- firewall (UFW) sudoers drop-in (firewall Actions call `sudo ufw` directly) ---
-log "writing laranode-ufw sudoers drop-in"
-cp -f "$PANEL/laranode-scripts/etc/sudoers.d/laranode-ufw" /etc/sudoers.d/laranode-ufw
-chmod 440 /etc/sudoers.d/laranode-ufw
+# --- sudoers: install EXACTLY the drop-in set the installer installs ---
+# No wildcard rule here: a broad `$BIN/*.sh` grant is what previously hid the
+# laranode-cron runas mismatch, so the lab must fail the same way production
+# would. The drop-ins hard-code the production panel path; callers that use
+# base_path() (e.g. PHPManagerController) really do run the scripts from that
+# bind-mounted path, while callers using config('laranode.laranode_bin_path')
+# run them from $BIN, which is a Linux-native copy the container can exec.
+# Authorize both paths for every rule, derived 1:1 from the repo files.
+log "installing sudoers drop-ins (same set as laranode-installer.sh)"
+for drop in laranode-panel laranode-cron laranode-runtimes laranode-ufw; do
+    SRC="$PANEL/laranode-scripts/etc/sudoers.d/$drop"
+    OUT="/etc/sudoers.d/$drop"
+    : > "$OUT"
+    while IFS= read -r line; do
+        printf '%s\n' "$line" >> "$OUT"
+        if [[ "$line" == *"/home/laranode_ln/panel/laranode-scripts/bin/"* ]]; then
+            printf '%s\n' "${line//\/home\/laranode_ln\/panel\/laranode-scripts\/bin/$BIN}" >> "$OUT"
+        fi
+    done < "$SRC"
+    visudo -c -f "$OUT" >/dev/null || { log "ERROR: $drop failed visudo"; exit 1; }
+    chmod 440 "$OUT"
+done
+# Legacy drop-ins the installer also removes
+rm -f /etc/sudoers.d/laranode /etc/sudoers.d/laranode-postgres
 
 # --- enable Apache proxy modules (required for FrankenPHP/Swoole) ---
 log "enabling apache proxy modules"
@@ -184,11 +185,14 @@ sadc 1 1 "/var/log/sysstat/sa$(date +%d)" 2>/dev/null || true
 ufw --force enable || true
 for p in 22 80 443 8080; do ufw allow "$p" || true; done
 
-# --- panel services: reverb + queue worker ---
+# --- panel services: reverb + queue worker + scheduler timer ---
 cp -f laranode-scripts/templates/laranode-queue-worker.service /etc/systemd/system/laranode-queue-worker.service
 cp -f laranode-scripts/templates/laranode-reverb.service /etc/systemd/system/laranode-reverb.service
+cp -f laranode-scripts/templates/laranode-scheduler.service /etc/systemd/system/laranode-scheduler.service
+cp -f laranode-scripts/templates/laranode-scheduler.timer /etc/systemd/system/laranode-scheduler.timer
 systemctl daemon-reload
 systemctl enable --now laranode-queue-worker.service laranode-reverb.service
+systemctl enable --now laranode-scheduler.timer
 systemctl restart apache2 php8.4-fpm
 
 # --- ownership (best-effort over bind mount) ---

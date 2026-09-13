@@ -38,8 +38,14 @@ test('CreateCronJobService calls laranode-cron.sh set with system username and t
     Process::assertRan(function ($process) use ($user) {
         $command = $process->command;
 
-        // command is an array: [sudo, .../laranode-cron.sh, set, systemUsername, tmpFile]
+        // command is an array: [sudo, .../laranode-cron.sh, set, systemUsername, tmpFile].
+        // It must stay `sudo <script> ...` with no `-u` flag: the sudoers drop-in
+        // authorizes the absolute script path with runas root, which is exactly what
+        // `sudo <script>` produces. Adding `-u` (or wrapping in `bash`) would change
+        // the command sudo matches and break the NOPASSWD grant.
         return is_array($command)
+            && ($command[0] ?? '') === 'sudo'
+            && ! in_array('-u', $command, true)
             && str_ends_with($command[1] ?? '', 'laranode-cron.sh')
             && ($command[2] ?? '') === 'set'
             && ($command[3] ?? '') === $user->systemUsername;
@@ -148,7 +154,11 @@ test('DeleteCronJobService passes correct system username to script', function (
     Process::assertRan(function ($process) use ($user) {
         $command = $process->command;
 
+        // See the CreateCronJobService argv test: must remain `sudo <script> set ...`
+        // (no `-u`), so the sudoers drop-in's script-path grant matches.
         return is_array($command)
+            && ($command[0] ?? '') === 'sudo'
+            && ! in_array('-u', $command, true)
             && str_ends_with($command[1] ?? '', 'laranode-cron.sh')
             && ($command[2] ?? '') === 'set'
             && ($command[3] ?? '') === $user->systemUsername;

@@ -10,9 +10,14 @@
 //
 // Pre-requisites (provisioned by local-dev/entrypoint-setup.sh):
 //   - testuser_ln and testuser2_ln system accounts exist.
-//   - laranode-scripts/bin/laranode-cron.sh is executable.
-//   - /etc/sudoers.d/laranode-cron grants www-data NOPASSWD for the script.
-//   - The process user (root in the container) may run crontab -u <user>.
+//   - laranode-scripts/bin/laranode-cron.sh is executable (and readable/executable
+//     by www-data, since that account is the one sudo elevates from).
+//   - /etc/sudoers.d/laranode-cron grants www-data NOPASSWD with runas root for the
+//     script — the script genuinely needs root because it drives `crontab -u <user>`.
+//     The grant must therefore be ALL=(ALL) (or an explicit (root)), NOT (www-data):
+//     a (www-data) runas entry can never satisfy the root-only crontab operations.
+//   - The process user (root in the container) may run crontab -u <user>, and may
+//     `su` into www-data to exercise that account's own sudo authorization.
 
 use App\Models\CronJob;
 use App\Models\User;
@@ -73,16 +78,33 @@ function runCronSh(array $args): array
 }
 
 /**
- * Run laranode-cron.sh via sudo as www-data (validates the production sudo chain).
+ * Run laranode-cron.sh through www-data's OWN sudo authorization — the real
+ * production privilege path (PHP-FPM calls the script as www-data via sudo).
+ *
+ * `sudo -u www-data <script>` from root does NOT validate anything: root may
+ * become anyone and root's sudo never consults www-data's sudoers rules, so it
+ * passes regardless of what /etc/sudoers.d/laranode-cron says. To genuinely
+ * exercise that drop-in we `su` into www-data first and let *that* account run
+ * sudo: `su -s /bin/bash www-data -c 'sudo -n <script> ...'`.
+ *
+ * `-n` (non-interactive) is deliberate: if no NOPASSWD rule matches, sudo fails
+ * immediately instead of hanging on a password prompt, so the test errors out
+ * loudly rather than timing out.
+ *
  * Returns ['exitCode' => int, 'output' => string].
  */
 function runCronShViaSudo(array $args): array
 {
     $script = base_path('laranode-scripts/bin/laranode-cron.sh');
-    $cmd = 'sudo -u www-data '.escapeshellarg($script);
+
+    // The command as www-data will run it.
+    $inner = 'sudo -n '.escapeshellarg($script);
     foreach ($args as $a) {
-        $cmd .= ' '.escapeshellarg($a);
+        $inner .= ' '.escapeshellarg($a);
     }
+
+    // Drop root -> www-data, then let www-data's own sudoers rules decide.
+    $cmd = 'su -s /bin/bash www-data -c '.escapeshellarg($inner);
 
     $out = [];
     $code = 0;
@@ -296,9 +318,28 @@ test('www-data can invoke laranode-cron.sh via the sudoers drop-in (sudo chain v
     expect(file_exists($dropIn))
         ->toBeTrue("$dropIn must exist — install it via entrypoint-setup.sh");
 
-    // Run the script as www-data through the sudo chain to prove NOPASSWD works.
+    // Exercise www-data's own authorization (su -> sudo -n), not root's.
+    // Exit 0 proves the drop-in's NOPASSWD rule matched the script path AND that
+    // the runas target is root — the script's `crontab -u` calls require root, so
+    // a (www-data) runas grant would have failed inside the script.
     $result = runCronShViaSudo(['list', 'testuser_ln']);
 
     expect($result['exitCode'])
         ->toBe(0, 'www-data must be able to run laranode-cron.sh via sudo. Output: '.$result['output']);
+
+    // Guard against a false pass: a sudo denial must never be mistaken for success.
+    expect($result['output'])
+        ->not->toContain('password is required')
+        ->not->toContain('not allowed to execute');
+
+    // The script's own allowlist must still bite when reached as www-data: an
+    // unknown sub-command exits non-zero *from the script*, proving sudo let the
+    // invocation through and the script rejected it (rather than sudo refusing).
+    $rejected = runCronShViaSudo(['bogus-subcommand', 'testuser_ln']);
+
+    expect($rejected['exitCode'])
+        ->not->toBe(0, 'An unknown sub-command must fail. Output: '.$rejected['output']);
+
+    expect($rejected['output'])
+        ->toContain('unknown sub-command');
 })->group('system');
