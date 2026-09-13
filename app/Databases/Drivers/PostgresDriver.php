@@ -13,6 +13,8 @@ use InvalidArgumentException;
 
 class CreateDatabaseException extends \Exception {}
 
+class DatabaseStatsException extends \Exception {}
+
 class PostgresDriver implements DatabaseEngineDriver
 {
     public function connectionName(): string
@@ -94,13 +96,22 @@ class PostgresDriver implements DatabaseEngineDriver
     {
         $name = $database->name;
 
-        // Scope pg_database_size to existing databases only — calling it on a
-        // name that no longer exists raises SQLSTATE 3D000 and would crash the
-        // whole listing. A missing db yields no row → size 0.
-        $row = DB::connection('pgsql_admin')->selectOne(
-            'SELECT pg_database_size(datname) AS size_bytes FROM pg_database WHERE datname = ?',
-            [$name]
-        );
+        try {
+            // Scope pg_database_size to existing databases only — calling it on a
+            // name that no longer exists raises SQLSTATE 3D000 and would crash the
+            // whole listing. A missing db yields no row → size 0.
+            $row = DB::connection('pgsql_admin')->selectOne(
+                'SELECT pg_database_size(datname) AS size_bytes FROM pg_database WHERE datname = ?',
+                [$name]
+            );
+        } catch (\Exception $e) {
+            // PostgreSQL is absent, stopped, or the stats-reader role is missing
+            // (the pgsql_admin connection cannot authenticate). Surface a domain
+            // exception so callers degrade instead of 500ing on a raw QueryException.
+            throw new DatabaseStatsException(
+                'Unable to read PostgreSQL stats: '.$e->getMessage(), 0, $e
+            );
+        }
 
         $sizeMb = $row && $row->size_bytes ? round($row->size_bytes / 1024 / 1024, 2) : 0.0;
 

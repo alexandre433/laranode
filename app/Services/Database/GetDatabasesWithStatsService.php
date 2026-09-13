@@ -3,9 +3,11 @@
 namespace App\Services\Database;
 
 use App\Databases\DatabaseStats;
+use App\Databases\Drivers\DatabaseStatsException;
 use App\Databases\EngineManager;
 use App\Models\Database;
 use Exception;
+use Illuminate\Support\Facades\Log;
 
 class GetDatabasesWithStatsException extends Exception {}
 
@@ -64,7 +66,22 @@ class GetDatabasesWithStatsService
         }
 
         $driver = $this->manager->for($database->engine);
-        $stats = $driver->stats($database);
+
+        try {
+            $stats = $driver->stats($database);
+        } catch (DatabaseStatsException $e) {
+            // The engine exists in the panel (a Database row references it) but is
+            // unreachable right now — PostgreSQL stopped/removed, or the
+            // laranode_pg_reader role is missing. Degrade to zero stats so the
+            // listing still renders rather than 500ing the whole page.
+            Log::warning('Database stats unavailable — degrading to zero', [
+                'database_id' => $database->id,
+                'engine' => $database->engine,
+                'error' => $e->getMessage(),
+            ]);
+
+            $stats = new DatabaseStats(tableCount: 0, sizeMb: 0.0);
+        }
 
         self::$statsCache[$database->id] = $stats;
 
