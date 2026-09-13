@@ -46,7 +46,7 @@ class SafeSetupFirewallAction
      */
     private function allow(array $spec): void
     {
-        $proc = Process::run(array_merge(['sudo', 'ufw', 'allow'], $spec));
+        $proc = Process::run(array_merge(['sudo', config('laranode.laranode_bin_path').'/laranode-ufw.sh', 'allow'], $spec));
         if ($proc->failed()) {
             throw new RuntimeException('UFW allow failed: '.$proc->errorOutput());
         }

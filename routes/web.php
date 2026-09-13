@@ -1,10 +1,15 @@
 <?php
 
 use App\Http\Controllers\AccountsController;
+use App\Http\Controllers\AnalyticsController;
+use App\Http\Controllers\BackupController;
+use App\Http\Controllers\CronJobsController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DatabasesController;
 use App\Http\Controllers\FilemanagerController;
 use App\Http\Controllers\FirewallController;
+use App\Http\Controllers\NotificationPreferencesController;
+use App\Http\Controllers\NotificationsController;
 use App\Http\Controllers\PHPManagerController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\StatsHistoryController;
@@ -22,6 +27,7 @@ Route::get('/dashboard', [DashboardController::class, 'index'])->middleware(['au
 Route::get('/dashboard/admin', [DashboardController::class, 'admin'])->middleware(['auth', AdminMiddleware::class])->name('dashboard.admin');
 Route::get('/dashboard/admin/get/top-sort', [DashboardController::class, 'getTopSort'])->middleware(['auth', AdminMiddleware::class])->name('dashboard.admin.getTopSort');
 Route::patch('/dashboard/admin/set/top-sort', [DashboardController::class, 'setTopSort'])->middleware(['auth', AdminMiddleware::class])->name('dashboard.admin.setTopSort');
+Route::post('/dashboard/admin/gpu/rescan', [DashboardController::class, 'rescanGpu'])->middleware(['auth', AdminMiddleware::class])->name('dashboard.admin.gpuRescan');
 Route::get('/dashboard/user', [DashboardController::class, 'user'])->middleware(['auth'])->name('dashboard.user');
 
 // Accounts [Admin]
@@ -33,6 +39,7 @@ Route::get('/accounts/leave-impersonation', [AccountsController::class, 'leaveIm
 Route::resource('/websites', WebsiteController::class)->middleware(['auth'])->except(['create', 'edit', 'show']);
 Route::post('/websites/{website}/ssl/toggle', [WebsiteController::class, 'toggleSsl'])->middleware(['auth'])->name('websites.ssl.toggle');
 Route::get('/websites/{website}/ssl/status', [WebsiteController::class, 'checkSslStatus'])->middleware(['auth'])->name('websites.ssl.status');
+Route::post('/websites/{website}/runtime', [WebsiteController::class, 'switchRuntime'])->middleware(['auth'])->name('websites.runtime.switch');
 
 // PHP FPM Pools [Admin | User]
 Route::get('/php', [PHPManagerController::class, 'index'])->middleware(['auth', AdminMiddleware::class])->name('php.index');
@@ -102,5 +109,36 @@ Route::middleware('auth')->group(function () {
     Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
 });
+
+// Cron Jobs [Admin | User]
+Route::middleware(['auth'])->group(function () {
+    Route::resource('/cron-jobs', CronJobsController::class)->except(['create', 'edit', 'show']);
+    Route::post('/cron-jobs/{cronJob}/toggle', [CronJobsController::class, 'toggleActive'])->name('cron-jobs.toggle');
+});
+
+// Backups [Admin | User]
+Route::middleware(['auth'])->group(function () {
+    Route::get('/backups', [BackupController::class, 'index'])->name('backups.index');
+    Route::post('/backups', [BackupController::class, 'store'])->name('backups.store');
+    Route::delete('/backups/{backup}', [BackupController::class, 'destroy'])->name('backups.destroy');
+    Route::post('/backups/{backup}/restore', [BackupController::class, 'restore'])->name('backups.restore');
+    Route::get('/backups/{backup}/download', [BackupController::class, 'download'])->name('backups.download');
+    Route::post('/backups/schedules', [BackupController::class, 'storeSchedule'])->name('backups.schedules.store');
+    Route::delete('/backups/schedules/{scheduledBackup}', [BackupController::class, 'destroySchedule'])->name('backups.schedules.destroy');
+});
+
+// Notifications [Admin | User]
+// NOTE: read-all is registered BEFORE {id}/read so the literal segment is not consumed as {id}.
+Route::middleware('auth')->group(function () {
+    Route::get('/notifications', [NotificationsController::class, 'index'])->name('notifications.index');
+    Route::patch('/notifications/read-all', [NotificationsController::class, 'markAllRead'])->name('notifications.readAll');
+    Route::patch('/notifications/{id}/read', [NotificationsController::class, 'markRead'])->name('notifications.read');
+    Route::get('/profile/notifications', [NotificationPreferencesController::class, 'index'])->name('notifications.preferences');
+    Route::patch('/profile/notifications/webhook', [NotificationPreferencesController::class, 'updateWebhook'])->name('notifications.preferences.webhook');
+    Route::patch('/profile/notifications', [NotificationPreferencesController::class, 'update'])->name('notifications.preferences.update');
+});
+
+// Analytics [Admin | User]
+Route::get('/analytics', [AnalyticsController::class, 'index'])->middleware(['auth'])->name('analytics.index');
 
 require __DIR__.'/auth.php';

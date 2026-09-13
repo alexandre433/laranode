@@ -1,0 +1,10 @@
+# Laranode per-user crontab management sudoers drop-in
+# Mode 0440. Managed by laranode-installer.sh — do not edit manually.
+# The script runs as ROOT: every read/write goes through `crontab -u <user>`,
+# which only root may do. It relies on its own guards (username allowlist +
+# _ln suffix + user must exist + not root; each line must be 5 schedule fields
+# + TAB + a `php /home/<user>/...` command; leading-dash args rejected).
+# requiretty stays off so it works from the web SAPI (no controlling tty).
+
+Defaults!/home/laranode_ln/panel/laranode-scripts/bin/laranode-cron.sh !requiretty
+www-data ALL=(ALL) NOPASSWD: /home/laranode_ln/panel/laranode-scripts/bin/laranode-cron.sh

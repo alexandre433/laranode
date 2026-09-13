@@ -30,7 +30,7 @@ sh:
 	$(COMPOSE) exec laranode bash
 
 verify:
-	$(EXEC) 'ps -p 1 -o comm=; systemctl is-system-running || true; for s in apache2 mysql php8.4-fpm laranode-reverb laranode-queue-worker; do printf "%s: " "$$s"; systemctl is-active $$s; done'
+	$(EXEC) 'ps -p 1 -o comm=; systemctl is-system-running || true; for s in apache2 mysql php8.4-fpm laranode-reverb laranode-queue-worker laranode-scheduler.timer; do printf "%s: " "$$s"; systemctl is-active $$s; done'
 	@echo "--- HTTP check ---"
 	@curl -s -o /dev/null -w "panel http status: %{http_code}\n" http://localhost || true
 
@@ -45,6 +45,10 @@ test-system:
 
 build-assets:
 	$(EXEC) 'cd /home/laranode_ln/panel && npm run build'
+
+# Clean-room test of the REAL production installer on a vanilla ubuntu:24.04.
+install-test:
+	bash local-dev/install-test/run.sh
 
 sync-scripts:
 	$(EXEC) 'cp -f /opt/laranode/bin-src/*.sh /opt/laranode/bin/ && cp -f /home/laranode_ln/panel/local-dev/bin/laranode-ssl-manager.sh /opt/laranode/bin/ && chmod -R 0755 /opt/laranode/bin'

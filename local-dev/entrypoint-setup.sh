@@ -24,10 +24,17 @@ if ! dpkg -l postgresql-16 >/dev/null 2>&1; then
     apt-get install -y -qq postgresql-16 postgresql-client-16
 fi
 
+# --- install cron (crontab binary + daemon) if not present (cron-tasks feature) ---
+if ! command -v crontab >/dev/null 2>&1; then
+    log "installing cron"
+    apt-get update -qq
+    apt-get install -y -qq cron
+fi
+
 # --- core services ---
 log "enabling + starting core services"
 sed -i 's/ENABLED="false"/ENABLED="true"/' /etc/default/sysstat || true
-systemctl enable --now apache2 mysql php8.4-fpm sysstat
+systemctl enable --now apache2 mysql php8.4-fpm sysstat cron
 
 # --- PostgreSQL: start ---
 log "starting postgresql@16-main"
@@ -56,6 +63,10 @@ log "populating $BIN"
 mkdir -p "$BIN"
 cp -f /opt/laranode/bin-src/*.sh "$BIN"/
 cp -f "$PANEL/local-dev/bin/laranode-ssl-manager.sh" "$BIN/laranode-ssl-manager.sh"
+# Copy any scripts added directly to the panel's bin dir (e.g. laranode-cron.sh)
+for f in "$PANEL/laranode-scripts/bin/"*.sh; do
+    [ -f "$f" ] && cp -f "$f" "$BIN/$(basename "$f")"
+done
 chmod -R 0755 "$BIN"
 
 # --- PostgreSQL: provision stats-reader role ---
@@ -75,10 +86,8 @@ GRANT CONNECT ON DATABASE postgres TO laranode_pg_reader;
 GRANT pg_read_all_stats TO laranode_pg_reader;
 SQL
 
-# Apply postgres sudoers drop-in
-log "writing postgres sudoers"
-cp -f "$PANEL/laranode-scripts/bin/laranode-postgres-sudoers" /etc/sudoers.d/laranode-postgres
-chmod 440 /etc/sudoers.d/laranode-postgres
+# ... (the postgres script is authorized by the laranode-panel drop-in below,
+# exactly like the installer does it — no separate drop-in)
 
 # Smoke test (BIN is now populated above)
 log "postgres smoke test"
@@ -86,12 +95,34 @@ sudo "$BIN/laranode-postgres.sh" create-db ln_smoke_test UTF8 en_US.UTF-8
 sudo "$BIN/laranode-postgres.sh" drop-db ln_smoke_test
 log "postgres smoke test PASSED"
 
-# --- container sudoers (www-data runs the scripts; mirrors installer line 172 + new path) ---
-log "writing sudoers"
-cat > /etc/sudoers.d/laranode <<EOF
-www-data ALL=(ALL) NOPASSWD: $BIN/*.sh, /usr/sbin/a2dissite, /bin/rm /etc/apache2/sites-available/*.conf
-EOF
-chmod 440 /etc/sudoers.d/laranode
+# --- sudoers: install EXACTLY the drop-in set the installer installs ---
+# No wildcard rule here: a broad `$BIN/*.sh` grant is what previously hid the
+# laranode-cron runas mismatch, so the lab must fail the same way production
+# would. The drop-ins hard-code the production panel path; callers that use
+# base_path() (e.g. PHPManagerController) really do run the scripts from that
+# bind-mounted path, while callers using config('laranode.laranode_bin_path')
+# run them from $BIN, which is a Linux-native copy the container can exec.
+# Authorize both paths for every rule, derived 1:1 from the repo files.
+log "installing sudoers drop-ins (same set as laranode-installer.sh)"
+for drop in laranode-panel laranode-cron laranode-runtimes laranode-ufw; do
+    SRC="$PANEL/laranode-scripts/etc/sudoers.d/$drop"
+    OUT="/etc/sudoers.d/$drop"
+    : > "$OUT"
+    while IFS= read -r line; do
+        printf '%s\n' "$line" >> "$OUT"
+        if [[ "$line" == *"/home/laranode_ln/panel/laranode-scripts/bin/"* ]]; then
+            printf '%s\n' "${line//\/home\/laranode_ln\/panel\/laranode-scripts\/bin/$BIN}" >> "$OUT"
+        fi
+    done < "$SRC"
+    visudo -c -f "$OUT" >/dev/null || { log "ERROR: $drop failed visudo"; exit 1; }
+    chmod 440 "$OUT"
+done
+# Legacy drop-ins the installer also removes
+rm -f /etc/sudoers.d/laranode /etc/sudoers.d/laranode-postgres
+
+# --- enable Apache proxy modules (required for FrankenPHP/Swoole) ---
+log "enabling apache proxy modules"
+a2enmod proxy proxy_http
 
 # --- MySQL user + db (idempotent; grant for localhost and 127.0.0.1) ---
 log "creating mysql user + db"
@@ -125,12 +156,22 @@ php artisan reverb:install --no-interaction || true
 [ -d public/build ] || npm run build
 
 # --- seed admin non-interactively (username 'laranode' to match systemUsername laranode_ln) ---
-log "seeding admin"
-php artisan tinker --execute "
-\App\Models\User::firstOrCreate(
-  ['username' => 'laranode'],
-  ['name' => 'Admin', 'email' => '${ADMIN_EMAIL}', 'password' => bcrypt('${ADMIN_PASSWORD}'), 'role' => 'admin', 'ssh_access' => true]
-);"
+# ADMIN_EMAIL/ADMIN_PASSWORD live in .env.docker (Laravel env), not the shell, so
+# default them here or the admin gets an empty email and you can't log in.
+# updateOrCreate (not firstOrCreate) repairs a stale row's email/password too.
+ADMIN_EMAIL="${ADMIN_EMAIL:-admin@laranode.test}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-password}"
+log "seeding admin (${ADMIN_EMAIL})"
+php artisan tinker --execute="\App\Models\User::updateOrCreate(['username' => 'laranode'], ['name' => 'Admin', 'email' => '${ADMIN_EMAIL}', 'password' => bcrypt('${ADMIN_PASSWORD}'), 'role' => 'admin', 'ssh_access' => true, 'email_verified_at' => now()]);"
+
+# --- detect GPU once (stores the result; not re-probed every poll) ---
+log "detecting GPU"
+php artisan laranode:detect-gpu || true
+
+# --- provision test system users for CronJob system tests ---
+log "provisioning test system users (testuser_ln, testuser2_ln)"
+useradd -m -s /bin/bash testuser_ln 2>/dev/null || true
+useradd -m -s /bin/bash testuser2_ln 2>/dev/null || true
 
 # --- apache default vhost (serves the panel from /public) ---
 cp -f laranode-scripts/templates/apache2-default.template /etc/apache2/sites-available/000-default.conf
@@ -144,11 +185,14 @@ sadc 1 1 "/var/log/sysstat/sa$(date +%d)" 2>/dev/null || true
 ufw --force enable || true
 for p in 22 80 443 8080; do ufw allow "$p" || true; done
 
-# --- panel services: reverb + queue worker ---
+# --- panel services: reverb + queue worker + scheduler timer ---
 cp -f laranode-scripts/templates/laranode-queue-worker.service /etc/systemd/system/laranode-queue-worker.service
 cp -f laranode-scripts/templates/laranode-reverb.service /etc/systemd/system/laranode-reverb.service
+cp -f laranode-scripts/templates/laranode-scheduler.service /etc/systemd/system/laranode-scheduler.service
+cp -f laranode-scripts/templates/laranode-scheduler.timer /etc/systemd/system/laranode-scheduler.timer
 systemctl daemon-reload
 systemctl enable --now laranode-queue-worker.service laranode-reverb.service
+systemctl enable --now laranode-scheduler.timer
 systemctl restart apache2 php8.4-fpm
 
 # --- ownership (best-effort over bind mount) ---

@@ -14,15 +14,27 @@ Laranode is a simple but powerful open-source alternative to cPanel and Plesk, d
 
 ✅ **File Manager** – Built-in (from the ground up) web-based file manager for quick access.  
 
-✅ **Live System Stats** – Monitor CPU, memory, and network usage in real-time. 
+✅ **Live System Stats & Analytics** – Real-time CPU/memory/network monitoring plus historical usage charts and per-user quota tracking.
 
 ✅ **LAMP Stack Administration** – Manage Apache, MySQL, and PHP with ease.  
 
-✅ **User-Friendly Interface** – Clean and simple UI designed for efficiency.  
+✅ **PHP Manager** – Install, update, and remove PHP versions from the web UI.
 
-✅ **MySQL Database Management** – Create and control MySQL databases.  
+✅ **Alternative PHP Runtimes** – Switch individual sites between PHP-FPM and FrankenPHP.
+
+✅ **Multi-Engine Database Management** – Create and manage MySQL, MariaDB, and PostgreSQL databases, with per-engine service control (start/stop/restart).
+
+✅ **Automated Backups** – Scheduled or on-demand database and file backups to local disk or S3-compatible storage, with retention and restore. (Database backups currently cover MySQL/MariaDB; PostgreSQL dump/restore is not implemented yet.)
+
+✅ **Cron Job Manager** – Create and manage per-user scheduled tasks from the web UI.
+
+✅ **Notifications** – In-app notification center plus email/webhook alerts for operations, SSL expiry, and more.
+
+✅ **Async Operations with Live Progress** – Long-running tasks (SSL issuance, runtime switches, backups) stream real-time progress instead of blocking the request.
 
 ✅ **UFW Firewall** – Manage uncomplicated firewall rules with ease directly from the web interface.  
+
+✅ **User-Friendly Interface** – Clean and simple UI designed for efficiency.  
 
 ## Installation
 
@@ -35,9 +47,28 @@ Laranode can be installed on a FRESH VPS or dedicated server.
 - 10GB Disk Space
 
 ### Quick Install
+Run on a clean Ubuntu 24.04 server as root:
 ```bash
 curl -sSL https://raw.githubusercontent.com/crivion/laranode/refs/heads/main/laranode-scripts/bin/laranode-installer.sh | bash
 ```
+
+### Upgrading an existing install
+
+The installer is for fresh servers — it rotates the MySQL root password, seeds the
+database and generates the app key, none of which is safe to repeat. To upgrade a
+host that already runs Laranode, run the idempotent upgrade script instead:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/crivion/laranode/refs/heads/main/laranode-scripts/bin/laranode-upgrade.sh | sudo bash
+```
+
+(or `sudo /home/laranode_ln/panel/laranode-scripts/bin/laranode-upgrade.sh` on a host that already has the checkout.)
+
+It pulls the new code and re-applies everything a plain `git pull` does not give
+you: new packages, the sudoers drop-ins, the PostgreSQL stats-reader role, new
+`.env` keys, the systemd units (including the scheduler timer), migrations and a
+frontend rebuild. It never rotates the MySQL root password, never re-seeds, and
+never regenerates `APP_KEY`, so it is safe to run more than once.
 
 ## Getting Started
 Once installed, access Laranode via your browser:
@@ -69,8 +100,13 @@ Login with the credentials provided during installation.
 
 ## Roadmap - Future Release Plans
 
-- 🔹 PHP Manager - install, update, remove PHP versions
-- 🔹 Backup Manager - backup websites, databases, and files
+- 🔹 Git-Based Deployments – push-to-deploy workflow for websites
+- 🔹 Fail2ban Integration – automatic intrusion prevention
+- 🔹 DNS Zone Management – built-in authoritative DNS
+- 🔹 One-Click App Installers – WordPress and more
+- 🔹 Email Server – mailboxes with webmail
+- 🔹 Teams & Granular Roles – per-resource collaborator access
+- 🔹 Staging Environments – clone, sync, and promote sites
 
 ## Contributing
 Laranode is open-source and welcomes contributions! Feel free to submit issues, feature requests, or pull requests.

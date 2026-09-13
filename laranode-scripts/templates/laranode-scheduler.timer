@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the Laranode scheduler every minute
+
+[Timer]
+# RunScheduledBackupsJob is scheduled everyMinute(), so the tick must be minutely.
+OnCalendar=minutely
+AccuracySec=1s
+# Catch up once after downtime (daily prune/rollups/SSL notifications would be skipped otherwise)
+Persistent=true
+
+[Install]
+WantedBy=timers.target

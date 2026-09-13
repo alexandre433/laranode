@@ -12,7 +12,11 @@ class PHPManagerController extends Controller
     private function isVersionInstalled(string $version): bool
     {
         $scriptPath = base_path('laranode-scripts/bin/laranode-php-list.sh');
-        $result = Process::run(['sudo', 'bash', $scriptPath]);
+        // Invoke the script directly: sudo matches the command it is asked to run,
+        // so `sudo bash <script>` would be matched against /usr/bin/bash — which the
+        // laranode-panel sudoers drop-in does not authorize. Only the absolute script
+        // path is whitelisted, so that is what sudo must see as the command.
+        $result = Process::run(['sudo', $scriptPath]);
         $installed = json_decode($result->output(), true) ?? [];
 
         return collect($installed)->contains('version', $version);
@@ -39,7 +43,7 @@ class PHPManagerController extends Controller
     public function list(): JsonResponse
     {
         $scriptPath = base_path('laranode-scripts/bin/laranode-php-list.sh');
-        $output = shell_exec("sudo bash {$scriptPath}");
+        $output = shell_exec('sudo '.escapeshellarg($scriptPath));
 
         $phpVersions = json_decode($output, true) ?? [];
 
@@ -66,8 +70,8 @@ class PHPManagerController extends Controller
 
         $scriptPath = base_path('laranode-scripts/bin/laranode-php-install.sh');
 
-        // Execute installation script
-        $result = Process::run(['sudo', 'bash', $scriptPath, $version]);
+        // Execute installation script (script invoked directly — see isVersionInstalled)
+        $result = Process::run(['sudo', $scriptPath, $version]);
         $output = $result->output();
 
         // Check if installation was successful
@@ -99,7 +103,7 @@ class PHPManagerController extends Controller
         $scriptPath = base_path('laranode-scripts/bin/laranode-php-uninstall.sh');
 
         // Execute uninstallation script
-        $output = shell_exec("sudo bash {$scriptPath} {$version} 2>&1");
+        $output = shell_exec('sudo '.escapeshellarg($scriptPath).' '.escapeshellarg($version).' 2>&1');
 
         // Check if uninstallation was successful
         if (strpos($output, 'uninstalled successfully') !== false) {
@@ -134,7 +138,7 @@ class PHPManagerController extends Controller
         $scriptPath = base_path('laranode-scripts/bin/laranode-php-service.sh');
 
         // Execute service management script
-        $output = shell_exec("sudo bash {$scriptPath} {$action} {$version} 2>&1");
+        $output = shell_exec('sudo '.escapeshellarg($scriptPath).' '.escapeshellarg($action).' '.escapeshellarg($version).' 2>&1');
 
         // Check if action was successful
         if (strpos($output, 'completed successfully') !== false) {
@@ -165,7 +169,7 @@ class PHPManagerController extends Controller
         $scriptPath = base_path('laranode-scripts/bin/laranode-php-service.sh');
 
         // Execute restart script
-        $output = shell_exec("sudo bash {$scriptPath} restart {$version} 2>&1");
+        $output = shell_exec('sudo '.escapeshellarg($scriptPath).' restart '.escapeshellarg($version).' 2>&1');
 
         // Check if restart was successful
         if (strpos($output, 'completed successfully') !== false) {

@@ -18,7 +18,7 @@ class GetStagedUfwRulesAction
      */
     public function execute(): array
     {
-        $proc = Process::run(['sudo', 'ufw', 'show', 'added']);
+        $proc = Process::run(['sudo', config('laranode.laranode_bin_path').'/laranode-ufw.sh', 'show-added']);
         if ($proc->failed()) {
             return [];
         }

@@ -1,9 +1,11 @@
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout';
-import { Head, Link } from '@inertiajs/react';
+import { Head, Link, router } from '@inertiajs/react';
 import { RiDashboard3Fill } from "react-icons/ri";
+import { FaGear } from "react-icons/fa6";
 import { useEffect, useState } from "react";
 import TopProcesses from './Components/TopProcesses';
 import ResourceShareCharts from './Components/ResourceShareCharts';
+import GpuLive from './Components/GpuLive';
 import CPULive from './Components/CPULive';
 import MemoryLive from './Components/MemoryLive';
 import DiskLive from './Components/DiskLive';
@@ -67,6 +69,10 @@ export default function Dashboard({ initialStats }) {
         });
     };
 
+    const rescanGpu = () => {
+        router.post(route('dashboard.admin.gpuRescan'), {}, { onSuccess: () => router.reload() });
+    };
+
     return (
         <AuthenticatedLayout
             header={
@@ -75,8 +81,18 @@ export default function Dashboard({ initialStats }) {
                         <RiDashboard3Fill className='mr-2' />
                         Dashboard
                     </h2>
-                    <div className="hidden xl:block">
-                        <NetworkLive networkStats={liveStats.network} />
+                    <div className="flex items-center gap-3">
+                        <button
+                            onClick={rescanGpu}
+                            title="Rescan for a GPU"
+                            className="text-gray-400 hover:text-indigo-500 transition-colors"
+                            aria-label="Rescan for a GPU"
+                        >
+                            <FaGear className="w-5 h-5" />
+                        </button>
+                        <div className="hidden xl:block">
+                            <NetworkLive networkStats={liveStats.network} />
+                        </div>
                     </div>
                 </div>
             }
@@ -118,6 +134,9 @@ export default function Dashboard({ initialStats }) {
                         <DbEnginesLive dbEngines={liveStats.dbEngines} />
                         <PHPFPMLive phpStats={liveStats.phpFpm} />
                     </div>
+
+                    {/* GPU — only rendered when one was detected */}
+                    <GpuLive gpu={liveStats.gpu} />
 
                 </div>
 
