@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Rules\PublicHttpsUrl;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -20,7 +21,11 @@ class CreateBackupRequest extends FormRequest
         if ($type === 'files') {
             $targetRule = Rule::exists('websites', 'url')->where('user_id', $userId);
         } else {
-            $targetRule = Rule::exists('databases', 'name')->where('user_id', $userId);
+            // PostgreSQL backups are not implemented — reject the target here
+            // instead of failing deep inside the queued BackupJob.
+            $targetRule = Rule::exists('databases', 'name')
+                ->where('user_id', $userId)
+                ->whereNot('engine', 'postgres');
         }
 
         return [
@@ -31,14 +36,22 @@ class CreateBackupRequest extends FormRequest
             's3_secret' => ['required_if:storage,s3', 'nullable', 'string'],
             's3_region' => ['required_if:storage,s3', 'nullable', 'string'],
             's3_bucket' => ['required_if:storage,s3', 'nullable', 'string'],
-            's3_endpoint' => ['nullable', 'string'],
+            's3_endpoint' => ['nullable', 'url', new PublicHttpsUrl],
         ];
     }
 
     public function messages(): array
     {
+        if ($this->input('type', 'db') === 'files') {
+            return [
+                'target.exists' => 'The selected target does not belong to your account.',
+            ];
+        }
+
         return [
-            'target.exists' => 'The selected target does not belong to your account.',
+            // 'exists' also fires for the postgres engine exclusion above, so the
+            // message names both causes (the UI surfaces this as a toast).
+            'target.exists' => 'The selected database does not belong to your account, or its engine is not supported for backups (PostgreSQL backups are not implemented yet).',
         ];
     }
 }

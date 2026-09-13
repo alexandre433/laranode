@@ -37,7 +37,9 @@ class WebhookChannel
         }
 
         try {
-            Http::timeout(10)->post($url, $notification->toWebhook($notifiable));
+            // withoutRedirecting(): a 302/307 pointing at 127.0.0.1 would otherwise
+            // be followed by the client and bypass the pre-flight IP check above.
+            Http::timeout(10)->withoutRedirecting()->post($url, $notification->toWebhook($notifiable));
         } catch (\Throwable $e) {
             Log::warning('WebhookChannel delivery failed', ['url' => $url, 'error' => $e->getMessage()]);
         }

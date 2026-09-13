@@ -106,6 +106,29 @@ test('IPv6 loopback URL is blocked (SSRF prevention)', function () {
     Http::assertNothingSent();
 });
 
+test('redirect response is not followed (SSRF bypass blocked)', function () {
+    // The public URL passes the pre-flight IP check, but a 302 pointing at
+    // loopback must not be followed by the HTTP client.
+    Http::fake([
+        'https://93.184.216.34/*' => Http::response('', 302, ['Location' => 'http://127.0.0.1/hook']),
+        'http://127.0.0.1/*' => Http::response('ok', 200),
+    ]);
+
+    $user = User::factory()->create(['webhook_url' => 'https://93.184.216.34/test']);
+    $operation = Operation::create([
+        'user_id' => $user->id,
+        'type' => 'ssl',
+        'status' => 'succeeded',
+        'exit_code' => 0,
+    ]);
+
+    (new WebhookChannel)->send($user, new OperationFinishedNotification($operation));
+
+    // Exactly one request: the original. The redirect target is never fetched.
+    Http::assertSentCount(1);
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '127.0.0.1'));
+});
+
 test('webhook channel blocks private-IP hostname (system)', function () {
     if (! env('LARANODE_SYSTEM_TESTS')) {
         $this->markTestSkipped('system tests only');

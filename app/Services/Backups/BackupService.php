@@ -4,6 +4,7 @@ namespace App\Services\Backups;
 
 use App\Jobs\BackupJob;
 use App\Models\Backup;
+use App\Models\Database;
 use App\Models\Operation;
 use App\Models\User;
 use Exception;
@@ -20,6 +21,18 @@ class BackupService
      */
     public function handle(array $data, User $user): Operation
     {
+        // Defence-in-depth: the scheduled/queue path (RunScheduledBackupsJob ->
+        // BackupService::handle) bypasses CreateBackupRequest's postgres exclusion.
+        if (($data['type'] ?? 'db') === 'db') {
+            $database = Database::where('user_id', $user->id)
+                ->where('name', $data['target'] ?? '')
+                ->first();
+
+            if ($database && $database->engine === 'postgres') {
+                throw new BackupException('PostgreSQL backups are not supported yet. Choose a MySQL database.');
+            }
+        }
+
         $storage = $data['storage'] ?? 'local';
 
         if ($storage === 's3') {
