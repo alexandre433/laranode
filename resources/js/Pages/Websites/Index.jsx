@@ -9,11 +9,14 @@ import { MdLock, MdLockOpen } from "react-icons/md";
 import { FaToggleOn, FaToggleOff } from "react-icons/fa";
 import CreateWebsiteForm from "./Partials/CreateWebsiteForm";
 import { useEffect, useState } from "react";
+import axios from 'axios';
+import OperationProgress from '@/Components/OperationProgress';
 
 export default function Websites({ websites, serverIp }) {
 
     const { auth } = usePage().props;
     const [phpVersions, setPhpVersions] = useState([]);
+    const [sslOp, setSslOp] = useState(null);
 
     useEffect(() => {
         // fetch available PHP versions once
@@ -40,20 +43,16 @@ export default function Websites({ websites, serverIp }) {
     };
 
     const toggleSsl = (website) => {
-        const isEnabled = website.ssl_enabled;
-        const action = isEnabled ? 'disable' : 'enable';
-
-        router.post(route('websites.ssl.toggle', { website: website.id }),
-            { enabled: !isEnabled },
-            {
-                onBefore: () => toast(`${action === 'enable' ? 'Enabling' : 'Disabling'} SSL...`),
-                onSuccess: () => {
-                    toast.success(`SSL ${action === 'enable' ? 'enabled' : 'disabled'} successfully`);
-                    router.reload();
-                },
-                onError: () => toast.error(`Failed to ${action} SSL`),
-            }
-        );
+        const enabling = !website.ssl_enabled;
+        if (enabling) {
+            axios.post(route('websites.ssl.toggle', { website: website.id }), { enabled: true })
+                .then((res) => setSslOp({ id: res.data.operation_id, url: website.url }))
+                .catch(() => toast.error('Failed to start SSL generation'));
+        } else {
+            router.post(route('websites.ssl.toggle', { website: website.id }), { enabled: false }, {
+                preserveScroll: true, onSuccess: () => router.reload(),
+            });
+        }
     };
 
     return (
@@ -71,6 +70,13 @@ export default function Websites({ websites, serverIp }) {
             <Head title="Websites" />
 
             <div className="max-w-7xl px-4 my-8">
+
+                {sslOp && (
+                    <div className="mb-4 p-3 border rounded">
+                        <div className="text-sm">Issuing SSL for {sslOp.url}</div>
+                        <OperationProgress operationId={sslOp.id} onDone={() => { setSslOp(null); router.reload(); }} />
+                    </div>
+                )}
 
                 <div className="relative overflow-x-auto bg-white dark:bg-gray-850 mt-3">
                     <table className="w-full  text-left rtl:text-right text-gray-500 dark:text-gray-400">

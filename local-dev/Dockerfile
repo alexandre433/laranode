@@ -9,17 +9,20 @@ ENV DEBIAN_FRONTEND=noninteractive
 # (no systemd running in a build layer). Runtime systemctl is unaffected.
 RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d
 
-# Base tooling + Apache + MySQL + sysstat + ufw + certbot + the ondrej PPA.
+# Base tooling + Apache + MySQL + PostgreSQL + sysstat + ufw + certbot + the ondrej PPA.
 RUN apt-get update && apt-get install -y \
         software-properties-common git curl unzip openssl ca-certificates \
         iproute2 dbus sudo \
+        locales \
         apache2 \
         mysql-server \
+        postgresql-16 postgresql-client-16 \
         sysstat \
         ufw \
         certbot python3-certbot-apache \
     && add-apt-repository -y ppa:ondrej/php \
     && apt-get update \
+    && locale-gen en_US.UTF-8 \
     && rm -rf /var/lib/apt/lists/*
 
 # PHP 8.4 + the exact extension set from laranode-scripts/bin/laranode-installer.sh
