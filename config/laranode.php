@@ -98,4 +98,16 @@ return [
         'application/x-sql',       // .sql
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Service sleep/wake (optional, OFF by default)
+    |--------------------------------------------------------------------------
+    | Root-owned registry of the services Laranode itself installed. Only these
+    | can ever sleep; a missing registry means nothing is managed.
+    */
+    'managed_dir' => env('LARANODE_MANAGED_DIR', '/etc/laranode'),
+
+    // Pre-existing services shown on the Power page as "external, never managed".
+    'sleep_external_candidates' => ['mysql', 'mariadb', 'postgresql', 'redis-server', 'nginx'],
+
 ];

@@ -209,3 +209,19 @@ test('status endpoint returns inactive for engines not in available()', function
     expect($statuses['mysql']['active'])->toBeFalse()
         ->and($statuses['postgres']['active'])->toBeTrue();
 });
+
+// ──────────────────────────────────────────────────────────────────
+// Sleep mode owns the DB unit: plain start/stop would fight it
+// ──────────────────────────────────────────────────────────────────
+
+test('db service action is refused while hostdb sleep is enabled (409, nothing dispatched)', function () {
+    $dir = \Tests\Support\SleepFixtures::registry(\Tests\Support\SleepFixtures::fullInstall(), ['hostdb' => ['enabled' => '1']]);
+    config(['laranode.managed_dir' => $dir]);
+    $admin = User::factory()->create(['role' => 'admin']);
+
+    $this->actingAs($admin)->postJson('/admin/databases/service', ['engine' => 'mysql', 'action' => 'start'])
+        ->assertStatus(409)->assertJsonPath('reason', 'sleep_managed');
+
+    Bus::assertNothingDispatched();
+    \Tests\Support\SleepFixtures::cleanup($dir);
+});

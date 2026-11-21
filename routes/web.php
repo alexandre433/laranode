@@ -103,6 +103,13 @@ Route::middleware(['auth', AdminMiddleware::class])->group(function () {
         ->name('databases.service.status');
 });
 
+// Power / service sleep-wake [Admin]
+Route::middleware(['auth', AdminMiddleware::class])->group(function () {
+    Route::get('/admin/power', [\App\Http\Controllers\SleepController::class, 'index'])->name('power.index');
+    Route::get('/admin/power/status', [\App\Http\Controllers\SleepController::class, 'status'])->name('power.status');
+    Route::post('/admin/power/action', [\App\Http\Controllers\SleepController::class, 'action'])->name('power.action');
+});
+
 // Accounts
 Route::middleware('auth')->group(function () {
     Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');

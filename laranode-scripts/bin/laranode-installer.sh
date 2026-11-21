@@ -1443,6 +1443,49 @@ phase_services() {
   _refresh_service apache2 "$APACHE_OWNED"
   _refresh_service php8.4-fpm "$PHPFPM_OWNED"
   write_service_manifest
+  _install_sleep_wake
+}
+
+# _install_sleep_wake — optional service sleep/wake (OFF until an admin enables it on the
+# Power page). Installs the sudoers drop-in and registers ONLY what the manifest above
+# lists as managed:true, so pre-existing services are never manageable.
+_install_sleep_wake() {
+  local src="${PANEL_PATH}/laranode-scripts/etc/sudoers.d/laranode-sleep"
+  if [ -f "$src" ] && visudo -c -f "$src" >/dev/null 2>&1; then
+    install -m 440 "$src" /etc/sudoers.d/laranode-sleep
+    bash "${PANEL_PATH}/laranode-scripts/bin/laranode-managed-register.sh" reverb queue fpm hostdb \
+      || warn "sleep/wake registration failed; the feature stays unavailable"
+    _reassert_sleep_wake
+  else
+    warn "laranode-sleep sudoers missing or failed syntax check; sleep/wake feature skipped"
+  fi
+}
+
+# _reassert_sleep_wake — a re-run of the installer re-copies the unit templates and
+# enables/starts reverb + queue (phase_services), which would silently undo sleep for every
+# key an admin switched ON, and leave a drop-in pinned to the OLD ExecStart. For each key
+# whose state says enabled=1, run `enable` again with its stored idle: the drop-in is
+# re-rendered from the new unit file and the service goes back to sleep. Prior-state
+# bookkeeping (was_enabled/was_active) is kept by the script, so a later disable still
+# restores the original boot enablement. Best effort: a refusal only warns.
+_reassert_sleep_wake() {
+  local sleep_sh="${PANEL_PATH}/laranode-scripts/bin/laranode-sleep.sh"
+  local dir="${LARANODE_MANAGED_DIR:-/etc/laranode}/sleep" k st idle
+  [ -d "$dir" ] || return 0
+  for k in reverb queue fpm hostdb; do
+    st="${dir}/${k}.state"
+    [ -f "$st" ] && grep -qx 'enabled=1' "$st" || continue
+    idle="$(sed -n 's/^idle_minutes=//p' "$st" | head -1)"
+    if [ "$k" = queue ]; then
+      if bash "$sleep_sh" queue enable; then log "sleep/wake: re-applied sleep for queue"
+      else warn "sleep/wake: could not re-apply sleep for queue after the re-run"; fi
+    elif [[ "$idle" =~ ^[1-9][0-9]{0,3}$ ]]; then
+      if bash "$sleep_sh" "$k" enable "$idle"; then log "sleep/wake: re-applied sleep for ${k} (${idle} min)"
+      else warn "sleep/wake: could not re-apply sleep for ${k} after the re-run (toggle it on the Power page)"; fi
+    else
+      warn "sleep/wake: ${k} had sleep on but no stored idle minutes; toggle it again on the Power page"
+    fi
+  done
 }
 
 # ==============================================================================

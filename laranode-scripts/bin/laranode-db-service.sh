@@ -52,6 +52,18 @@ case "$ENGINE" in
         ;;
 esac
 
+# Sleep mode owns the hosting database lifecycle (socket-activated, StopWhenUnneeded).
+# A manual start/stop here would fight it, so refuse; use the Power page instead.
+# Test overrides are honoured only outside sudo (same rule as laranode-sleep.sh).
+SLEEP_STATE_DIR=/etc/laranode/sleep
+if [ "${LARANODE_SLEEP_TEST:-}" = 1 ] && [ -z "${SUDO_UID:-}" ] && [ -n "${LARANODE_MANAGED_DIR:-}" ]; then
+    SLEEP_STATE_DIR="$LARANODE_MANAGED_DIR/sleep"
+fi
+if [ "$ENGINE" != "postgres" ] && grep -qx 'enabled=1' "$SLEEP_STATE_DIR/hostdb.state" 2>/dev/null; then
+    echo "ERROR: database sleep mode is on; it manages start/stop. Use the Power page to wake or sleep it." >&2
+    exit 3
+fi
+
 echo "Running: systemctl $ACTION $ENGINE"
 
 if [ "$ENGINE" = "postgres" ]; then

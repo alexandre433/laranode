@@ -1,0 +1,91 @@
+name: sleep-tests
+
+# Service sleep/wake (docs/sleep-wake.md): the backend + frontend suites and the real-systemd
+# proofs, on a Linux runner. Separate from installer-tests.yml (owned by the installer PR).
+on:
+  pull_request:
+  push:
+    branches: [development]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sleep-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pest:
+    name: pest (full suite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer
+          coverage: none
+        env:
+          COMPOSER_AUTH: '{"github-oauth":{"github.com":"${{ secrets.GITHUB_TOKEN }}"}}'
+      - run: composer install --no-interaction --prefer-dist --no-progress
+      - run: cp .env.example .env && php artisan key:generate
+      # the Inertia page tests render the Blade layout, which needs public/build/manifest.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --legacy-peer-deps --no-audit --no-fund
+      - run: npm run build
+      - run: ./vendor/bin/pest
+
+  vitest:
+    name: vitest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --legacy-peer-deps --no-audit --no-fund
+      - run: npx vitest run
+
+  systemd-matrix:
+    name: systemd matrix (${{ matrix.os }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu, debian]
+    steps:
+      - uses: actions/checkout@v4
+      - name: real systemd + real MySQL/MariaDB, one OS
+        run: bash tests/system/sleep/matrix.sh "${{ matrix.os }}"
+
+      # The runner kernel enforces the stock /usr/sbin/mysqld AppArmor profile, which denies the moved
+      # DB socket: pass 1 above asserts the REAL gate refuses there and skips the hostdb functional
+      # checks. Pass 2 unloads that profile on the runner VM (throw-away) so the hostdb checks run LIVE.
+      - name: ubuntu again, host mysqld AppArmor profile unloaded (hostdb checks LIVE)
+        if: matrix.os == 'ubuntu'
+        run: |
+          docker rm -f laranode-sleep-ubuntu >/dev/null 2>&1 || true
+          if sudo cat /sys/kernel/security/apparmor/profiles | grep -qE '(^|/)mysqld '; then
+            sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.mysqld
+          fi
+          if sudo cat /sys/kernel/security/apparmor/profiles | grep -E '(^|/)mysqld '; then
+            echo "::error::mysqld AppArmor profile still loaded after apparmor_parser -R"; exit 1
+          fi
+          echo "host mysqld profile is not loaded"
+          LN_AA_PROFILE_UNLOADED=1 bash tests/system/sleep/matrix.sh ubuntu
+
+  rerun-sleep:
+    name: installer re-run with sleep ON
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: run scenario
+        env:
+          LARANODE_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash local-dev/install-test/run.sh rerun-sleep

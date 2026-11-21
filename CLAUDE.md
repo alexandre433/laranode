@@ -207,3 +207,11 @@ Inertia + React (JSX, **not** TypeScript). Pages in `resources/js/Pages/<Domain>
 
 ### Production runtime
 Apache2 (vhost per site) + per-site PHP-FPM pools + MySQL + certbot (Let's Encrypt, 90-day certs) + UFW. Two systemd services from `laranode-scripts/templates/`: `laranode-reverb.service` (websockets) and `laranode-queue-worker.service` (queue, `QUEUE_CONNECTION=database`). Full provisioning is in `laranode-scripts/bin/laranode-installer.sh`.
+
+### Service sleep/wake (optional, OFF by default)
+Admin **Power** page (`/admin/power`). Frees RAM by stopping idle Reverb / queue worker / PHP-FPM pools / hosting DB and waking them on first use (systemd socket activation, `systemd-socket-proxyd`). Full design, safety model and trade-offs: `docs/sleep-wake.md`.
+- ONE privileged script: `laranode-scripts/bin/laranode-sleep.sh <reverb|queue|hostdb|fpm> <enable|disable|wake|sleep> [idle]` (sudoers drop-in `laranode-scripts/etc/sudoers.d/laranode-sleep`). Never add unit names or free-form args to it.
+- Only services in the root-owned registry `/etc/laranode/managed.d/` (written by `laranode-managed-register.sh` from the installer manifest, `managed:true` only) can be touched. Pre-existing services are external and refused (exit 3). The panel's own DB never sleeps. The manifest is REQUIRED (fail closed: none = nothing registered, every action refused).
+- Reverb's sleep socket binds the registered `bind_host` (from `REVERB_SERVER_HOST`, e.g. 127.0.0.1 on Proxmox/CloudPanel), never all interfaces. hostdb sleep is refused when an enforced AppArmor mysqld/mariadbd profile exists (it would deny the moved socket); the script never rewrites AppArmor policy.
+- Installer re-run with sleep ON: `_reassert_sleep_wake` re-applies `enable` for every key with `enabled=1` (fresh drop-in ExecStart, back asleep). Scenario `local-dev/install-test/scenarios/rerun-sleep.sh`.
+- Tests: `tests/Feature/Sleep/*` (Pest, stub systemctl), `tests/system/sleep/matrix.sh [ubuntu|debian|all]` (real systemd, Docker; also run by `.github/workflows/sleep-tests.yml`), `tests/e2e/power.spec.js`.

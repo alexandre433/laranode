@@ -206,3 +206,9 @@ describe('D5 — collapsible sidebar', () => {
         expect(screen.getByRole('button')).toBeInTheDocument();
     });
 });
+
+test('Power link is admin-only: hidden for a normal user', () => {
+    render(<SidebarNavi {...defaultProps} />);
+
+    expect(screen.queryByRole('link', { name: /^power$/i })).not.toBeInTheDocument();
+});
