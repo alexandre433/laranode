@@ -40,6 +40,13 @@ did not install.
 4. **Reversible**: `disable` restores boot enablement and running state byte-for-byte (pool files, units,
    `systemctl enable` state).
 5. Test-only path overrides (`LARANODE_SLEEP_TEST=1`) are ignored whenever `SUDO_UID` is set.
+6. **php-fpm sandbox escape.** The stock `php*-fpm` unit runs with `ProtectSystem=full`, and a `sudo` child
+   inherits that mount namespace, so `/etc` is read-only even for root when the panel calls a script. When
+   `/etc/systemd/system` is not writable, `laranode-sleep.sh` re-runs itself once through `systemd-run
+   --wait --pipe` (a transient unit owned by PID 1, clean namespace, no environment carried over, same
+   validated arguments, exit code preserved). No sudoers widening and the pre-existing php-fpm unit is not
+   modified. Other privileged scripts that write under `/etc` meet the same read-only mount when called from
+   the web; they are out of scope here.
 
 Exit codes: 0 ok, 1 failed (rolled back), 2 bad arguments, 3 refused, 4 not privileged.
 
