@@ -49,18 +49,23 @@ echo "=== host: $(. /etc/os-release; echo "$PRETTY_NAME")"
 # the gate itself, per mode, against injected kernel files.
 AA_KERNEL=$(tr -d '[:space:]' < /sys/module/apparmor/parameters/enabled 2>/dev/null || echo n/a)
 echo "INFO  kernel apparmor enabled=${AA_KERNEL:-n/a} (shared with the container)"
-HOST_AA_DB=0
+HOST_AA_DB=0; HOST_AA_CAND=0
 # A host kernel that has the distro's mysqld/mariadbd profile loaded (GitHub's ubuntu runner does:
 # `apparmor="DENIED" operation="mknod" profile="/usr/sbin/mysqld" name="/run/laranode-hostdb/..."`)
-# really denies the moved socket. Do NOT mask that: the real gate must refuse, and the functional
-# hostdb checks are skipped (the profile belongs to the host, not to this container).
-if [ "$AA_KERNEL" = Y ] && { [ -e /etc/apparmor.d/usr.sbin.mysqld ] || [ -e /etc/apparmor.d/usr.sbin.mariadbd ]; }; then
+# really denies the moved socket. Do NOT mask that: the REAL gate runs unmasked and must refuse.
+# The functional hostdb checks are skipped ONLY once that refusal (exit 3 naming AppArmor) is seen
+# in section 3. CI runs a second pass with the host profile unloaded (LN_AA_PROFILE_UNLOADED=1,
+# set by the workflow after `apparmor_parser -R`): the profile is then really gone, so the flag is
+# masked (the container cannot read the loaded-profile list) and every hostdb check runs LIVE.
+if [ "$AA_KERNEL" = Y ] && [ "${LN_AA_PROFILE_UNLOADED:-}" != 1 ] \
+    && { [ -e /etc/apparmor.d/usr.sbin.mysqld ] || [ -e /etc/apparmor.d/usr.sbin.mariadbd ]; }; then
     # (the loaded-profile list is not visible from a container, so the shipped profile file on a
     # kernel with AppArmor on is the signal; the kernel's own dmesg lines are echoed as evidence)
-    dmesg 2>/dev/null | grep -i 'apparmor.*\(mysqld\|mariadbd\)' | tail -n 5 | sed 's/^/INFO  dmesg: /'
-    HOST_AA_DB=1
-    echo "INFO  host kernel has a mysqld/mariadbd AppArmor profile loaded: NOT masking; hostdb functional checks are skipped, the real gate is asserted instead"
+    dmesg 2>/dev/null | grep -iE 'apparmor.*(mysqld|mariadbd)' | tail -n 5 | sed 's/^/INFO  dmesg: /'
+    HOST_AA_CAND=1
+    echo "INFO  host kernel may enforce a mysqld/mariadbd AppArmor profile: NOT masking; the real gate is asserted, hostdb functional checks are skipped only if it refuses"
 elif [ "$AA_KERNEL" = Y ]; then
+    [ "${LN_AA_PROFILE_UNLOADED:-}" = 1 ] && echo "INFO  workflow says the host mysqld profile is unloaded (LN_AA_PROFILE_UNLOADED=1): hostdb checks run LIVE"
     echo N > /tmp/ln-aa-kernel-off
     mount --bind /tmp/ln-aa-kernel-off /sys/module/apparmor/parameters/enabled \
         && echo "INFO  bind-mounted apparmor enabled=N over the kernel file (functional checks run as a no-AppArmor host)" \
@@ -183,11 +188,18 @@ printf 'DB_CONNECTION=sqlite\nREVERB_SERVER_PORT=8080\n' > "$PANEL/.env"
 # ─── 3. reverb + hostdb: socket owns the port, idle stop, wake on connect ─────────
 RSS_AWAKE=$(rss_db)
 check "reverb enable 1min" test "$(run "$SLEEP" reverb enable 1)" = 0
-if [ "$HOST_AA_DB" = 1 ]; then
+if [ "$HOST_AA_CAND" = 1 ]; then
     HRC=$(run "$SLEEP" hostdb enable 1)
-    check "REAL host kernel AppArmor (unmasked): hostdb enable refused (exit 3)" test "$HRC" = 3
-    check "…message names AppArmor" grep -qi apparmor /tmp/ln-last.out
-    check "…database untouched (still active, no proxy units)" bash -c "systemctl is-active $DBUNIT >/dev/null && [ ! -e $UNITS/laranode-sleep-hostdb.socket ]"
+    if [ "$HRC" = 3 ] && grep -qi apparmor /tmp/ln-last.out; then
+        HOST_AA_DB=1   # the real gate refused for AppArmor: only now are the functional checks skipped
+        pass "REAL host kernel AppArmor (unmasked): hostdb enable refused (exit 3)"
+        pass "…message names AppArmor"
+        check "…database untouched (still active, no proxy units)" bash -c "systemctl is-active $DBUNIT >/dev/null && [ ! -e $UNITS/laranode-sleep-hostdb.socket ]"
+    elif [ "$HRC" = 0 ]; then
+        pass "unmasked real gate allowed hostdb enable (no denying profile): functional checks run live"
+    else
+        fail "unmasked real gate: expected exit 3 naming AppArmor or 0, got $HRC: $(head -c 200 /tmp/ln-last.out)"
+    fi
 else
     check "hostdb enable 1min" test "$(run "$SLEEP" hostdb enable 1)" = 0
 fi
@@ -348,6 +360,12 @@ check "db awake and usable after the AppArmor checks" test "$($CLI -h127.0.0.1 -
 rm -f /etc/laranode/managed.d/hostdb.conf
 LARANODE_AA_ENABLED=$AAD/enabled LARANODE_AA_PROFILES=$AAD/profiles-enforced bash "$REGISTER" hostdb >/dev/null 2>&1
 check "register records apparmor=enforced for the Power page" grep -qx 'apparmor=enforced' /etc/laranode/managed.d/hostdb.conf
+for m in kill prompt; do
+    LARANODE_AA_ENABLED=$AAD/enabled LARANODE_AA_PROFILES=$AAD/profiles-$m bash "$REGISTER" hostdb >/dev/null 2>&1
+    check "register records apparmor=enforced for a $m-mode profile too (it denies)" grep -qx 'apparmor=enforced' /etc/laranode/managed.d/hostdb.conf
+done
+LARANODE_AA_ENABLED=$AAD/enabled LARANODE_AA_PROFILES=$AAD/profiles-complain bash "$REGISTER" hostdb >/dev/null 2>&1
+check "register records apparmor=none for a complain-mode profile (does not deny)" grep -qx 'apparmor=none' /etc/laranode/managed.d/hostdb.conf
 LARANODE_AA_ENABLED=$AAD/enabled LARANODE_AA_PROFILES=$AAD/profiles-other bash "$REGISTER" hostdb >/dev/null 2>&1
 check "register records apparmor=none when no mysqld profile is enforced" grep -qx 'apparmor=none' /etc/laranode/managed.d/hostdb.conf
 LARANODE_AA_ENABLED=$AAD/enabled LARANODE_AA_PROFILES=/nonexistent bash "$REGISTER" hostdb >/dev/null 2>&1

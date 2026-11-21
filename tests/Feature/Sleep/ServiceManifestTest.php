@@ -198,3 +198,59 @@ test('register: without a manifest NOTHING is registered, not even with the old 
         ->and($r['has']('fpm'))->toBeFalse()->and($r['has']('hostdb'))->toBeFalse()
         ->and($r['all'])->toContain('manifest');
 });
+
+test('register never traps a sleeping service: enable, then the entry goes stale, disable still exits 0 and the service is awake', function () {
+    skipUnlessRoot();
+    $this->sbx = sleepSandbox();
+    $root = $this->sbx['root'];
+    writeManifest($this->sbx, [['laranode-reverb.service', true, 'reverb'], ['laranode-queue-worker.service', true, 'queue']]);
+    file_put_contents("{$root}/panel/.env", "REVERB_SERVER_HOST=127.0.0.1\nREVERB_SERVER_PORT=8080\n");
+    expect(runRegister($this->sbx, ['reverb'])['has']('reverb'))->toBeTrue();
+    // (runRegister drops a placeholder unit file in; put the real ExecStart back)
+    sleepUnit($this->sbx, 'laranode-reverb.service', '/usr/bin/php /home/laranode_ln/panel/artisan reverb:start');
+    touch("{$root}/enabled/laranode-reverb.service");
+    touch("{$root}/active/laranode-reverb.service");
+    $en = runSleep($this->sbx, ['reverb', 'enable', '10']);
+    expect($en['code'])->toBe(0, $en['all'])
+        ->and(file_exists("{$root}/active/laranode-reverb.service"))->toBeFalse('asleep after enable');
+
+    // installer re-run: Reverb is now bound where we cannot mirror (IPv6) => register skips it
+    file_put_contents("{$root}/panel/.env", "REVERB_SERVER_HOST=::1\nREVERB_SERVER_PORT=8080\n");
+    $again = runRegister($this->sbx, ['reverb']);
+    expect($again['all'])->toContain('stale');
+
+    // the sleeping service must stay reachable for disable (the entry is KEPT, marked stale) ...
+    expect($again['has']('reverb'))->toBeTrue('an entry for a service that is asleep must not be deleted');
+    // ... but a stale entry only ever allows disable: nothing turns sleep (back) on with an old bind_host
+    foreach ([['reverb', 'enable', '10'], ['reverb', 'wake'], ['reverb', 'sleep']] as $args) {
+        $r = runSleep($this->sbx, $args);
+        expect($r['code'])->toBe(3, implode(' ', $args).': '.$r['all'])->and($r['all'])->toContain('stale');
+    }
+    $off = runSleep($this->sbx, ['reverb', 'disable']);
+    expect($off['code'])->toBe(0, $off['all'])
+        ->and(file_exists("{$root}/active/laranode-reverb.service"))->toBeTrue('service is awake again after disable')
+        ->and(file_exists("{$root}/enabled/laranode-reverb.service"))->toBeTrue('enablement restored')
+        ->and(glob("{$root}/systemd/*"))->toBe([]);
+});
+
+test('register: the stale entry of a service that is NOT asleep is still removed outright', function () {
+    skipUnlessRoot();
+    $this->sbx = sleepSandbox();
+    writeManifest($this->sbx, [['laranode-reverb.service', true, 'reverb']]);
+    file_put_contents("{$this->sbx['root']}/panel/.env", "REVERB_SERVER_HOST=127.0.0.1\n");
+    expect(runRegister($this->sbx, ['reverb'])['has']('reverb'))->toBeTrue();
+    file_put_contents("{$this->sbx['root']}/panel/.env", "REVERB_SERVER_HOST=::1\n");
+    expect(runRegister($this->sbx, ['reverb'])['has']('reverb'))->toBeFalse();
+});
+
+test('a stale registry entry (stale=1) only allows disable', function () {
+    $this->sbx = sleepSandbox();
+    registerReverbFixture($this->sbx);
+    expect(runSleep($this->sbx, ['reverb', 'enable', '10'])['code'])->toBe(0);
+    file_put_contents("{$this->sbx['root']}/managed/managed.d/reverb.conf", "stale=1\n", FILE_APPEND);
+    foreach ([['reverb', 'enable', '10'], ['reverb', 'wake'], ['reverb', 'sleep']] as $args) {
+        expect(runSleep($this->sbx, $args)['code'])->toBe(3, implode(' ', $args));
+    }
+    expect(runSleep($this->sbx, ['reverb', 'disable'])['code'])->toBe(0)
+        ->and(glob("{$this->sbx['root']}/systemd/*"))->toBe([]);
+});

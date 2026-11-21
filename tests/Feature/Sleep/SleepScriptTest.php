@@ -471,3 +471,31 @@ test('the real host AppArmor is ignored in test mode (only the injected files co
     // no LARANODE_AA_* given: must behave as "AppArmor absent", whatever this machine runs
     expect(runSleep($this->sbx, ['hostdb', 'enable', '15'])['code'])->toBe(0);
 });
+
+// ─── a re-enable (installer re-run changed the Reverb port/host) must rebind the NEW address ───
+
+test('re-enable stops the old sleep socket and proxy BEFORE starting the new socket (stale-port case)', function () {
+    $this->sbx = sleepSandbox();
+    reverbSetup($this->sbx);
+    expect(runSleep($this->sbx, ['reverb', 'enable', '5'])['code'])->toBe(0);
+    // the installer re-run moved Reverb to another port: new registry entry, sleep still ON
+    sleepRegister($this->sbx, 'reverb', ['kind' => 'reverb', 'unit' => 'laranode-reverb.service', 'public_port' => '8081']);
+    file_put_contents("{$this->sbx['root']}/calls.log", '');
+    $r = runSleep($this->sbx, ['reverb', 'enable', '5']);
+    expect($r['code'])->toBe(0, $r['all']);
+    $calls = array_values(array_filter(explode("\n", $r['calls'])));
+    $stop = null;
+    $start = null;
+    foreach ($calls as $i => $c) {
+        if ($stop === null && preg_match('/^stop laranode-sleep-reverb\.socket laranode-sleep-reverb\.service\b/', $c)) {
+            $stop = $i;
+        }
+        if ($start === null && preg_match('/^enable --now laranode-sleep-reverb\.socket\b/', $c)) {
+            $start = $i;
+        }
+    }
+    expect($stop)->not->toBeNull('old socket+proxy must be stopped')
+        ->and($start)->not->toBeNull()
+        ->and($stop)->toBeLessThan($start, "socket unit must be stopped before `enable --now` or systemd keeps the stale port:\n".$r['calls']);
+    expect(file_get_contents("{$this->sbx['root']}/systemd/laranode-sleep-reverb.socket"))->toContain('8081');
+});

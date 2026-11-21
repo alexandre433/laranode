@@ -63,9 +63,10 @@ did not install.
    trapped asleep: `disable` of a key whose root-owned state says sleep is ON works without the manifest
    (it only restores the originals and is still registry-gated); `enable`/`wake`/`sleep` stay refused.
    `laranode-managed-register.sh` also drops the registry entry of any key it now skips (manifest no
-   longer backs it, Reverb bound to an address it cannot mirror), so a stale `bind_host` is never trusted;
-   if that key was asleep it prints a warning (the service stays asleep via socket activation until the
-   cause is fixed and the installer re-run).
+   longer backs it, Reverb bound to an address it cannot mirror), so a stale `bind_host` is never trusted.
+   If sleep is still ON for that key the entry is NOT deleted (that would trap the service asleep: `disable`
+   needs it): it is kept and marked `stale=1`, and `laranode-sleep.sh` then allows `disable` only
+   (enable/wake/sleep exit 3). A later successful register overwrites it with a fresh entry.
 4. **Reversible**: `disable` restores boot enablement and running state byte-for-byte (pool files, units,
    `systemctl enable` state).
 5. Test-only path overrides (`LARANODE_SLEEP_TEST=1`) are ignored whenever `SUDO_UID` is set.
@@ -134,6 +135,10 @@ Reverb clients are unaffected.
 * `resources/js/Pages/Power/Power.test.jsx`, `SidebarNavi.test.jsx`: Vitest.
 * `tests/system/sleep/matrix.sh [ubuntu|debian|all]`: real systemd + real MySQL (Ubuntu 24.04) / MariaDB
   (Debian 13) in throw-away containers. Measures wake time and idle RSS. Needs Docker; runs in CI (`.github/workflows/sleep-tests.yml`) and locally.
+  On the GitHub ubuntu runner the host kernel enforces the stock mysqld AppArmor profile: pass 1 asserts the
+  real gate refuses `hostdb enable` there and skips the hostdb functional checks (only once it refused); pass 2
+  unloads that profile on the runner (`apparmor_parser -R`, `LN_AA_PROFILE_UNLOADED=1`) and runs every hostdb
+  check LIVE.
 * `tests/e2e/power.spec.js`: Playwright against the lab container.
 * `local-dev/install-test/scenarios/rerun-sleep.sh`: installer re-run with sleep ON.
 

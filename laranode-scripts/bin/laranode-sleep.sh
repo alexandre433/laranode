@@ -111,6 +111,13 @@ while IFS='=' read -r k v || [ -n "$k" ]; do
     R[$k]=$v
 done < "$REG_FILE"
 
+# A stale entry (written by laranode-managed-register.sh when it skipped a service that was still
+# asleep) exists ONLY so that `disable` can restore the originals. Its address/unit data may be
+# outdated, so nothing that turns sleep on or pokes the service may use it.
+if [ "${R[stale]-}" = 1 ] && [ "$ACTION" != disable ]; then
+    die $EX_REFUSED "registry entry for '$KEY' is stale (the installer no longer registers it): only 'disable' is allowed; fix the cause and re-run the installer to manage it again"
+fi
+
 valid_unit() { [[ ${1-} =~ ^[A-Za-z0-9@:._-]+\.service$ ]]; }
 valid_port() { [[ ${1-} =~ ^[0-9]{1,5}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 valid_ipv4() { # dotted quad, each octet 0..255, no leading junk

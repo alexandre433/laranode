@@ -63,6 +63,22 @@ jobs:
       - name: real systemd + real MySQL/MariaDB, one OS
         run: bash tests/system/sleep/matrix.sh "${{ matrix.os }}"
 
+      # The runner kernel enforces the stock /usr/sbin/mysqld AppArmor profile, which denies the moved
+      # DB socket: pass 1 above asserts the REAL gate refuses there and skips the hostdb functional
+      # checks. Pass 2 unloads that profile on the runner VM (throw-away) so the hostdb checks run LIVE.
+      - name: ubuntu again, host mysqld AppArmor profile unloaded (hostdb checks LIVE)
+        if: matrix.os == 'ubuntu'
+        run: |
+          docker rm -f laranode-sleep-ubuntu >/dev/null 2>&1 || true
+          if sudo cat /sys/kernel/security/apparmor/profiles | grep -qE '(^|/)mysqld '; then
+            sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.mysqld
+          fi
+          if sudo cat /sys/kernel/security/apparmor/profiles | grep -E '(^|/)mysqld '; then
+            echo "::error::mysqld AppArmor profile still loaded after apparmor_parser -R"; exit 1
+          fi
+          echo "host mysqld profile is not loaded"
+          LN_AA_PROFILE_UNLOADED=1 bash tests/system/sleep/matrix.sh ubuntu
+
   rerun-sleep:
     name: installer re-run with sleep ON
     runs-on: ubuntu-latest

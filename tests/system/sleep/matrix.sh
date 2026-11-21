@@ -32,7 +32,9 @@ run_one() {
     docker exec "$c" bash -c 'rm -rf /opt/ln-test && mkdir -p /opt/ln-test'
     tar -c laranode-scripts tests/system/sleep | docker exec -i "$c" tar -x -C /opt/ln-test
     docker exec "$c" bash -c 'chmod +x /opt/ln-test/laranode-scripts/bin/*.sh /opt/ln-test/tests/system/sleep/*.sh'
-    docker exec "$c" /opt/ln-test/tests/system/sleep/inner.sh /opt/ln-test/laranode-scripts/bin
+    # LN_AA_PROFILE_UNLOADED=1: CI unloaded the host's mysqld AppArmor profile first, so every hostdb
+    # check must run LIVE (see inner.sh). Unset = the real, unmasked gate is asserted on such hosts.
+    docker exec -e "LN_AA_PROFILE_UNLOADED=${LN_AA_PROFILE_UNLOADED:-}" "$c" /opt/ln-test/tests/system/sleep/inner.sh /opt/ln-test/laranode-scripts/bin
 }
 
 for os in ubuntu debian; do

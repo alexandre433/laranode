@@ -147,15 +147,26 @@ EOF
 
 # A key that is skipped now (manifest no longer backs it, Reverb bound somewhere we cannot
 # mirror, unit gone) must not keep a STALE entry from an earlier run: sleep.sh would still
-# trust it (e.g. an old bind_host). Drop it. A service that is still asleep stays asleep (socket
-# activation keeps working); the warning says how to get out.
+# trust it (e.g. an old bind_host). Drop it, UNLESS sleep is still ON for it: then the entry is kept and
+# marked stale=1 so laranode-sleep.sh allows only `disable` (restore); never trap a service asleep.
 drop_stale() { # key
-    local f="$DIR/managed.d/$1.conf"
+    local f="$DIR/managed.d/$1.conf" tmp
     [ -e "$f" ] || return 0
-    rm -f "$f"
-    echo "dropped stale registry entry: $1" >&2
     if grep -qx 'enabled=1' "$DIR/sleep/$1.state" 2>/dev/null; then
-        echo "WARNING: sleep is still ON for $1 but it is no longer registered; fix the cause and re-run the installer (or this script) to manage it again" >&2
+        # Sleep is ON: laranode-sleep.sh needs this entry to RESTORE the originals (disable), so it
+        # must not vanish (that would trap the service asleep). Mark it stale instead: sleep.sh then
+        # allows `disable` only, never enable/wake/sleep with the old address.
+        if ! grep -qx 'stale=1' "$f"; then
+            tmp=$(mktemp "$DIR/managed.d/.tmp.XXXXXX") || exit 1
+            { cat "$f"; echo stale=1; } > "$tmp"
+            chown root:root "$tmp"; chmod 0644 "$tmp"
+            mv -f "$tmp" "$f"
+        fi
+        echo "kept stale registry entry: $1 (sleep is ON; marked stale=1, only disable is allowed)" >&2
+        echo "WARNING: sleep is still ON for $1 but it is no longer registered; run 'laranode-sleep.sh $1 disable' or fix the cause and re-run the installer (or this script) to manage it again" >&2
+    else
+        rm -f "$f"
+        echo "dropped stale registry entry: $1" >&2
     fi
 }
 
