@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scenario: CloudPanel-like production host (the DS box).
+# Scenario: CloudPanel-like host with live services that must never be disturbed.
 #   nginx on :80/:443 (+ a "Varnish backend" stand-in on :8080), /home/clp marker,
 #   an existing MySQL-family server (MariaDB stands in for Percona: it conflicts with
 #   mysql-server exactly like Percona does), a live PostgreSQL 16 cluster, ufw active

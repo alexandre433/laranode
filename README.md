@@ -29,16 +29,55 @@ Laranode is a simple but powerful open-source alternative to cPanel and Plesk, d
 Laranode can be installed on a FRESH VPS or dedicated server.
 
 ### Min. Requirements
-- Ubuntu 24.04+
+- Ubuntu 24.04 **or** Debian 13 (trixie). The installer detects the OS; anything else is refused.
 - 1vCPU
 - 2GB RAM
 - 10GB Disk Space
 
 ### Quick Install
-Run on a clean Ubuntu 24.04 server as root:
+Run on a clean Ubuntu 24.04 or Debian 13 server as root:
 ```bash
 curl -sSL https://raw.githubusercontent.com/alexandre433/laranode/refs/heads/main/laranode-scripts/bin/laranode-installer.sh | bash
 ```
+
+### Supported operating systems
+
+| | Ubuntu 24.04 | Debian 13 (trixie) |
+|---|---|---|
+| PHP 8.4 source | ondrej/php PPA | Debian's own `php8.4` packages (no third-party repo) |
+| Default database | MySQL 8 (`mysql-server`) | PostgreSQL 17 (Debian has no `mysql-server`) |
+| MySQL on that OS | installed by the installer | only an existing MySQL / Percona / MariaDB server is reused |
+| PostgreSQL | distro default (16) | 17 |
+
+The installer never removes packages and, on Proxmox/CloudPanel hosts, never upgrades host-stack packages: every `apt-get install` is simulated first and the install aborts if apt would remove anything.
+
+### Installer options (environment variables)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LARANODE_OS` | auto-detect | `ubuntu` or `debian`. Force the package path on a derivative distro (the version must still be 24.04 / 13) |
+| `LARANODE_DB_ENGINE` | `mysql` on Ubuntu, `pgsql` on Debian | `mysql` or `pgsql`. Only that engine's server package is installed |
+| `LARANODE_HTTP_PORT` | 80 if free, else 8080 | Apache port the panel listens on |
+| `LARANODE_BIND` | `local` on Proxmox/CloudPanel, else `all` | `all`, `local` (127.0.0.1) or an IPv4 address. Reach a local-bound panel over an SSH tunnel |
+| `LARANODE_DATA_DIR` | distro default | Fresh PostgreSQL install only: keep cluster data under `<dir>/postgresql/<ver>/<cluster>` (e.g. a larger disk) |
+| `LARANODE_MYSQL_ROOT_PASSWORD` | - | Needed when an existing MySQL root uses password auth |
+| `LARANODE_PG_PORT` | auto (single cluster) | Select the cluster when several PostgreSQL clusters exist |
+| `LARANODE_APP_URL` | public IP | Sets `APP_URL` and the Reverb host |
+| `LARANODE_UNATTENDED` | `0` | `1` takes every default and suppresses prompts |
+
+Example: `LARANODE_UNATTENDED=1 LARANODE_DB_ENGINE=pgsql LARANODE_BIND=local bash laranode-installer.sh`
+
+### Installing next to existing services
+
+The installer is safe to run on a host that already has services:
+
+- **Apache/nginx on :80** - the panel vhost goes on :8080, the existing server is untouched.
+- **Existing MySQL / Percona / MariaDB** - reused as is; `mysql-server` is never installed over it.
+- **Existing PostgreSQL clusters** - client only; set `LARANODE_PG_PORT` to the cluster the panel may use.
+- **Proxmox VE** - ufw is never installed or enabled, ports 22/85/111/443/3128/8006 are refused, the panel binds 127.0.0.1.
+- **CloudPanel** - no PPA, nothing installed over its PHP/nginx/Percona, panel on :8090, Reverb on :8081, no ufw rules, binds 127.0.0.1.
+
+The installer writes `/etc/laranode/service-manifest.json` listing which services it manages and which were already there (see `CLAUDE.md`, "Service manifest").
 
 ## Getting Started
 Once installed, access Laranode via your browser:

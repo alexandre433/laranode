@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Scenario: Proxmox-like host (Debian 13 + /etc/pve marker + ufw present but unmanaged).
-# Mimics the pve host target: panel must bind 127.0.0.1 only, never touch ufw,
+# Scenario: generic Proxmox VE host (Debian 13 + /etc/pve marker + ufw present but unmanaged).
+# Panel must bind 127.0.0.1 only, never touch ufw,
 # put the PostgreSQL data directory on the chosen disk, and not take 8006/3128/443.
 set -euo pipefail
 SCENARIO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,12 +9,12 @@ source "${SCENARIO_DIR}/../lib.sh"
 
 export SCENARIO="pve"
 export IMAGE="jrei/systemd-debian:13"
-# Proxmox marker + a stand-in "Proxmox UI" on :8006 + a stand-in "tailscale serve" on
+# Proxmox marker + a stand-in "Proxmox UI" on :8006 + a stand-in HTTPS reverse proxy on
 # :443 (nginx), plus ufw INSTALLED so we can prove it is never enabled or edited.
 export PRESETUP='
     apt-get update -q >/dev/null 2>&1
     DEBIAN_FRONTEND=noninteractive apt-get install -y --quiet nginx ufw >/dev/null 2>&1
-    mkdir -p /etc/pve /srv/hdd-test
+    mkdir -p /etc/pve /srv/data-test
     cat > /etc/nginx/conf.d/pve-standin.conf <<NGX
 server { listen 8006; location / { return 200 "PVE_UI_8006\n"; } }
 server { listen 3128; location / { return 200 "PVE_SPICE_3128\n"; } }
@@ -25,7 +25,7 @@ NGX
     ufw show added > /root/ufw.before 2>&1 || true
     ufw status > /root/ufw.status.before 2>&1 || true
 '
-export INSTALLER_ENV="LARANODE_UNATTENDED=1 LARANODE_PG_DATADIR=/srv/hdd-test/pgdata"
+export INSTALLER_ENV="LARANODE_UNATTENDED=1 LARANODE_DATA_DIR=/srv/data-test"
 export EXPECT_PORT=80
 export EXPECT_ENGINE=pgsql
 
@@ -51,7 +51,7 @@ export POST_ASSERTS_CMD='
     echo "PASS: ufw untouched and inactive"
     # data directory on the chosen disk
     dd=$(sudo -u postgres psql -At -c "SHOW data_directory;")
-    case "$dd" in /srv/hdd-test/pgdata/*) echo "PASS: PG data_directory=$dd";; *) echo "FAIL: data_directory=$dd" >&2; exit 1;; esac
+    case "$dd" in /srv/data-test/postgresql/*) echo "PASS: PG data_directory=$dd";; *) echo "FAIL: data_directory=$dd" >&2; exit 1;; esac
     # Apache holds no 443 listener
     ss -tlnp "( sport = :443 )" | grep -q apache2 && { echo "FAIL: apache took :443" >&2; exit 1; }
     echo "PASS: apache not on :443"

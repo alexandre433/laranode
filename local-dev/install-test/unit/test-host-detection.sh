@@ -48,6 +48,28 @@ tf "missing os-release refused"     bash -c "source '$INSTALLER'; LARANODE_OS_RE
 msg_names_supported() { out=$(bash -c "source '$INSTALLER'; LARANODE_OS_RELEASE_FILE='${FIX}/os-release.debian-12' detect_os" 2>&1 || true); echo "$out" | grep -q 'Ubuntu 24.04, Debian 13'; }
 t  "refusal names the supported OSes" msg_names_supported
 
+# ---- LARANODE_OS override + per-OS package branches --------------------------
+echo "=== LARANODE_OS / OS branches ==="
+os_override_ok()  { base; export LARANODE_OS_RELEASE_FILE="${FIX}/os-release.ubuntu-derivative" LARANODE_OS=ubuntu; detect_os; expect OS_ID "$OS_ID" ubuntu; }
+os_derivative_no_override() { base; export LARANODE_OS_RELEASE_FILE="${FIX}/os-release.ubuntu-derivative"; detect_os; }
+os_override_wrong_version() { base; export LARANODE_OS_RELEASE_FILE="${FIX}/os-release.ubuntu-derivative" LARANODE_OS=debian; detect_os; }
+os_override_garbage()       { base; export LARANODE_OS=arch; detect_os; }
+os_override_debian_on_debian() { base; export LARANODE_OS_RELEASE_FILE="${FIX}/os-release.debian-13" LARANODE_OS=debian; detect_os; expect OS_ID "$OS_ID" debian; }
+t  "LARANODE_OS=ubuntu accepts an Ubuntu-24.04 derivative"        os_override_ok
+tf "derivative refused without LARANODE_OS"                       os_derivative_no_override
+tf "LARANODE_OS=debian on a 24.04 host refused (version must match)" os_override_wrong_version
+tf "LARANODE_OS with an unknown value refused"                    os_override_garbage
+t  "LARANODE_OS equal to the detected OS is a no-op"              os_override_debian_on_debian
+pk_run() {  # pk_run <os-release fixture> -> APT_CALLS holds every apt_install call
+  base; export LARANODE_OS_RELEASE_FILE="${FIX}/os-release.$1"; detect_os; detect_proxmox; detect_cloudpanel
+  APT_CALLS=$(mktemp); apt_install() { echo "$*" >> "$APT_CALLS"; }; apt-get() { :; }; systemctl() { :; }
+  phase_packages >/dev/null 2>&1
+}
+pk_ubuntu_has_ppa_tool() { pk_run ubuntu-24.04; grep -qx 'software-properties-common' "$APT_CALLS"; }
+pk_debian_no_ppa_tool()  { pk_run debian-13;    ! grep -q 'software-properties-common' "$APT_CALLS" && grep -q '^git ' "$APT_CALLS"; }
+t "ubuntu path installs software-properties-common (ondrej PPA tool)" pk_ubuntu_has_ppa_tool
+t "debian path skips it (native php8.4) but shares the base tool set"  pk_debian_no_ppa_tool
+
 # ---- Proxmox / CloudPanel markers -------------------------------------------
 echo "=== host markers ==="
 pve_cmd()  { base; have_cmd() { [ "$1" = pveversion ]; }; detect_proxmox; expect IS_PROXMOX "$IS_PROXMOX" 1; }
@@ -210,9 +232,9 @@ pg_fresh_installs_server() {
 pg_datadir_config() {
   pg_stubs; PG_PREEXISTING=0
   conf=$(mktemp); printf '#data_directory = "ConfigDir"\n' > "$conf"
-  export LARANODE_PG_CREATECLUSTER_CONF="$conf" LARANODE_PG_DATADIR="$(mktemp -d)/pgdata/"
+  export LARANODE_PG_CREATECLUSTER_CONF="$conf" LARANODE_DATA_DIR="$(mktemp -d)/pgdata/"
   ( _pgsql_branch ) >/dev/null 2>&1 || true
-  grep -qxF "data_directory = '${LARANODE_PG_DATADIR%/}/%v/%c'" "$conf" \
+  grep -qxF "data_directory = '${LARANODE_DATA_DIR%/}/postgresql/%v/%c'" "$conf" \
     && [ "$(grep -c data_directory "$conf")" = 1 ] \
     && [ "$(sed -n 1p "$APT_CALLS")" = postgresql-common ] \
     && grep -q '^postgresql postgresql-client$' "$APT_CALLS"
@@ -220,7 +242,7 @@ pg_datadir_config() {
 tf "existing cluster, no LARANODE_PG_PORT: refuses to pick one"             pg_existing_needs_port
 t  "existing cluster: server package untouched, no psql/sudo executed"      pg_existing_no_server_install
 t  "fresh host: postgresql server + client installed"                       pg_fresh_installs_server
-t  "LARANODE_PG_DATADIR: createcluster.conf written, common installed first" pg_datadir_config
+t  "LARANODE_DATA_DIR: createcluster.conf written, common installed first" pg_datadir_config
 
 # ---- ports.conf rewrite ------------------------------------------------------
 echo "=== _apache_ports_conf ==="

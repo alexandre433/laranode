@@ -78,12 +78,23 @@ pkg_installed() {
 }
 
 # detect_os — sets OS_ID / OS_VERSION from os-release; refuses anything but
-# Ubuntu 24.04 and Debian 13. LARANODE_OS_RELEASE_FILE overrides the path (tests).
+# Ubuntu 24.04 and Debian 13 (trixie). One installer, both paths: shared steps run
+# for both and only package/repo/service-name differences branch on $OS_ID.
+#   LARANODE_OS=ubuntu|debian   force the package path for a derivative whose
+#                               os-release ID differs (the VERSION_ID must still be
+#                               24.04 for ubuntu / 13 for debian).
+#   LARANODE_OS_RELEASE_FILE    overrides /etc/os-release (tests).
 detect_os() {
   local f="${LARANODE_OS_RELEASE_FILE:-/etc/os-release}"
   [ -r "$f" ] || die "Cannot read ${f} — unsupported OS (supported: Ubuntu 24.04, Debian 13)"
   OS_ID=$(. "$f" && echo "${ID:-unknown}")
   OS_VERSION=$(. "$f" && echo "${VERSION_ID:-unknown}")
+  if [ -n "${LARANODE_OS:-}" ]; then
+    case "$LARANODE_OS" in
+      ubuntu|debian) OS_ID="$LARANODE_OS" ;;
+      *) die "LARANODE_OS must be 'ubuntu' or 'debian' (got '${LARANODE_OS}')" ;;
+    esac
+  fi
   case "${OS_ID}:${OS_VERSION}" in
     ubuntu:24.04|debian:13) ;;
     *) die "Unsupported OS: ${OS_ID} ${OS_VERSION}. Supported: Ubuntu 24.04, Debian 13 (trixie)." ;;
@@ -271,7 +282,7 @@ preflight() {
   if [ "$IS_PROXMOX" = 1 ]; then
     case "$HTTP_PORT" in
       22|85|111|443|3128|8006)
-        die "Port ${HTTP_PORT} belongs to Proxmox/SSH/Tailscale on this host — choose another LARANODE_HTTP_PORT." ;;
+        die "Port ${HTTP_PORT} is reserved by Proxmox/SSH on this host — choose another LARANODE_HTTP_PORT." ;;
     esac
   fi
   if [ "$port80_free" = 0 ] && [ "$HTTP_PORT" = 80 ]; then
@@ -466,14 +477,14 @@ _pgsql_branch() {
   else
     # Fresh host: optionally place the data directory on another disk, set
     # BEFORE the first cluster is created (%v = major, %c = cluster name).
-    if [ -n "${LARANODE_PG_DATADIR:-}" ]; then
+    if [ -n "${LARANODE_DATA_DIR:-}" ]; then
       apt_install postgresql-common
       local pgcc_conf="${LARANODE_PG_CREATECLUSTER_CONF:-/etc/postgresql-common/createcluster.conf}"
-      mkdir -p "${LARANODE_PG_DATADIR}"
+      mkdir -p "${LARANODE_DATA_DIR}"
       sed -i -E "/^[#[:space:]]*data_directory[[:space:]]*=/d" "$pgcc_conf"
-      printf "data_directory = '%s/%%v/%%c'\n" "${LARANODE_PG_DATADIR%/}" \
+      printf "data_directory = '%s/postgresql/%%v/%%c'\n" "${LARANODE_DATA_DIR%/}" \
         >> "$pgcc_conf"
-      log "PostgreSQL data directory base: ${LARANODE_PG_DATADIR%/}/<ver>/<cluster>"
+      log "PostgreSQL data directory base: ${LARANODE_DATA_DIR%/}/postgresql/<ver>/<cluster>"
     fi
     apt_install postgresql postgresql-client
     PANEL_DB_MANAGED=1

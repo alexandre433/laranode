@@ -80,8 +80,9 @@ back to `:8080` when `:80` is occupied.
 | `LARANODE_PG_PORT` | auto (single cluster) | Disambiguate when multiple Postgres clusters exist on the same host |
 | `LARANODE_APP_URL` | public IP via `icanhazip.com` | Sets `APP_URL`, `REVERB_HOST`, `VITE_REVERB_HOST` in `.env` |
 | `LARANODE_REPO` | GitHub fork URL | Clone source; the install-test harness overrides this to the injected tree path |
+| `LARANODE_OS` | auto-detect | `ubuntu` or `debian`: force the package path for a derivative distro (VERSION_ID must still be 24.04 / 13) |
 | `LARANODE_BIND` | `local` on Proxmox/CloudPanel, else `all` | `all`, `local` (127.0.0.1) or an IPv4. Panel Apache vhost and Reverb listen only there; reach a local-bound panel over an SSH tunnel |
-| `LARANODE_PG_DATADIR` | — | Fresh PostgreSQL install only: put cluster data under this dir (`<dir>/<ver>/<cluster>`), e.g. a bigger disk |
+| `LARANODE_DATA_DIR` | — | Fresh PostgreSQL install only: put cluster data under `<dir>/postgresql/<ver>/<cluster>` (e.g. a bigger disk) |
 | `LARANODE_UNATTENDED` | `0` | `1` = take all defaults, suppress all prompts and `confirm` gates |
 
 ### Supported hosts
@@ -127,7 +128,7 @@ world-readable, one service per line so shell and PHP can both parse it:
 ```
 
 - `"managed":true` = created/installed by the installer (kept across re-runs). Safe to stop/start (sleep/wake).
-- `"managed":false` = present before the installer ran (DS: PG16, Redis, Percona, CloudPanel nginx/php-fpm, any
+- `"managed":false` = present before the installer ran (e.g. a CloudPanel host's PostgreSQL, Redis, Percona, nginx/php-fpm, any
   pre-existing Apache/PHP-FPM/MySQL). **Never stop, start, restart or reconfigure these.**
 - Roles: `reverb`, `queue`, `web` (apache2), `php` (php8.4-fpm), `database` (the panel's DB unit), `preexisting`.
 - Always managed: `laranode-reverb.service`, `laranode-queue-worker.service`. A consumer must treat a unit that is
