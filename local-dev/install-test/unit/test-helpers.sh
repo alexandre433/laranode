@@ -80,6 +80,8 @@ echo "=== preflight ==="
   source "$INSTALLER"
   port_in_use() { return 1; }
   have_cmd()    { return 1; }
+  pkg_installed() { return 1; }   # hermetic: a runner with apache2/php installed must not leak in
+  svc_active()    { return 1; }
   export LARANODE_UNATTENDED=1
   unset LARANODE_DB_ENGINE LARANODE_HTTP_PORT
   preflight
@@ -94,6 +96,8 @@ echo "=== preflight ==="
   source "$INSTALLER"
   port_in_use() { return 1; }
   have_cmd()    { return 1; }
+  pkg_installed() { return 1; }   # hermetic: a runner with apache2/php installed must not leak in
+  svc_active()    { return 1; }
   export LARANODE_UNATTENDED=1 LARANODE_DB_ENGINE=pgsql
   unset LARANODE_HTTP_PORT
   preflight
@@ -107,6 +111,8 @@ echo "=== preflight ==="
   source "$INSTALLER"
   port_in_use() { [ "$1" = 80 ]; }
   have_cmd()    { return 1; }
+  pkg_installed() { return 1; }   # hermetic: a runner with apache2/php installed must not leak in
+  svc_active()    { return 1; }
   export LARANODE_UNATTENDED=1
   unset LARANODE_DB_ENGINE LARANODE_HTTP_PORT
   preflight
@@ -120,6 +126,8 @@ echo "=== preflight ==="
   source "$INSTALLER"
   port_in_use() { [ "$1" = 80 ]; }
   have_cmd()    { return 1; }
+  pkg_installed() { return 1; }   # hermetic: a runner with apache2/php installed must not leak in
+  svc_active()    { return 1; }
   export LARANODE_UNATTENDED=1 LARANODE_HTTP_PORT=9000
   unset LARANODE_DB_ENGINE
   preflight
