@@ -188,6 +188,17 @@ check "reverb: real unit active after wake" systemctl is-active --quiet laranode
 t0=$(now_ms); n=$($CLI -h127.0.0.1 -P3306 -uspk -ppw -N -e 'select count(*) from spikedb.t' 2>/tmp/ln-dberr); t1=$(now_ms)
 check "hostdb: TCP connect wakes it and returns data" test "$n" = 1
 echo "METRIC db_tcp_wake_ms=$((t1 - t0))  rss_awake_again_kb=$(rss_db)"
+if [ "$n" != 1 ]; then # evidence for a failed wake (CI runner kernels enforce their own AppArmor)
+    echo "DIAG  client error: $(head -c 300 /tmp/ln-dberr 2>/dev/null)"
+    echo "DIAG  unit state: $(systemctl is-active "$DBUNIT" 2>&1) / $(systemctl show -p Result,ExecMainStatus "$DBUNIT" 2>&1 | tr '\n' ' ')"
+    journalctl -u "$DBUNIT" -n 25 --no-pager 2>&1 | sed 's/^/DIAG  journal: /'
+    for f in /var/log/mysql/error.log /var/log/mysql/mariadb.err; do
+        [ -r "$f" ] && tail -n 25 "$f" | sed "s|^|DIAG  $f: |"
+    done
+    dmesg 2>/dev/null | grep -i 'apparmor' | tail -n 10 | sed 's/^/DIAG  dmesg: /'
+    cat /sys/kernel/security/apparmor/profiles 2>/dev/null | grep -i 'mysqld\|mariadbd' | sed 's/^/DIAG  aa-profile: /'
+    echo "DIAG  drop-in: $(ls "$UNITS/$DBUNIT.d" 2>/dev/null | tr '\n' ' ')"
+fi
 
 check "hostdb: manual sleep" test "$(run "$SLEEP" hostdb sleep)" = 0
 check "hostdb: db down after manual sleep" bash -c "! systemctl is-active $DBUNIT >/dev/null"
