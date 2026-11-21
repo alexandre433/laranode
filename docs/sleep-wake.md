@@ -36,8 +36,12 @@ did not install.
   `apt install`, is only noticed on the next `wake`/status; a client connect can still wake the DB through
   systemd), and in an LXC/container where AppArmor reads `Y` but the profile list is not mounted the page
   shows the AppArmor refusal although no profile exists (fail closed; the state could not be read).
-  **Unproven:** the kernel enforcement itself and the exact profile-line format on a real Ubuntu 24.04
-  host (containers have no AppArmor). The decision logic is tested against injected kernel files only.
+  **Seen on a real kernel (fork CI, GitHub ubuntu runner):** with the stock mysqld profile loaded, a woken
+  MySQL on the moved socket dies with `apparmor="DENIED" operation="mknod" profile="/usr/sbin/mysqld"
+  name="/run/laranode-hostdb/mysqld.sock.lock"` (Aborting, restart loop). That is exactly what the gate
+  refuses; the matrix asserts the real, unmasked gate refuses there. **Unproven:** the exact profile-line
+  format in `/sys/kernel/security/apparmor/profiles` (a container cannot read it); the mode logic is tested
+  against injected kernel files only.
   The common full-install case is already refused earlier (panel DB = hosting DB).
 * **External services** (shared PostgreSQL, Redis, Percona, CloudPanel nginx, a pre-existing
   Apache/PHP-FPM/DB) are listed read-only on the Power page and can never be managed.
