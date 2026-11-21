@@ -1,0 +1,69 @@
+name: sleep-tests
+
+# Service sleep/wake (docs/sleep-wake.md): the backend + frontend suites and the real-systemd
+# proofs, on a Linux runner. Separate from installer-tests.yml (owned by the installer PR).
+on:
+  pull_request:
+  push:
+    branches: [development]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sleep-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pest:
+    name: pest (full suite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer
+          coverage: none
+        env:
+          COMPOSER_AUTH: '{"github-oauth":{"github.com":"${{ secrets.GITHUB_TOKEN }}"}}'
+      - run: composer install --no-interaction --prefer-dist --no-progress
+      - run: cp .env.example .env && php artisan key:generate
+      - run: ./vendor/bin/pest
+
+  vitest:
+    name: vitest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --legacy-peer-deps --no-audit --no-fund
+      - run: npx vitest run
+
+  systemd-matrix:
+    name: systemd matrix (${{ matrix.os }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu, debian]
+    steps:
+      - uses: actions/checkout@v4
+      - name: real systemd + real MySQL/MariaDB, one OS
+        run: bash tests/system/sleep/matrix.sh "${{ matrix.os }}"
+
+  rerun-sleep:
+    name: installer re-run with sleep ON
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: run scenario
+        env:
+          LARANODE_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash local-dev/install-test/run.sh rerun-sleep

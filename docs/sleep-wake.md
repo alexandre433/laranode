@@ -129,7 +129,7 @@ Reverb clients are unaffected.
   DB guard, rollback, manifest gate, control/status API, non-admin 403, queue wake on dispatch).
 * `resources/js/Pages/Power/Power.test.jsx`, `SidebarNavi.test.jsx`: Vitest.
 * `tests/system/sleep/matrix.sh [ubuntu|debian|all]`: real systemd + real MySQL (Ubuntu 24.04) / MariaDB
-  (Debian 13) in throw-away containers. Measures wake time and idle RSS. SKYTOP only, needs Docker.
+  (Debian 13) in throw-away containers. Measures wake time and idle RSS. Needs Docker; runs in CI (`.github/workflows/sleep-tests.yml`) and locally.
 * `tests/e2e/power.spec.js`: Playwright against the lab container.
 * `local-dev/install-test/scenarios/rerun-sleep.sh`: installer re-run with sleep ON.
 
