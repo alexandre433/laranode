@@ -876,8 +876,14 @@ phase_webserver() {
 
   # Confirm the socket is open (full HTTP 200 check is phase_services, after the
   # app is bootstrapped). This surfaces port-fork bugs early.
+  # A graceful reload returns before Apache has opened the new listener: wait for it.
+  local _w
+  for _w in $(seq 1 20); do
+    ss -tlnH "( sport = :${HTTP_PORT} )" | grep -q . && break
+    sleep 1
+  done
   ss -tlnH "( sport = :${HTTP_PORT} )" | grep -q . \
-    || die "Apache is not listening on :${HTTP_PORT} after restart"
+    || die "Apache is not listening on :${HTTP_PORT} after (re)load"
 
   _configure_firewall
 
