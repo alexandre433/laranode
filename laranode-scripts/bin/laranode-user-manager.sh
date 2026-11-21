@@ -10,7 +10,9 @@ ln_enum "$1" ACTION create delete
 ALLOW_LOGIN=no
 [ $# -ge 3 ] && ln_enum "$3" ALLOW_LOGIN yes no
 PASSWORD=
-if [ $# -ge 4 ]; then ln_secret "$4" PASSWORD; fi
+# an empty fourth operand means "no password" (the panel used to send null, which Symfony Process
+# turns into ""); a non-empty one is always validated
+if [ $# -ge 4 ] && [ -n "$4" ]; then ln_secret "$4" PASSWORD; fi
 
 # Ensure password is provided if allow shell/ssh login is "yes"
 if [ "$ALLOW_LOGIN" = "yes" ] && [ -z "$PASSWORD" ]; then

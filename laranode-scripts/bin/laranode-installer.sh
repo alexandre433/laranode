@@ -259,6 +259,8 @@ _seed_env() {
   [ -f "$env" ] && return 0
   ( umask 027; cp "${PANEL_PATH}/.env.example" "$env" )
   chmod 640 "$env"
+  # owned by the panel account: artisan (key:generate) runs as laranode_ln and writes it
+  if id laranode_ln >/dev/null 2>&1; then chown laranode_ln "$env"; fi
   if getent group laranode_ln >/dev/null 2>&1; then chgrp laranode_ln "$env"; fi
   return 0
 }
@@ -1379,15 +1381,39 @@ CONF
 # Phase 6 — Application provisioning
 # ==============================================================================
 
+# ── Root never executes PHP that lives in the panel tree ──────────────────────
+# Laravel `require`s bootstrap/cache/*.php, config/, vendor/ ... on every artisan call, and
+# composer runs the project's scripts. Part of the tree is writable by the web user
+# (storage/), and in the old layout bootstrap/cache was too: PHP planted there by www-data
+# would run as root on the next installer re-run. So composer and artisan run as the panel
+# account (laranode_ln), in the panel directory, never as root.
+_as_panel_user() {
+  runuser -u laranode_ln -- env HOME=/home/laranode_ln COMPOSER_HOME=/home/laranode_ln/.composer "$@"
+}
+_artisan() { _as_panel_user /usr/bin/php8.4 artisan "$@"; }
+
+# _prepare_panel_tree — before any PHP runs: the tree belongs to the panel account (a fresh
+# `git clone` as root, or a legacy layout), and the generated bootstrap caches are not
+# trusted: they are deleted and rebuilt by composer's package:discover.
+_prepare_panel_tree() {
+  local p="${PANEL_PATH}"
+  chown -R -h laranode_ln:laranode_ln "$p"
+  if [ -d "$p/bootstrap/cache" ] && [ ! -L "$p/bootstrap/cache" ]; then
+    find "$p/bootstrap/cache" -maxdepth 1 -type f -name '*.php' -delete
+    chmod 750 "$p/bootstrap/cache"
+  fi
+}
+
 phase_app() {
   log "App provisioning"
 
   [ -f "${PANEL_PATH}/composer.json" ] \
     || die "composer.json not found at ${PANEL_PATH} — repo clone missing or PANEL_PATH wrong"
   cd "${PANEL_PATH}"
+  _prepare_panel_tree
 
   log "Installing PHP dependencies (composer install)"
-  /usr/bin/php8.4 /usr/local/bin/composer install --no-interaction --optimize-autoloader
+  _as_panel_user /usr/bin/php8.4 /usr/local/bin/composer install --no-interaction --optimize-autoloader
 
   # .env — copy example only when absent; never clobber existing config.
   if [ ! -f "${PANEL_PATH}/.env" ]; then
@@ -1402,7 +1428,7 @@ phase_app() {
     log "APP_KEY already set — preserving (idempotent re-run)"
   else
     log "APP_KEY not set — generating"
-    /usr/bin/php8.4 artisan key:generate --force
+    _artisan key:generate --force
   fi
 
   # Resolve canonical panel hostname: LARANODE_APP_URL > public IP.
@@ -1450,12 +1476,12 @@ phase_app() {
   env_set LARANODE_TEMPLATES_PATH "${LN_LIB_DEST}/templates" "${PANEL_PATH}/.env"
 
   log "Running database migrations"
-  /usr/bin/php8.4 artisan migrate --force \
+  _artisan migrate --force \
     || die "artisan migrate --force failed — verify DB_* in .env and phase_database logs"
 
   # One-time installs (idempotent: non-zero on re-run is expected/tolerated).
-  /usr/bin/php8.4 artisan storage:link 2>/dev/null || true
-  /usr/bin/php8.4 artisan reverb:install --no-interaction 2>/dev/null || true
+  _artisan storage:link 2>/dev/null || true
+  _artisan reverb:install --no-interaction 2>/dev/null || true
 
   # REVERB_HOST / VITE_REVERB_HOST — set only when absent or 'localhost'.
   local cur_reverb=""
@@ -1487,15 +1513,15 @@ phase_app() {
   fi
 
   # GPU detection — best-effort.
-  /usr/bin/php8.4 artisan laranode:detect-gpu 2>/dev/null || true
+  _artisan laranode:detect-gpu 2>/dev/null || true
 
   # First-run seed sentinel: seed ONLY when the users table is empty.
   log "Checking first-run seed sentinel (users table row count)"
   local user_count=1
-  user_count="$(/usr/bin/php8.4 artisan tinker --execute="echo App\\Models\\User::count();" 2>/dev/null | tail -1 | tr -d ' \r\n')" || user_count=1
+  user_count="$(_artisan tinker --execute="echo App\\Models\\User::count();" 2>/dev/null | tail -1 | tr -d ' \r\n')" || user_count=1
   if [ "$user_count" = "0" ]; then
     log "Users table empty — running db:seed (first install)"
-    /usr/bin/php8.4 artisan db:seed --force || die "artisan db:seed --force failed"
+    _artisan db:seed --force || die "artisan db:seed --force failed"
   else
     log "Users table has ${user_count} row(s) — skipping seed (idempotent re-run)"
   fi
@@ -1700,7 +1726,8 @@ _install_scheduler_cron() {
 #   * the scripts, their lib/ and templates/ are COPIED to LN_LIB_DEST, owned by root,
 #     mode 755/644, and sudoers names files only inside it;
 #   * the panel checkout stays laranode_ln's (that is how the panel is updated) but is not
-#     group-writable: only storage/ and bootstrap/cache/ are. .env is 640.
+#     group-writable: only storage/ is. .env is 640. Composer/artisan run as laranode_ln,
+#     never as root (see _as_panel_user).
 # Updating the scripts after a `git pull` is a deliberate root step:
 #   sudo /usr/local/lib/laranode/bin/laranode-sync-scripts.sh      (see docs/security-sudo.md)
 LN_LIB_DEST=/usr/local/lib/laranode
@@ -1729,16 +1756,14 @@ _settle_permissions() {
   # group (www-data) may read and traverse, never write
   find "$h" -type d -exec chmod 750 {} +
   find "$h" -type f -exec chmod 640 {} +
-  # the one place the web process writes inside the panel, plus its own log dir
+  # the web process writes inside the panel in ONE place (storage/) plus its own log dir.
+  # bootstrap/cache is NOT web-writable: Laravel `require`s it on every artisan run, and the
+  # caches are prebuilt by composer (package:discover) as the panel account.
   chmod 770 "$h/logs"
   find "$h/logs" -type f -exec chmod 660 {} +
-  if [ -d "$p/storage" ] || [ -d "$p/bootstrap/cache" ]; then
-    local d
-    for d in "$p/storage" "$p/bootstrap/cache"; do
-      [ -d "$d" ] || continue
-      find "$d" -type d -exec chmod 770 {} +
-      find "$d" -type f -exec chmod 660 {} +
-    done
+  if [ -d "$p/storage" ]; then
+    find "$p/storage" -type d -exec chmod 770 {} +
+    find "$p/storage" -type f -exec chmod 660 {} +
   fi
   [ -f "$p/.env" ] && chmod 640 "$p/.env"
   # the source copy of the scripts is only ever read (by the root sync): keep it that way
@@ -1839,7 +1864,7 @@ phase_summary() {
   echo "  All generated credentials saved to: /root/.laranode-credentials (chmod 600)"
   echo ""
   echo "  Final step — create the panel admin account:"
-  echo "    cd ${PANEL_PATH} && /usr/bin/php8.4 artisan laranode:create-admin"
+  echo "    cd ${PANEL_PATH} && sudo -u laranode_ln /usr/bin/php8.4 artisan laranode:create-admin"
   echo "========================================================================"
 }
 

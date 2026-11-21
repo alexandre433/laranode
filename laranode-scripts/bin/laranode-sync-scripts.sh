@@ -70,14 +70,58 @@ for f in "$SRC"/templates/*; do
     [ -f "$f" ] || continue
     install -o root -g root -m 644 -- "$f" "$STAGE/templates/${f##*/}"
 done
+# ---- sudoers drop-ins: a strict ALLOWLIST, checked on the STAGED copy -------------------
+# The drop-in comes from the panel checkout (writable by laranode_ln). Copy it first into the
+# root-only staging dir, then judge the copy: what is checked is exactly what is published,
+# so the source cannot change between the check and the install. Every line must be one of
+#   * blank, or a plain comment (never #include / #includedir / @include*, never ending in \)
+#   * Defaults!<DEST>/bin/laranode-<name>.sh !requiretty
+#   * www-data ALL=(ALL|www-data) NOPASSWD: <DEST>/bin/laranode-<name>.sh   (optionally followed by "")
+# Anything else (ALL, a comma list, another user or tag, a wildcard, a path outside DEST/bin,
+# an alias, another Defaults, a continuation line, CR/NUL) refuses the whole sync.
+sudoers_line_ok() {   # <line>
+    local l=$1 p rest
+    [[ $l == *$'\r'* || $l == *'\' ]] && return 1
+    [[ -z ${l//[[:space:]]/} ]] && return 0
+    if [[ $l == '#'* ]]; then
+        [[ $l =~ ^#[[:space:]]*(include|includedir)([[:space:]]|$) ]] && return 1
+        return 0
+    fi
+    p="Defaults!$DEST/bin/"
+    if [[ $l == "$p"* ]]; then
+        rest=${l#"$p"}
+        [[ $rest =~ ^laranode-[a-z0-9-]+\.sh\ \!requiretty$ ]] && return 0
+        return 1
+    fi
+    for p in 'www-data ALL=(ALL) NOPASSWD: ' 'www-data ALL=(www-data) NOPASSWD: '; do
+        p="$p$DEST/bin/"
+        if [[ $l == "$p"* ]]; then
+            rest=${l#"$p"}
+            [[ $rest =~ ^laranode-[a-z0-9-]+\.sh(\ \"\")?$ ]] && return 0
+            return 1
+        fi
+    done
+    return 1
+}
+sudoers_file_ok() {   # <file>
+    local f=$1 line n=0
+    # NUL bytes cannot live in a bash variable: compare byte counts
+    [ "$(tr -d '\0' <"$f" | wc -c)" -eq "$(wc -c <"$f")" ] || return 1
+    # the last line must end in a newline (read would otherwise drop the check on it)
+    [ ! -s "$f" ] || [ -z "$(tail -c1 "$f")" ] || return 1
+    while IFS= read -r line; do
+        n=$((n + 1))
+        sudoers_line_ok "$line" || { echo "laranode-sync-scripts: line $n of ${f##*/} is not allowed: $line" >&2; return 1; }
+    done <"$f"
+}
+
 for f in "$SRC"/etc/sudoers.d/*; do
     [ -f "$f" ] || continue
-    visudo -c -f "$f" >/dev/null || die "sudoers drop-in ${f##*/} failed syntax check"
-    # every granted path must point into the root-owned copy, nowhere else
-    if grep -E '^[^#]*NOPASSWD' "$f" | grep -Ev "NOPASSWD: ($DEST/bin/|ALL$)" | grep -q .; then
-        die "sudoers drop-in ${f##*/} grants a path outside $DEST/bin"
-    fi
-    install -o root -g root -m 644 -- "$f" "$STAGE/etc/sudoers.d/${f##*/}"
+    d=${f##*/}
+    [[ $d =~ ^laranode-[a-z0-9-]+$ ]] || die "unexpected sudoers drop-in name: $d"
+    install -o root -g root -m 644 -- "$f" "$STAGE/etc/sudoers.d/$d"
+    visudo -c -f "$STAGE/etc/sudoers.d/$d" >/dev/null || die "sudoers drop-in $d failed syntax check"
+    sudoers_file_ok "$STAGE/etc/sudoers.d/$d" || die "sudoers drop-in $d grants more than a laranode script inside $DEST/bin"
 done
 
 # ---- swap (rename keeps the window where the path is missing to two syscalls) ---------
