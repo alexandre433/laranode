@@ -47,7 +47,9 @@ fx_reset() {
         > /etc/apache2/sites-available/example.com.conf
     printf 'canary\n' > /etc/laranode-canary
     # attacker-planted material (www-data owns all of it: that is the threat model)
-    rm -rf /tmp/evildir /tmp/evil.template /tmp/laranode-* /tmp/pwned*
+    rm -rf /tmp/evildir /tmp/evil.template /tmp/pwned*
+    # our own fixtures only: a scenario (rerun) keeps its state in /tmp/laranode-rerun-state
+    find /tmp -maxdepth 1 -name 'laranode-*' ! -name 'laranode-rerun-state' -exec rm -rf {} +
     mkdir -p /tmp/evildir
     local evil='ErrorLog "|/bin/sh -c '\''touch /tmp/pwned-template'\''"'
     for t in apache-vhost.template apache-vhost-frankenphp.template laranode-frankenphp.service.template php-fpm-pool.template; do
