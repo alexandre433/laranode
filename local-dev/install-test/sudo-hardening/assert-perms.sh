@@ -46,9 +46,10 @@ done
 
 BIN=$(ln_bin_dir) || { bad "no laranode-*.sh script in the sudo rules"; exit 1; }
 TPL=$(ln_tpl_dir)
+LIBD="$(cd "$BIN/.." && pwd)/lib"
 for u in www-data laranode_ln; do
     id "$u" >/dev/null 2>&1 || continue
-    for t in "$BIN" "$TPL" "$BIN"/laranode-*.sh "$TPL"/*; do
+    for t in "$BIN" "$TPL" "$LIBD" "$BIN"/laranode-*.sh "$TPL"/* "$LIBD"/*; do
         [ -e "$t" ] || continue
         if runuser -u "$u" -- test -w "$t" 2>/dev/null; then bad "$u can write $t"; fi
     done

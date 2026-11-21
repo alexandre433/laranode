@@ -14,8 +14,9 @@ class ToggleUfwAction
             $proc = UfwCommand::run(['disable']);
         }
         if ($proc->failed()) {
-            throw new RuntimeException('UFW toggle failed: ' . $proc->errorOutput());
+            throw new RuntimeException('UFW toggle failed: '.$proc->errorOutput());
         }
+
         return trim($proc->output());
     }
 }

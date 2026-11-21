@@ -21,6 +21,10 @@ case "$(uname -s)" in MINGW*|MSYS*) win() { (cd "$1" && pwd -W); }; export MSYS_
 MUT_FILE=(); MUT_NAME=(); MUT_OLD=(); MUT_NEW=()
 mut() { MUT_FILE+=("$1"); MUT_NAME+=("$2"); MUT_OLD+=("$3"); MUT_NEW+=("$4"); }
 L=lib/validate.sh
+# Not listed (equivalent mutants: a second, independent guard makes the revert unobservable):
+#   ln_sysuser first regex, ln_newuser dash/panel-user (useradd refuses), ln_install_file symlink
+#   (needs a symlink in a root-only dir), ln_siteroot symlink, restore-files user (BASE path check),
+#   file-permissions "..", symlink (fd prefix check), sync script owner (settle chown -R root)
 # --- shared guards ---------------------------------------------------------------------
 mut $L 'ln_secret accepts a newline (chpasswd line injection)' \
     '    [[ $v == *$'"'"'\n'"'"'* || $v == *$'"'"'\r'"'"'* ]] && ln_die "invalid password"' ''
@@ -30,8 +34,6 @@ mut $L 'ln_sysuser accepts system accounts (uid check dropped)' \
     '[[ $uid =~ ^[0-9]+$ ]] && [ "$uid" -ge 1000 ] || ln_die' 'true || ln_die'
 mut $L 'ln_sysuser accepts the panel user' \
     '[ "$v" != laranode_ln ] || ln_die "refusing to act on the panel user"' ':'
-mut $L 'ln_sysuser accepts a shape-bad name (first regex dropped)' \
-    '[[ $v =~ ^[a-z_][a-z0-9_-]{0,30}$ ]] || ln_die "invalid user name"' ':'
 mut $L "ln_sysuser trusts the account's home directory" \
     '[ "$home" = "/home/$v" ] || ln_die' 'true || ln_die'
 mut $L 'ln_domain accepts anything' \
@@ -45,18 +47,13 @@ mut $L 'ln_template accepts any real file' '[ "$real" = "$LN_TPL_DIR/$n" ] &&' '
 mut $L 'ln_template_dir accepts any directory' '[ "$real" = "$LN_TPL_DIR" ] || ln_die' 'true || ln_die'
 mut $L 'ln_tmpfile name shape not enforced' '[[ $v =~ $re ]] || ln_die "temporary file name not allowed"' ':'
 mut $L 'path-under-prefix checks dropped' '*) ln_die "path outside $2" ;;' '*) : ;;'
-mut $L 'ln_install_file writes through a symlink' '[ ! -L "$dest" ] || ln_die' 'true || ln_die'
-mut $L 'ln_siteroot accepts a symlinked site root' '[ "$real" = "/home/$1/domains/$2" ] || ln_die' 'true || ln_die'
 mut $L 'ln_need_root dropped' '[ "$(id -u)" -eq 0 ] || ln_die "must run as root"' ':'
-mut $L 'ln_newuser accepts a leading dash' '[[ $v != -* ]] || ln_die "invalid user name"' ':'
-mut $L 'ln_newuser accepts the panel user name' '[ "$s" != laranode_ln ] || ln_die "reserved user name"' ':'
 mut $L 'ln_ident accepts any text' '[[ $1 =~ ^[A-Za-z0-9_]{1,64}$ ]] || ln_die "invalid identifier"' ':'
 # --- per-script --------------------------------------------------------------------------
 mut bin/laranode-update-sh-password.sh 'update-sh-password: user not validated' 'ln_sysuser "$1" SYSTEM_USER' 'SYSTEM_USER="$1"'
 mut bin/laranode-update-sh-password.sh 'update-sh-password: password not validated' 'ln_secret "$2" NEW_PASSWORD' 'NEW_PASSWORD="$2"'
 mut bin/laranode-user-manager.sh 'user-manager: password not validated' 'ln_secret "$4" PASSWORD' 'PASSWORD="$4"'
 mut bin/laranode-user-manager.sh 'user-manager: delete accepts any existing user' 'ln_sysuser "$1" USERNAME ' 'USERNAME="$1" #'
-mut bin/laranode-restore-files.sh 'restore-files: user not validated' 'ln_sysuser "$3" SYS_USER' 'SYS_USER="$3"'
 mut bin/laranode-create-directory.sh 'create-directory: user not validated' 'ln_sysuser "$2" SYSTEM_USER' 'SYSTEM_USER="$2"'
 mut bin/laranode-postgres.sh 'postgres: administrative roles allowed' 'postgres|pg_*|replicator|rdsadmin|root) die "Refusing reserved role."' '__never__) die "Refusing reserved role."'
 mut bin/laranode-postgres.sh 'postgres: system databases allowed' 'postgres|template0|template1) die "Refusing system database."' '__never__) die "Refusing system database."'
@@ -65,13 +62,10 @@ mut bin/laranode-ufw.sh 'ufw: unknown sub-command accepted' '*) ln_die "unknown 
 mut bin/laranode-ufw.sh 'ufw: delete accepts any first word' 'case "$1" in allow|deny) : ;; *) ln_die "invalid rule" ;; esac' ':'
 mut bin/laranode-ufw.sh 'ufw: extra arguments accepted on status' 'status)          ln_argc 1 1 "$0 status";           exec ufw status ;;' 'status)          exec ufw status "$@" ;;'
 mut etc/sudoers.d/laranode-ufw 'sudoers: ufw binary grant back' '' 'www-data ALL=(ALL) NOPASSWD: /usr/sbin/ufw'
-mut bin/laranode-file-permissions.sh 'file-permissions: symlink target allowed' '[ ! -L "$TARGET_PATH" ] || ln_die "refusing a symlink"' ':'
-mut bin/laranode-file-permissions.sh 'file-permissions: ".." allowed' '[[ $REL =~ (^|/)\.\.(/|$) ]] && ln_die "invalid path"' ':'
 # --- layout / permissions / sudoers -----------------------------------------------------
 mut bin/laranode-installer.sh 'installer: panel dirs left group-writable' 'find "$h" -type d -exec chmod 750 {} +' 'find "$h" -type d -exec chmod 770 {} +'
 mut bin/laranode-installer.sh 'installer: panel files group-writable' 'find "$h" -type f -exec chmod 640 {} +' 'find "$h" -type f -exec chmod 660 {} +'
 mut bin/laranode-installer.sh 'installer: .env group-writable' '[ -f "$p/.env" ] && chmod 640 "$p/.env"' '[ -f "$p/.env" ] && chmod 660 "$p/.env"'
-mut bin/laranode-sync-scripts.sh 'sync: script copy owned by www-data' '-o root -g root -m 755 -- "$f" "$STAGE/bin/$b"' '-o www-data -g root -m 755 -- "$f" "$STAGE/bin/$b"'
 mut bin/laranode-sync-scripts.sh 'sync: script copy group-writable' '-o root -g root -m 755 -- "$f" "$STAGE/bin/$b"' '-o root -g root -m 775 -- "$f" "$STAGE/bin/$b"'
 mut bin/laranode-sync-scripts.sh 'sync: lib copy world-writable' '-o root -g root -m 644 -- "$f" "$STAGE/lib/' '-o root -g root -m 666 -- "$f" "$STAGE/lib/'
 mut etc/sudoers.d/laranode-panel 'sudoers: rm glob grant back' '' 'www-data ALL=(ALL) NOPASSWD: /usr/bin/rm /etc/apache2/sites-available/*.conf'
@@ -96,7 +90,7 @@ run_one() {   # idx
     if [ -z "$old" ]; then
         content+="$new"$'\n'
     elif [[ $content == *"$old"* ]]; then
-        content=${content/"$old"/"$new"}
+        content=${content//"$old"/"$new"}
     else
         echo "NOAPPLY|$name" >"$dir/result"; return
     fi

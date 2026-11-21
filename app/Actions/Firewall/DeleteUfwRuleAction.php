@@ -20,7 +20,7 @@ class DeleteUfwRuleAction
         }
         $proc = UfwCommand::run($args);
         if ($proc->failed()) {
-            throw new RuntimeException('UFW delete failed: ' . $proc->errorOutput());
+            throw new RuntimeException('UFW delete failed: '.$proc->errorOutput());
         }
     }
 }

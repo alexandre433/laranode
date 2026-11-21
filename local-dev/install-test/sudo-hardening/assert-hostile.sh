@@ -33,6 +33,7 @@ fx_reset() {
         usermod -aG "$u" www-data
     done
     getent passwd svc_ln >/dev/null || useradd -u 501 -M -s /usr/sbin/nologin svc_ln   # uid < 1000
+    getent passwd evilhome_ln >/dev/null || useradd -M -d /var/evilhome -s /usr/sbin/nologin evilhome_ln   # uid >= 1000 but home is not /home/evilhome_ln
     mkdir -p /home/alice_ln/domains/example.com/public /home/bob_ln/domains/example.org/public
     echo '<?php' > /home/alice_ln/domains/example.com/public/index.php
     chown -R alice_ln:alice_ln /home/alice_ln; chown -R bob_ln:bob_ln /home/bob_ln
@@ -89,7 +90,7 @@ world_restore() {
 # ── values ──────────────────────────────────────────────────────────────────────────
 # V_<kind> = the valid value PHP sends; H_<kind> = hostile values for that position.
 NL=$'\n'
-HUSER=( root root_ln '../../etc/x' 'alice_ln x' "alice_ln${NL}root:Pwned" 'a;id' '-n' '*' nobody postgres '' 'alice_ln/..' '$(id)' svc svc_ln laranode_ln_x ../alice_ln )
+HUSER=( evilhome_ln root root_ln '../../etc/x' 'alice_ln x' "alice_ln${NL}root:Pwned" 'a;id' '-n' '*' nobody postgres '' 'alice_ln/..' '$(id)' svc svc_ln laranode_ln_x ../alice_ln )
 V_user=alice;   H_user=( "${HUSER[@]}" )
 V_userln=alice_ln; H_userln=( "${HUSER[@]}" )
 # pool removal runs AFTER the account is gone (DeleteAccountService), so it accepts any well-formed
@@ -150,6 +151,9 @@ V_delete=delete; H_delete=( bogus -x "delete${NL}x" '' )
 V_sslroot=/home/alice_ln/domains/example.com/public
 H_sslroot=( /etc '/home/alice_ln/domains/example.com/../../../../etc' /home/bob_ln/domains/example.org/public /home/alice_ln/domains/other.com/public relative "/home/alice_ln/domains/example.com/a${NL}b" '/home/alice_ln/domains/example.com/a b' -x '/home/alice_ln/domains/linketc' )
 V_crontmp=/tmp/laranode_cron_pos; H_crontmp=( /etc/passwd /nonexistent '' -x )
+V_pgcd=create-db; H_pgcd=( bogus -x '' 'create-db;id' )
+V_pgenc=UTF8;     H_pgenc=( "UTF8';--" "UTF8${NL}x" 'UTF 8' 'UTF8;id' )
+V_pgloc=en_US.UTF-8; H_pgloc=( 'en US' "en_US.UTF-8${NL}x" "en_US'x" 'a;b' )
 V_ufwrule=22/tcp
 H_ufwrule=( '22;id' -x --force '$(id)' "22/tcp${NL}x" 'a b' 99999999 22/tcp/x '' 'x y z' '*' '22/tcp;id' '/etc/passwd' )
 V_ufwallow=allow; H_ufwallow=( bogus -x '' 'allow;id' "allow${NL}x" --force )
@@ -193,6 +197,7 @@ SPECS=(
  'ssl-remove|laranode-ssl-manager.sh|root|remove domain|true'
  'ssl-generate|laranode-ssl-manager.sh|root|generate domain email sslroot|grep -q "certbot certonly" /var/log/laranode-stub.log'
  'remove-vhost|laranode-remove-vhost.sh|root|domain|[ ! -e /etc/apache2/sites-available/example.com.conf ]'
+ 'pg-create-db|laranode-postgres.sh|root|pgcd dbname pgenc pgloc|grep -q "^psql" /var/log/laranode-stub.log'
  'ufw-status|laranode-ufw.sh|root|ufwst|grep -q "^ufw status" /var/log/laranode-stub.log'
  'ufw-status-numbered|laranode-ufw.sh|root|ufwstn|grep -q "^ufw status numbered" /var/log/laranode-stub.log'
  'ufw-show-added|laranode-ufw.sh|root|ufwsa|grep -q "^ufw show added" /var/log/laranode-stub.log'
@@ -312,11 +317,26 @@ for spec in "${SPECS[@]}"; do
     done
 done
 for vec in "${VECTORS[@]}"; do
-    IFS="$SEP" read -ra A <<<"$vec"
-    [ "${vec: -1}" = "$SEP" ] && A+=("")
+    # split on SEP by hand: `read` stops at the first newline, which would silently turn the
+    # newline-injection vectors into valid, shorter commands
+    A=(); rest="$vec$SEP"
+    while [ -n "$rest" ]; do A+=("${rest%%"$SEP"*}"); rest=${rest#*"$SEP"}; done
     s="${A[0]}"; selected "$s" || continue
     [ -e "$BIN/$s" ] || { bad "$s does not exist"; continue; }
     check_hostile "$s(vector)" "$s" root "${A[@]:1}"
+done
+
+# A root script must refuse a caller that is not root (it is only safe behind sudo's allowlist).
+# Run each valid call as www-data WITHOUT sudo: must be refused and change nothing.
+echo "== non-root invocation is refused =="
+for spec in "${SPECS[@]}"; do
+    IFS='|' read -r name script runas kinds oracle <<<"$spec"
+    [ "$runas" = root ] || continue
+    selected "$script" || selected "$name" || continue
+    [ -e "$BIN/$script" ] || continue
+    read -ra K <<<"$kinds"
+    valid=(); for k in "${K[@]}"; do v="V_$k"; valid+=("${!v}"); done
+    check_hostile "$name#direct" "$script" direct "${valid[@]}"
 done
 
 # every script the sudoers grants must be covered above (nothing silently skipped)

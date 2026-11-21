@@ -31,6 +31,7 @@ ln_run() {          # ln_run script-basename args…   (RUNAS=root|www-data)
     local s="$1"; shift
     local -a pre=(sudo -n)
     [ "${RUNAS:-root}" = www-data ] && pre=(sudo -n -u www-data)
+    [ "${RUNAS:-root}" = direct ] && pre=()   # no sudo at all: the script itself must refuse a non-root caller
     timeout 30 runuser -u www-data -- "${pre[@]}" "$(ln_bin_dir)/$s" "$@" </dev/null
 }
 

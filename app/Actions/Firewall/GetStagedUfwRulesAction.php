@@ -2,7 +2,6 @@
 
 namespace App\Actions\Firewall;
 
-
 /**
  * Returns the user-added UFW rules via `ufw show added`.
  *

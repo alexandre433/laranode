@@ -2,7 +2,6 @@
 
 namespace App\Actions\Firewall;
 
-
 class GetUfwRulesAction
 {
     public function execute(): array
@@ -15,7 +14,7 @@ class GetUfwRulesAction
         $lines = preg_split("/\r?\n/", trim($proc->output()));
         $rules = [];
         foreach ($lines as $line) {
-            if (!preg_match('/^\s*\[(\s*\d+)\]\s+(.+?)\s+(ALLOW|DENY)\s+(IN|OUT)\s+(.+)$/i', $line, $m)) {
+            if (! preg_match('/^\s*\[(\s*\d+)\]\s+(.+?)\s+(ALLOW|DENY)\s+(IN|OUT)\s+(.+)$/i', $line, $m)) {
                 continue;
             }
             $number = (int) trim($m[1]);
@@ -32,6 +31,7 @@ class GetUfwRulesAction
                 'from' => $from,
             ];
         }
+
         return $rules;
     }
 }

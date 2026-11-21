@@ -47,6 +47,7 @@ chmod 755 "$STUB/crontab"
 mkdir -p /run/php /var/www /etc/mysql /etc/laranode
 
 # accounts the panel owns / the host already has
+getent passwd postgres >/dev/null || useradd -r -m -s /bin/sh postgres   # `sudo -u postgres psql` reaches the psql stub
 useradd -m -s /bin/bash laranode_ln 2>/dev/null || true
 usermod -aG laranode_ln www-data
 chmod 750 /home/laranode_ln

@@ -227,7 +227,7 @@ test('laranode-cron.sh rejects disallowed command in tmp file', function () {
     expect($result['exitCode'])->not->toBe(0);
     // Either allowlist rejection or user-not-found — both are non-zero; on a system with
     // testuser_ln the allowlist message fires; on a dev machine the user check fires.
-    expect($result['error'])->toMatch('/command not allowed|does not exist/');
+    expect($result['error'])->toMatch('/command not allowed|does not exist|no such user/');
 });
 
 test('laranode-cron.sh rejects crontab line with embedded newline injection', function () {

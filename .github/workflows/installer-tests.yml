@@ -47,6 +47,14 @@ jobs:
       - name: installed perms + hostile arguments for every sudo'd script
         run: bash local-dev/install-test/sudo-hardening/run-fast.sh
 
+  mutation-smoke-sudo:
+    name: mutation smoke, sudo guards (each guard must go red)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: JOBS=4 bash local-dev/install-test/mutation-smoke-sudo.sh
+
   mutation-smoke:
     name: mutation smoke (each guard must go red)
     runs-on: ubuntu-latest
