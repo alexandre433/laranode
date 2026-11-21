@@ -1443,6 +1443,21 @@ phase_services() {
   _refresh_service apache2 "$APACHE_OWNED"
   _refresh_service php8.4-fpm "$PHPFPM_OWNED"
   write_service_manifest
+  _install_sleep_wake
+}
+
+# _install_sleep_wake — optional service sleep/wake (OFF until an admin enables it on the
+# Power page). Installs the sudoers drop-in and registers ONLY what the manifest above
+# lists as managed:true, so pre-existing services are never manageable.
+_install_sleep_wake() {
+  local src="${PANEL_PATH}/laranode-scripts/etc/sudoers.d/laranode-sleep"
+  if [ -f "$src" ] && visudo -c -f "$src" >/dev/null 2>&1; then
+    install -m 440 "$src" /etc/sudoers.d/laranode-sleep
+    bash "${PANEL_PATH}/laranode-scripts/bin/laranode-managed-register.sh" reverb queue fpm hostdb \
+      || warn "sleep/wake registration failed; the feature stays unavailable"
+  else
+    warn "laranode-sleep sudoers missing or failed syntax check; sleep/wake feature skipped"
+  fi
 }
 
 # ==============================================================================
