@@ -136,6 +136,10 @@ t "CloudPanel host -> Reverb 8081"                pf_clp_reverb
 t "CloudPanel host binds 127.0.0.1 by default"    pf_clp_bind
 t "plain host + :80 busy -> 8080 and Reverb 8081" pf_plain_80busy
 t ":8080 held by another service -> Reverb 8081"  pf_8080_busy
+pf_80_explicit_apache() { base; port_in_use() { [ "$1" = 80 ]; }; ss() { echo 'LISTEN 0 511 *:80 *:* users:(("apache2",pid=1,fd=4))'; }; export LARANODE_HTTP_PORT=80; preflight; expect HTTP_PORT "$HTTP_PORT" 80; }
+pf_80_explicit_nginx()  { base; port_in_use() { [ "$1" = 80 ]; }; ss() { echo 'LISTEN 0 511 *:80 *:* users:(("nginx",pid=1,fd=4))'; }; export LARANODE_HTTP_PORT=80; preflight; }
+t  "explicit LARANODE_HTTP_PORT=80 kept when Apache already holds :80 (re-run)" pf_80_explicit_apache
+tf "explicit LARANODE_HTTP_PORT=80 refused when nginx holds :80"                pf_80_explicit_nginx
 
 # ---- apt_install: refuses removals / host-stack upgrades --------------------
 echo "=== apt_install guard ==="
@@ -263,6 +267,8 @@ t "re-run does not duplicate the Listen line"                    ports_idempoten
 t ":443 held by another service: 'Listen 443' disabled"          ports_443_busy
 t ":443 free: Apache's own 'Listen 443' kept"                    ports_443_free
 t ":443 held by Apache itself (re-run): 'Listen 443' kept"       ports_443_own
+ports_443_pve_free() { ports_run :; HTTP_PORT=80 BIND_ADDR=127.0.0.1; IS_PROXMOX=1; _apache_ports_conf "$p"; ! grep -qE '^[[:space:]]*Listen 443' "$p" && grep -q 'reserved on Proxmox' "$p"; }
+t ":443 free on a Proxmox host: 'Listen 443' still disabled (reserved)" ports_443_pve_free
 
 # ---- firewall policy ---------------------------------------------------------
 echo "=== _configure_firewall ==="

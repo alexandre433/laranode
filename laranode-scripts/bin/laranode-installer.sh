@@ -285,7 +285,9 @@ preflight() {
         die "Port ${HTTP_PORT} is reserved by Proxmox/SSH on this host — choose another LARANODE_HTTP_PORT." ;;
     esac
   fi
-  if [ "$port80_free" = 0 ] && [ "$HTTP_PORT" = 80 ]; then
+  # An explicit :80 is honoured when Apache already holds it (re-run / shared Apache:
+  # the panel just adds its vhost). Any other holder makes the install impossible.
+  if [ "$port80_free" = 0 ] && [ "$HTTP_PORT" = 80 ] && [ "$port80_holder" != "apache2" ]; then
     die ":80 is held by ${port80_holder} — pick another LARANODE_HTTP_PORT."
   fi
 
@@ -680,7 +682,11 @@ _apache_ports_conf() {
     printf 'Listen %s\n' "${_listen}" >> "$ports_conf"
   fi
 
-  if port_in_use 443 && ! ss -tlnp '( sport = :443 )' 2>/dev/null | grep -q apache2; then
+  if [ "${IS_PROXMOX:-0}" = 1 ]; then
+    # :443 is reserved on a Proxmox host (reverse proxies, tailnet serve): never grab it
+    # with a wildcard listener, even while it happens to be free.
+    sed -i -E 's/^([[:space:]]*)Listen[[:space:]]+443([[:space:]]+https)?[[:space:]]*$/\1# laranode: :443 reserved on Proxmox, disabled: Listen 443\2/' "$ports_conf"
+  elif port_in_use 443 && ! ss -tlnp '( sport = :443 )' 2>/dev/null | grep -q apache2; then
     sed -i -E 's/^([[:space:]]*)Listen[[:space:]]+443([[:space:]]+https)?[[:space:]]*$/\1# laranode: :443 busy, disabled: Listen 443\2/' "$ports_conf"
     warn ":443 is in use on this host — Apache's 'Listen 443' disabled; panel stays HTTP-only (use the SSH tunnel)."
   fi
