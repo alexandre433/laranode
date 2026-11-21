@@ -3,6 +3,24 @@
 // Reverb's periodic ConfigApplicationProvider::all() calls findById($app['app_id']) for every
 // configured app. An app whose id env var is unset (the optional ESP32 / SMARTH apps) made it throw
 // a TypeError and the websocket server crashed about once a minute, dropping every live connection.
+const REVERB_ID_ENV = ['REVERB_APP_ID', 'REVERB_ESP32_APP_ID', 'REVERB_SMARTH_APP_ID'];
+
+beforeEach(function () {
+    $this->savedReverbEnv = [];
+    foreach (REVERB_ID_ENV as $k) {
+        $this->savedReverbEnv[$k] = [getenv($k), $_ENV[$k] ?? null, $_SERVER[$k] ?? null];
+    }
+});
+
+// the second test unsets the ids: put them back so no other test sees a changed environment
+afterEach(function () {
+    foreach ($this->savedReverbEnv as $k => [$proc, $env, $server]) {
+        $proc === false ? putenv($k) : putenv("$k=$proc");
+        $env === null ? null : $_ENV[$k] = $env;
+        $server === null ? null : $_SERVER[$k] = $server;
+    }
+});
+
 test('every configured reverb app has an id', function () {
     $apps = config('reverb.apps.apps');
 
@@ -13,9 +31,7 @@ test('every configured reverb app has an id', function () {
 });
 
 test('an app whose id is not configured is not registered', function () {
-    config()->set('reverb.apps.apps', []);
-    $env = ['REVERB_APP_ID' => null, 'REVERB_ESP32_APP_ID' => null, 'REVERB_SMARTH_APP_ID' => null];
-    foreach ($env as $k => $v) {
+    foreach (REVERB_ID_ENV as $k) {
         putenv($k);
         unset($_ENV[$k], $_SERVER[$k]);
     }
