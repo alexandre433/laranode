@@ -10,10 +10,9 @@
 # the same build works on Ubuntu 24.04 and Debian 13.
 #
 # Usage: laranode-managed-register.sh <reverb|queue|fpm|hostdb> [...]
-#   When the installer wrote $DIR/service-manifest.json, that manifest is the source of
-#   truth: a key is registered only if the manifest lists its service as managed:true
-#   (installed by Laranode). Without a manifest (older installer) hostdb falls back to
-#   LARANODE_DB_INSTALLED_BY_US=1.
+#   $DIR/service-manifest.json (written by the installer) is the source of truth and is
+#   REQUIRED: a key is registered only if the manifest lists its service as managed:true
+#   (installed by Laranode). No manifest = nothing is registered (fail closed).
 #
 set -uo pipefail
 
@@ -49,7 +48,8 @@ manifest_allows() {
     grep -F '"managed":true' "$MANIFEST" | grep -qF "\"role\":\"$1\""
 }
 manifest_gate() { # role key ; returns 1 (and says why) when the manifest does not back it
-    have_manifest || return 0
+    # FAIL CLOSED: no manifest = nothing proves Laranode installed the service
+    have_manifest || { echo "skip $2: no service manifest ($MANIFEST): cannot prove Laranode installed it (never managed)" >&2; return 1; }
     manifest_allows "$1" && return 0
     echo "skip $2: service manifest lists no Laranode-installed '$1' service (external, never managed)" >&2
     return 1
@@ -61,10 +61,23 @@ register_reverb() {
     local port
     port=$(env_value REVERB_SERVER_PORT 8080)
     [[ $port =~ ^[0-9]{1,5}$ ]] || port=8080
+    # Where Reverb itself listens (the installer sets REVERB_SERVER_HOST=127.0.0.1 on Proxmox /
+    # CloudPanel hosts; config/reverb.php defaults to 0.0.0.0). The sleep socket must bind
+    # exactly there, so enabling sleep can never expose a loopback-only Reverb.
+    local host o
+    host=$(env_value REVERB_SERVER_HOST 0.0.0.0)
+    [ "$host" = localhost ] && host=127.0.0.1
+    if [[ $host =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        for o in ${host//./ }; do [ "$((10#$o))" -le 255 ] || host=""; done
+    else
+        host=""
+    fi
+    [ -n "$host" ] || { echo "skip reverb: REVERB_SERVER_HOST is not a plain IPv4 address (cannot mirror its bind safely)" >&2; return 0; }
     write_entry reverb <<EOF
 kind=reverb
 unit=laranode-reverb.service
 public_port=$port
+bind_host=$host
 EOF
 }
 
@@ -84,25 +97,27 @@ kind=fpm
 EOF
 }
 
+# aa_state: none | enforced | unknown. Root can read the kernel profile list; the panel cannot, so the
+# verdict is recorded here for the Power page. laranode-sleep.sh re-checks it on every enable/wake.
+aa_state() {
+    local en="" enabled=${LARANODE_AA_ENABLED:-/sys/module/apparmor/parameters/enabled}
+    local profiles=${LARANODE_AA_PROFILES:-/sys/kernel/security/apparmor/profiles}
+    [ -r "$enabled" ] && en=$(tr -d '[:space:]' < "$enabled" 2>/dev/null)
+    [ "$en" = Y ] || { echo none; return; }
+    [ -r "$profiles" ] || { echo unknown; return; }
+    if grep -Eq '(^|/)(mysqld|mariadbd)[[:space:]]+[(]enforce[)]$' "$profiles" 2>/dev/null; then echo enforced; else echo none; fi
+}
+
 register_hostdb() {
-    if have_manifest; then
-        manifest_gate database hostdb || return 0
-    elif [ "${LARANODE_DB_INSTALLED_BY_US:-0}" != 1 ]; then
-        echo "skip hostdb: database was not installed by Laranode (external, never managed)" >&2
-        return 0
-    fi
+    manifest_gate database hostdb || return 0
     local engine unit sock cnf mfunit=""
-    if have_manifest; then
-        # pin to the exact unit the installer recorded for the database it installed, so a
-        # pre-existing MySQL next to a Laranode-installed PostgreSQL is never picked up
-        mfunit=$(grep -F '"managed":true' "$MANIFEST" | grep -F '"role":"database"' | sed -n 's/.*"unit":"\([^"]*\)".*/\1/p' | head -1)
-        [[ $mfunit =~ ^(mysql|mariadb|mysqld)\.service$ ]] || { echo "skip hostdb: manifest database unit '$mfunit' is not MySQL/MariaDB" >&2; return 0; }
-        systemctl cat "$mfunit" >/dev/null 2>&1 || { echo "skip hostdb: $mfunit not found" >&2; return 0; }
-        unit=$mfunit
-        case $mfunit in mariadb.service) engine=mariadb ;; *) engine=mysql ;; esac
-    elif systemctl cat mariadb.service >/dev/null 2>&1; then engine=mariadb; unit=mariadb.service
-    elif systemctl cat mysql.service >/dev/null 2>&1; then engine=mysql; unit=mysql.service
-    else echo "skip hostdb: no MySQL/MariaDB unit found" >&2; return 0; fi
+    # pin to the exact unit the installer recorded for the database it installed, so a
+    # pre-existing MySQL next to a Laranode-installed PostgreSQL is never picked up
+    mfunit=$(grep -F '"managed":true' "$MANIFEST" | grep -F '"role":"database"' | sed -n 's/.*"unit":"\([^"]*\)".*/\1/p' | head -1)
+    [[ $mfunit =~ ^(mysql|mariadb|mysqld)\.service$ ]] || { echo "skip hostdb: manifest database unit '$mfunit' is not MySQL/MariaDB" >&2; return 0; }
+    systemctl cat "$mfunit" >/dev/null 2>&1 || { echo "skip hostdb: $mfunit not found" >&2; return 0; }
+    unit=$mfunit
+    case $mfunit in mariadb.service) engine=mariadb ;; *) engine=mysql ;; esac
     # canonical unit (mysql.service is an alias of mariadb.service on Debian)
     unit=$(systemctl show -p Id --value "$unit" 2>/dev/null || echo "$unit")
     [[ $unit =~ ^(mysql|mariadb|mysqld)\.service$ ]] || { echo "skip hostdb: unexpected unit $unit" >&2; return 0; }
@@ -124,6 +139,7 @@ public_port=3306
 public_socket=$sock
 cnf_dir=$cnf
 panel_env=$PANEL_ENV
+apparmor=$(aa_state)
 EOF
 }
 

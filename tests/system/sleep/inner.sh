@@ -82,15 +82,26 @@ ExecStart=/bin/sleep infinity
 EOF
 systemctl daemon-reload && systemctl start ln-decoy-external.service
 
-LARANODE_DB_INSTALLED_BY_US=1 bash "$REGISTER" reverb queue fpm hostdb
-echo "--- registry:"; head -20 /etc/laranode/managed.d/*.conf
-
-# ─── 0. installer manifest is the source of truth (real root, real systemctl) ─────
 MF=/etc/laranode/service-manifest.json
 write_manifest() { # php-managed(true|false)
+    mkdir -p /etc/laranode
     printf '{"version":1,"services":[\n{"unit":"laranode-reverb.service","managed":true,"role":"reverb","reason":"t"},\n{"unit":"laranode-queue-worker.service","managed":true,"role":"queue","reason":"t"},\n{"unit":"php8.4-fpm.service","managed":%s,"role":"php","reason":"t"},\n{"unit":"%s","managed":true,"role":"database","reason":"t"}\n]}\n' "$1" "$DBUNIT" > "$MF"
     chmod 644 "$MF"
 }
+
+# The manifest is REQUIRED (fail closed): with none, register adds nothing and sleep.sh refuses
+rm -f "$MF"
+bash "$REGISTER" reverb queue fpm hostdb >/dev/null 2>&1
+check "no manifest: register registers NOTHING (even with the old LARANODE_DB_INSTALLED_BY_US=1)" bash -c "LARANODE_DB_INSTALLED_BY_US=1 bash '$REGISTER' reverb queue fpm hostdb >/dev/null 2>&1; [ -z \"\$(ls /etc/laranode/managed.d 2>/dev/null)\" ]"
+printf 'kind=reverb\nunit=laranode-reverb.service\npublic_port=8080\nbind_host=0.0.0.0\n' > /etc/laranode/managed.d/reverb.conf
+check "no manifest: a registry entry alone is refused (exit 3, nothing touched)" bash -c "[ \"\$($SLEEP reverb enable 1 >/tmp/ln-last.out 2>&1; echo \$?)\" = 3 ] && grep -q manifest /tmp/ln-last.out && ! systemctl is-active --quiet laranode-sleep-reverb.socket"
+rm -f /etc/laranode/managed.d/reverb.conf
+
+write_manifest true
+bash "$REGISTER" reverb queue fpm hostdb
+echo "--- registry:"; head -20 /etc/laranode/managed.d/*.conf
+
+# ─── 0. installer manifest is the source of truth (real root, real systemctl) ─────
 write_manifest false
 check "manifest: pre-existing php-fpm (managed:false) -> fpm enable refused (exit 3)" test "$(run "$SLEEP" fpm enable 1)" = 3
 mv /etc/laranode/managed.d/fpm.conf /tmp/fpm.conf.bak
@@ -206,6 +217,85 @@ sleep 1
 check "full cycle leaves units/pools/enablement byte-identical" test "$(snapshot)" = "$BASE"
 check "db awake and usable after disable" test "$($CLI -h127.0.0.1 -uspk -ppw -N -e 'select count(*) from spikedb.t' 2>/dev/null)" = 1
 check "decoy external service still untouched" systemctl is-active --quiet ln-decoy-external.service
+
+# ─── 6b. loopback-only Reverb: the installer binds Reverb to 127.0.0.1 on Proxmox/CloudPanel ──
+# (REVERB_SERVER_HOST). Sleep must NOT widen that: the socket listens exactly where Reverb did.
+printf 'DB_CONNECTION=sqlite\nREVERB_SERVER_HOST=127.0.0.1\nREVERB_SERVER_PORT=8083\n' > "$PANEL/.env"
+bash "$REGISTER" reverb >/dev/null 2>&1
+check "loopback: register records bind_host=127.0.0.1 from REVERB_SERVER_HOST" grep -qx 'bind_host=127.0.0.1' /etc/laranode/managed.d/reverb.conf
+check "loopback: reverb enable" test "$(run "$SLEEP" reverb enable 1)" = 0
+sleep 1
+only_loopback() { # port : at least one listener and EVERY listener is 127.0.0.1:<port>
+    local all bad
+    all=$(ss -ltnH "sport = :$1" | awk '{print $4}')
+    [ -n "$all" ] || return 1
+    bad=$(printf '%s\n' "$all" | grep -vxF "127.0.0.1:$1")
+    [ -z "$bad" ]
+}
+check "loopback: socket unit says ListenStream=127.0.0.1:8083" grep -qx 'ListenStream=127.0.0.1:8083' "$UNITS/laranode-sleep-reverb.socket"
+check "loopback: only 127.0.0.1:8083 is listening while asleep (no 0.0.0.0, no [::])" only_loopback 8083
+EXTIP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.' | grep -v '^127\.' | head -1)
+if [ -n "$EXTIP" ]; then
+    check "loopback: NOT reachable on the host's external address $EXTIP" bash -c "! timeout 5 bash -c 'exec 3<>/dev/tcp/$EXTIP/8083' 2>/dev/null"
+else echo "SKIP  loopback: container has no non-loopback IPv4 address"; fi
+check "loopback: a loopback connect still wakes Reverb" test "$(http_get 8083 2>/dev/null)" = 200
+check "loopback: only 127.0.0.1:8083 is listening after wake too" only_loopback 8083
+check "loopback: reverb disable" test "$(run "$SLEEP" reverb disable)" = 0
+sed -i '/^bind_host=/d' /etc/laranode/managed.d/reverb.conf
+check "registry without bind_host (old register) is refused, never widened to all interfaces (exit 3)" test "$(run "$SLEEP" reverb enable 1)" = 3
+check "…and the message points at the register script" grep -q 'bind_host' /tmp/ln-last.out
+check "…and no socket was left behind" bash -c "! ss -ltn 'sport = :8083' | grep -q LISTEN"
+printf 'DB_CONNECTION=sqlite\nREVERB_SERVER_HOST=0.0.0.0\nREVERB_SERVER_PORT=8080\n' > "$PANEL/.env"
+bash "$REGISTER" reverb >/dev/null 2>&1
+check "default/all-interfaces host registers bind_host=0.0.0.0" grep -qx 'bind_host=0.0.0.0' /etc/laranode/managed.d/reverb.conf
+printf 'DB_CONNECTION=sqlite\nREVERB_SERVER_PORT=8080\n' > "$PANEL/.env"
+bash "$REGISTER" reverb >/dev/null 2>&1
+check "REVERB_SERVER_HOST unset registers the config default bind_host=0.0.0.0" grep -qx 'bind_host=0.0.0.0' /etc/laranode/managed.d/reverb.conf
+printf 'DB_CONNECTION=sqlite\nREVERB_SERVER_HOST=::1\nREVERB_SERVER_PORT=8080\n' > "$PANEL/.env"
+rm -f /etc/laranode/managed.d/reverb.conf
+bash "$REGISTER" reverb >/dev/null 2>&1
+check "an IPv6/odd REVERB_SERVER_HOST is not registered (cannot mirror it safely), so it can never be widened" test ! -e /etc/laranode/managed.d/reverb.conf
+printf 'DB_CONNECTION=sqlite\nREVERB_SERVER_PORT=8080\n' > "$PANEL/.env"
+bash "$REGISTER" reverb >/dev/null 2>&1
+sleep 1
+check "loopback section leaves units/pools/enablement byte-identical" test "$(snapshot)" = "$BASE"
+
+# ─── 6c. AppArmor: hostdb sleep is refused when an enforced mysqld/mariadbd profile exists ───
+# Ubuntu's mysqld profile only allows /run/mysqld/, so the moved socket would be denied and the
+# DB would not start on wake. The kernel enforcement itself cannot run in a container (no
+# AppArmor); here we prove the DECISION logic against injected kernel files, plus the real state.
+echo "INFO  apparmor in this container: enabled=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null || echo n/a) profiles=$(cat /sys/kernel/security/apparmor/profiles 2>/dev/null | wc -l) /etc/apparmor.d/usr.sbin.mysqld=$([ -e /etc/apparmor.d/usr.sbin.mysqld ] && echo present || echo absent)"
+AAD=/tmp/ln-aa; mkdir -p $AAD
+echo Y > $AAD/enabled
+printf 'unconfined\n/usr/sbin/mysqld (enforce)\nlsb_release (enforce)\n' > $AAD/profiles-enforced
+printf '/usr/sbin/mysqld (complain)\n' > $AAD/profiles-complain
+printf '/usr/sbin/cupsd (enforce)\n' > $AAD/profiles-other
+echo N > $AAD/disabled
+aa_run() { # enabled-file profiles-file action...
+    local e=$1 p=$2; shift 2
+    LARANODE_SLEEP_TEST=1 LARANODE_AA_ENABLED=$e LARANODE_AA_PROFILES=$p "$SLEEP" hostdb "$@" >/tmp/ln-last.out 2>&1; echo $?
+}
+check "apparmor enforced mysqld profile: hostdb enable refused (exit 3)" test "$(aa_run $AAD/enabled $AAD/profiles-enforced enable 1)" = 3
+check "…message names AppArmor" grep -q 'AppArmor' /tmp/ln-last.out
+check "…database untouched (still active, no proxy units)" bash -c "systemctl is-active $DBUNIT >/dev/null && [ ! -e $UNITS/laranode-sleep-hostdb.socket ]"
+check "apparmor enforced: hostdb wake refused too (a stale enabled state cannot start a doomed DB)" test "$(aa_run $AAD/enabled $AAD/profiles-enforced wake)" = 3
+check "…and it is the AppArmor gate speaking (not the sleep-not-enabled refusal)" grep -q AppArmor /tmp/ln-last.out
+check "apparmor enabled but profile list unreadable: refused (cannot prove it safe)" test "$(aa_run $AAD/enabled /nonexistent enable 1)" = 3
+check "apparmor complain-mode profile does not deny: hostdb enable allowed" test "$(aa_run $AAD/enabled $AAD/profiles-complain enable 1)" = 0
+check "…and disable restores" test "$(aa_run $AAD/enabled $AAD/profiles-complain disable)" = 0
+check "apparmor off (profile list irrelevant): hostdb enable allowed" test "$(aa_run $AAD/disabled $AAD/profiles-enforced enable 1)" = 0
+check "…and disable restores" test "$(aa_run $AAD/disabled $AAD/profiles-enforced disable)" = 0
+check "db awake and usable after the AppArmor checks" test "$($CLI -h127.0.0.1 -uspk -ppw -N -e 'select count(*) from spikedb.t' 2>/dev/null)" = 1
+# register records the verdict for the Power page
+rm -f /etc/laranode/managed.d/hostdb.conf
+LARANODE_AA_ENABLED=$AAD/enabled LARANODE_AA_PROFILES=$AAD/profiles-enforced bash "$REGISTER" hostdb >/dev/null 2>&1
+check "register records apparmor=enforced for the Power page" grep -qx 'apparmor=enforced' /etc/laranode/managed.d/hostdb.conf
+LARANODE_AA_ENABLED=$AAD/enabled LARANODE_AA_PROFILES=$AAD/profiles-other bash "$REGISTER" hostdb >/dev/null 2>&1
+check "register records apparmor=none when no mysqld profile is enforced" grep -qx 'apparmor=none' /etc/laranode/managed.d/hostdb.conf
+LARANODE_AA_ENABLED=$AAD/enabled LARANODE_AA_PROFILES=/nonexistent bash "$REGISTER" hostdb >/dev/null 2>&1
+check "register records apparmor=unknown when AppArmor is on but unreadable" grep -qx 'apparmor=unknown' /etc/laranode/managed.d/hostdb.conf
+bash "$REGISTER" hostdb >/dev/null 2>&1   # real kernel state of this container
+check "snapshot unchanged after the AppArmor checks" test "$(snapshot)" = "$BASE"
 
 # ─── 7. php-fpm sandbox: the panel runs us under ProtectSystem=full (/etc read-only) ───
 # systemd-run -p ProtectSystem=full reproduces what a sudo child of php-fpm inherits.

@@ -46,6 +46,11 @@ class SleepStatusService
             if ($this->guard->sharesInstance($entry)) {
                 return 'panel_db';
             }
+            // Recorded by laranode-managed-register.sh (root can read the AppArmor profile list, the
+            // panel cannot). The script re-checks at run time; this is only the early, honest answer.
+            if (($entry['apparmor'] ?? 'none') !== 'none') {
+                return 'apparmor';
+            }
         }
 
         return null;

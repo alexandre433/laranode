@@ -13,6 +13,7 @@ const STATE_BADGE = {
 
 const REASON_TEXT = {
     panel_db: 'cannot sleep: panel DB',
+    apparmor: 'cannot sleep: AppArmor profile blocks the moved DB socket',
     unsupported_engine: 'cannot sleep: only MySQL/MariaDB can sleep',
     external: 'external service, never managed by Laranode',
 };

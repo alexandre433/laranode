@@ -20,7 +20,10 @@ test.beforeAll(() => {
     // the lab's Reverb can crash-restart (systemd revives it in ~5 s); start from a settled "active"
     lab('for i in $(seq 1 30); do systemctl is-active --quiet laranode-reverb.service && sleep 2 && systemctl is-active --quiet laranode-reverb.service && exit 0; sleep 1; done; exit 1');
     // what the installer does: register only what Laranode installed (sleep stays OFF until toggled)
-    lab(`LARANODE_DB_INSTALLED_BY_US=1 bash ${BIN}/laranode-managed-register.sh reverb queue fpm hostdb`);
+    // The manifest is required (fail closed): the lab is a full Laranode install, so it lists
+    // every service as managed:true (the installer writes this file on a real host).
+    lab(`mkdir -p /etc/laranode && printf '%s\\n' '{"version":1,"services":[' '{"unit":"laranode-reverb.service","managed":true,"role":"reverb","reason":"lab"},' '{"unit":"laranode-queue-worker.service","managed":true,"role":"queue","reason":"lab"},' '{"unit":"php8.4-fpm.service","managed":true,"role":"php","reason":"lab"},' '{"unit":"mysql.service","managed":true,"role":"database","reason":"lab"}' ']}' > /etc/laranode/service-manifest.json && chmod 644 /etc/laranode/service-manifest.json`);
+    lab(`bash ${BIN}/laranode-managed-register.sh reverb queue fpm hostdb`);
 });
 
 test.afterAll(() => {

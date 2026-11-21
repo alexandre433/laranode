@@ -66,12 +66,21 @@ test('refuses to run as a normal user outside test mode', function () {
 });
 
 test('overrides are ignored under sudo (SUDO_UID set): cannot be smuggled in', function () {
+    if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+        $this->markTestSkipped('running as root: the not-privileged exit (4) is unreachable');
+    }
     $this->sbx = sleepSandbox();
-    sleepRegister($this->sbx, 'reverb', ['kind' => 'reverb', 'unit' => 'laranode-reverb.service', 'public_port' => '8080']);
-    $r = runSleep($this->sbx, ['reverb', 'wake'], ['SUDO_UID' => '33']);
-    // not root + sudo marker => refuse (4); as root the real /etc/laranode is used (absent here) => 3
-    expect($r['code'])->toBeIn([3, 4]);
-    expect($r['calls'])->toBe('');
+    // A fully working, ENABLED setup: if the test-mode overrides leaked through sudo the
+    // script would happily act on it (stop the unit, exit 0). Exactly exit 4, no calls.
+    reverbSetup($this->sbx);
+    expect(runSleep($this->sbx, ['reverb', 'enable', '10'])['code'])->toBe(0);
+    file_put_contents("{$this->sbx['root']}/calls.log", '');
+    foreach (['wake', 'sleep', 'disable'] as $action) {
+        $r = runSleep($this->sbx, ['reverb', $action], ['SUDO_UID' => '33']);
+        expect($r['code'])->toBe(4, "reverb {$action}: ".$r['all'])->and($r['calls'])->toBe('');
+    }
+    // the sandboxed state is untouched
+    expect(file_exists("{$this->sbx['root']}/managed/sleep/reverb.state"))->toBeTrue();
 });
 
 // ─── registry gate: only what Laranode registered, never anything pre-existing ───
@@ -158,7 +167,7 @@ test('reverb enable: socket owns the public port, backend moves loopback, units 
     $sock = file_get_contents("{$sd}/laranode-sleep-reverb.socket");
     $svc = file_get_contents("{$sd}/laranode-sleep-reverb.service");
     $drop = file_get_contents("{$sd}/laranode-reverb.service.d/laranode-sleep.conf");
-    expect($sock)->toContain('ListenStream=8080')
+    expect($sock)->toContain('ListenStream=0.0.0.0:8080')->and($sock)->not->toMatch('/^ListenStream=8080$/m')
         ->and($svc)->toContain('systemd-socket-proxyd --exit-idle-time=10min 127.0.0.1:')
         ->and($svc)->toContain('Requires=laranode-reverb.service')
         ->and($drop)->toContain('StopWhenUnneeded=yes')
@@ -168,6 +177,28 @@ test('reverb enable: socket owns the public port, backend moves loopback, units 
     expect($state)->toContain('enabled=1')->and($state)->toContain('idle_minutes=10')->and($state)->toContain('was_enabled=yes');
     // real unit no longer wanted at boot; the socket is
     expect($r['calls'])->toContain('disable laranode-reverb.service')->and($r['calls'])->toContain('enable --now laranode-sleep-reverb.socket');
+});
+
+test('reverb socket listens ONLY where Reverb itself listens (loopback stays loopback)', function () {
+    $this->sbx = sleepSandbox();
+    reverbSetup($this->sbx);
+    sleepRegister($this->sbx, 'reverb', ['kind' => 'reverb', 'unit' => 'laranode-reverb.service', 'public_port' => '8081', 'bind_host' => '127.0.0.1']);
+    $r = runSleep($this->sbx, ['reverb', 'enable', '10']);
+    expect($r['code'])->toBe(0, $r['all']);
+    $sock = file_get_contents("{$this->sbx['root']}/systemd/laranode-sleep-reverb.socket");
+    expect($sock)->toMatch('/^ListenStream=127\.0\.0\.1:8081$/m')
+        ->and($sock)->not->toMatch('/^ListenStream=(0\.0\.0\.0:|\[::\]:)?8081$/m');
+});
+
+test('reverb enable is refused when the registry has no valid bind_host (fail closed, never widen)', function () {
+    $this->sbx = sleepSandbox();
+    reverbSetup($this->sbx);
+    foreach ([null, '', '::', '[::]', 'example.com', '300.1.1.1', '1.2.3.4;id', '127.0.0.1 && id'] as $bad) {
+        sleepRegister($this->sbx, 'reverb', ['kind' => 'reverb', 'unit' => 'laranode-reverb.service', 'public_port' => '8080', 'bind_host' => $bad]);
+        $r = runSleep($this->sbx, ['reverb', 'enable', '10']);
+        expect($r['code'])->toBe(3, 'bind_host='.var_export($bad, true).' '.$r['all'])
+            ->and(file_exists("{$this->sbx['root']}/systemd/laranode-sleep-reverb.socket"))->toBeFalse();
+    }
 });
 
 test('reverb enable is idempotent and updates idle minutes', function () {
@@ -345,4 +376,79 @@ test('enable works against the shipped unit templates verbatim', function () {
         $r = runSleep($this->sbx, $args);
         expect($r['code'])->toBe(0, "{$key}: {$m[1]} => ".$r['all']);
     }
+});
+
+// ─── hostdb vs AppArmor: refuse (never rewrite security policy) ───────────
+// Ubuntu's mysqld AppArmor profile only allows /run/mysqld/mysqld.sock. Sleep mode moves the
+// real server's socket to /run/laranode-hostdb/, so under an ENFORCED profile the database
+// would fail to start on first wake. The script refuses up front instead.
+
+function apparmorFiles(array $sbx, string $enabled, ?string $profiles): array
+{
+    $en = "{$sbx['root']}/aa-enabled";
+    $pr = "{$sbx['root']}/aa-profiles";
+    file_put_contents($en, $enabled."\n");
+    if ($profiles === null) {
+        @unlink($pr);
+    } else {
+        file_put_contents($pr, $profiles);
+    }
+
+    return ['LARANODE_AA_ENABLED' => $en, 'LARANODE_AA_PROFILES' => $pr];
+}
+
+test('hostdb enable is refused when an ENFORCED mysqld/mariadbd AppArmor profile is loaded', function () {
+    foreach (["/usr/sbin/mysqld (enforce)\n", "mysqld (enforce)\n", "/usr/sbin/mariadbd (enforce)\n", "/usr/bin/man (enforce)\n/usr/sbin/mysqld (enforce)\nlsb_release (enforce)\n"] as $profiles) {
+        $this->sbx = sleepSandbox();
+        hostdbSetup($this->sbx);
+        $env = apparmorFiles($this->sbx, 'Y', $profiles);
+        $r = runSleep($this->sbx, ['hostdb', 'enable', '15'], $env);
+        expect($r['code'])->toBe(3, trim($profiles).' => '.$r['all'])
+            ->and($r['all'])->toContain('AppArmor')
+            ->and($r['calls'])->toBe('')
+            ->and(glob("{$this->sbx['root']}/systemd/*"))->toBe([])
+            ->and(glob("{$this->sbx['root']}/mysqlconf/*"))->toBe([]);
+        exec('rm -rf '.escapeshellarg($this->sbx['root']));
+    }
+});
+
+test('hostdb enable still works when AppArmor is off, in complain mode, or has no mysqld profile', function () {
+    $cases = [
+        'AppArmor module off' => ['N', "/usr/sbin/mysqld (enforce)\n"],
+        'complain mode (logs, never denies)' => ['Y', "/usr/sbin/mysqld (complain)\n"],
+        'no database profile at all' => ['Y', "/usr/bin/man (enforce)\n/usr/sbin/mysqld//child (enforce)\n"],
+    ];
+    foreach ($cases as $why => [$enabled, $profiles]) {
+        $this->sbx = sleepSandbox();
+        hostdbSetup($this->sbx);
+        $r = runSleep($this->sbx, ['hostdb', 'enable', '15'], apparmorFiles($this->sbx, $enabled, $profiles));
+        expect($r['code'])->toBe(0, "{$why}: ".$r['all']);
+        exec('rm -rf '.escapeshellarg($this->sbx['root']));
+    }
+});
+
+test('AppArmor on but the profile list unreadable: hostdb enable fails closed', function () {
+    $this->sbx = sleepSandbox();
+    hostdbSetup($this->sbx);
+    $r = runSleep($this->sbx, ['hostdb', 'enable', '15'], apparmorFiles($this->sbx, 'Y', null));
+    expect($r['code'])->toBe(3, $r['all'])->and($r['all'])->toContain('AppArmor')->and($r['calls'])->toBe('');
+});
+
+test('hostdb wake is refused under an enforced profile (the DB could not start); disable still works', function () {
+    $this->sbx = sleepSandbox();
+    hostdbSetup($this->sbx);
+    expect(runSleep($this->sbx, ['hostdb', 'enable', '15'], apparmorFiles($this->sbx, 'N', ''))['code'])->toBe(0);
+    $env = apparmorFiles($this->sbx, 'Y', "/usr/sbin/mysqld (enforce)\n");
+    $wake = runSleep($this->sbx, ['hostdb', 'wake'], $env);
+    expect($wake['code'])->toBe(3, $wake['all'])->and($wake['all'])->toContain('AppArmor');
+    // an admin can always turn sleep back off
+    $off = runSleep($this->sbx, ['hostdb', 'disable'], $env);
+    expect($off['code'])->toBe(0, $off['all'])->and(glob("{$this->sbx['root']}/systemd/*"))->toBe([]);
+});
+
+test('the real host AppArmor is ignored in test mode (only the injected files count)', function () {
+    $this->sbx = sleepSandbox();
+    hostdbSetup($this->sbx);
+    // no LARANODE_AA_* given: must behave as "AppArmor absent", whatever this machine runs
+    expect(runSleep($this->sbx, ['hostdb', 'enable', '15'])['code'])->toBe(0);
 });

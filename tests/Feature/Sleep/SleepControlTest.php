@@ -151,3 +151,14 @@ test('fpm rejects wake/sleep (nothing to hold)', function () {
     $this->actingAs($a)->postJson('/admin/power/action', ['key' => 'fpm', 'action' => 'sleep'])->assertStatus(422);
     Process::assertNothingRan();
 });
+
+test('hostdb sleep is refused (nothing runs) when the registry records an AppArmor profile that blocks it', function () {
+    SleepFixtures::cleanup($this->dir);
+    $e = SleepFixtures::fullInstall();
+    $e['hostdb']['apparmor'] = 'enforced';
+    $this->dir = SleepFixtures::registry($e);
+    config(['laranode.managed_dir' => $this->dir, 'database.default' => 'sqlite']);
+    $this->actingAs(powerAdmin())->postJson('/admin/power/action', ['key' => 'hostdb', 'action' => 'enable', 'idle_minutes' => 10])
+        ->assertStatus(409)->assertJsonPath('reason', 'apparmor')->assertJsonPath('message', fn ($m) => str_contains($m, 'AppArmor'));
+    Process::assertNothingRan();
+});

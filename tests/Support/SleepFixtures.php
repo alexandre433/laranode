@@ -43,7 +43,7 @@ class SleepFixtures
     public static function fullInstall(): array
     {
         return [
-            'reverb' => ['kind' => 'reverb', 'unit' => 'laranode-reverb.service', 'public_port' => '8080'],
+            'reverb' => ['kind' => 'reverb', 'unit' => 'laranode-reverb.service', 'public_port' => '8080', 'bind_host' => '0.0.0.0'],
             'queue' => ['kind' => 'queue', 'unit' => 'laranode-queue-worker.service'],
             'fpm' => ['kind' => 'fpm'],
             'hostdb' => [

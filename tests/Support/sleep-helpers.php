@@ -36,6 +36,15 @@ exit 0
 SH);
     chmod("{$root}/bin/systemctl", 0755);
 
+    // The installer's manifest is REQUIRED (fail closed). Default: Laranode installed every
+    // service it manages. Tests that need another shape overwrite or delete this file.
+    file_put_contents("{$root}/managed/service-manifest.json",
+        '{"version":1,"generated":"2026-11-21T00:00:00Z","host":{"os":"ubuntu 24.04","proxmox":false,"cloudpanel":false},"db":{"engine":"mysql","unit":"mysql.service"},'."\n\"services\":[\n"
+        .'{"unit":"laranode-reverb.service","managed":true,"role":"reverb","reason":"t"},'."\n"
+        .'{"unit":"laranode-queue-worker.service","managed":true,"role":"queue","reason":"t"},'."\n"
+        .'{"unit":"php8.4-fpm.service","managed":true,"role":"php","reason":"t"},'."\n"
+        .'{"unit":"mysql.service","managed":true,"role":"database","reason":"t"}'."\n]}\n");
+
     return ['root' => $root];
 }
 
@@ -63,6 +72,12 @@ function runSleep(array $sbx, array $args, array $extraEnv = []): array
 
 function sleepRegister(array $sbx, string $key, array $fields): void
 {
+    // a Reverb registry entry always carries the address Reverb listens on; pass
+    // ['bind_host' => null] to leave it out (an old/hand-written entry).
+    if (($fields['kind'] ?? '') === 'reverb' && ! array_key_exists('bind_host', $fields)) {
+        $fields['bind_host'] = '0.0.0.0';
+    }
+    $fields = array_filter($fields, fn ($v) => $v !== null);
     file_put_contents("{$sbx['root']}/managed/managed.d/{$key}.conf", SleepFixtures::render($fields));
 }
 

@@ -75,3 +75,26 @@ test('status read never calls sudo', function () {
     statusRows($this);
     Process::assertNotRan(fn ($p) => in_array('sudo', (array) $p->command, true));
 });
+
+test('hostdb on a host whose AppArmor profile blocks the moved socket: cannot sleep, reason apparmor', function () {
+    $admin = User::factory()->create(['role' => 'admin']);
+    $entries = SleepFixtures::fullInstall();
+    $entries['hostdb']['apparmor'] = 'enforced';
+    $this->dir = SleepFixtures::registry($entries);
+    config(['laranode.managed_dir' => $this->dir, 'database.default' => 'sqlite']);
+    Process::fake(['*' => Process::result(output: "active\n")]);
+    expect(statusRows($this, $admin)['hostdb'])->toMatchArray(['can_sleep' => false, 'reason' => 'apparmor']);
+});
+
+test('AppArmor on but unverifiable at register time is blocked too; "none" is free to sleep', function () {
+    $admin = User::factory()->create(['role' => 'admin']);
+    foreach (['unknown' => false, 'none' => true] as $verdict => $canSleep) {
+        $entries = SleepFixtures::fullInstall();
+        $entries['hostdb']['apparmor'] = $verdict;
+        $this->dir = SleepFixtures::registry($entries);
+        config(['laranode.managed_dir' => $this->dir, 'database.default' => 'sqlite']);
+        Process::fake(['*' => Process::result(output: "active\n")]);
+        expect(statusRows($this, $admin)['hostdb']['can_sleep'])->toBe($canSleep, $verdict);
+        SleepFixtures::cleanup($this->dir);
+    }
+});

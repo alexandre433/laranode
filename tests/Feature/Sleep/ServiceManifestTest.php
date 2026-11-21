@@ -87,10 +87,14 @@ test('hostdb is refused when the manifest marks the database pre-existing', func
     }
 });
 
-test('no manifest (older installer) leaves the registry as the only gate', function () {
+test('no manifest fails CLOSED: a registry alone never authorises touching a service', function () {
     $this->sbx = sleepSandbox();
     registerReverbFixture($this->sbx);
-    expect(runSleep($this->sbx, ['reverb', 'enable', '10'])['code'])->toBe(0);
+    unlink("{$this->sbx['root']}/managed/service-manifest.json");
+    foreach ([['reverb', 'enable', '10'], ['reverb', 'wake'], ['reverb', 'sleep'], ['reverb', 'disable']] as $args) {
+        $r = runSleep($this->sbx, $args);
+        expect($r['code'])->toBe(3, implode(' ', $args))->and($r['all'])->toContain('manifest')->and($r['calls'])->toBe('');
+    }
 });
 
 // ─── laranode-managed-register.sh: derives the registry from the manifest ───────
@@ -142,9 +146,12 @@ test('register: a pre-existing MySQL next to a Laranode-installed PostgreSQL is 
     expect($r['has']('hostdb'))->toBeFalse()->and($r['all'])->toContain('not MySQL/MariaDB');
 });
 
-test('register: without a manifest hostdb still needs LARANODE_DB_INSTALLED_BY_US=1', function () {
+test('register: without a manifest NOTHING is registered, not even with the old LARANODE_DB_INSTALLED_BY_US=1', function () {
     skipUnlessRoot();
     $this->sbx = sleepSandbox();
-    $r = runRegister($this->sbx, ['hostdb']);
-    expect($r['has']('hostdb'))->toBeFalse()->and($r['all'])->toContain('never managed');
+    unlink("{$this->sbx['root']}/managed/service-manifest.json");
+    $r = runRegister($this->sbx, ['reverb', 'queue', 'fpm', 'hostdb'], ['LARANODE_DB_INSTALLED_BY_US' => '1']);
+    expect($r['has']('reverb'))->toBeFalse()->and($r['has']('queue'))->toBeFalse()
+        ->and($r['has']('fpm'))->toBeFalse()->and($r['has']('hostdb'))->toBeFalse()
+        ->and($r['all'])->toContain('manifest');
 });

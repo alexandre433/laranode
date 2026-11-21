@@ -99,6 +99,14 @@ describe('Power page', () => {
         expect(screen.getByRole('checkbox', { name: /sleep hostdb/i })).toBeDisabled();
     });
 
+    it('an AppArmor-blocked hosting DB shows why and cannot be toggled', async () => {
+        axios.get = vi.fn().mockResolvedValue(payload([svc({ key: 'hostdb', label: 'Hosting database', can_sleep: false, reason: 'apparmor' })]));
+        render(<Index />);
+        await screen.findByText('Hosting database');
+        expect(screen.getByText(/cannot sleep: AppArmor profile blocks the moved DB socket/i)).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', { name: /sleep hostdb/i })).toBeDisabled();
+    });
+
     it('unmanaged services render as external and have no controls', async () => {
         axios.get = vi.fn().mockResolvedValue(payload(
             [svc({ key: 'hostdb', label: 'Hosting database', managed: false, state: 'external', can_sleep: false, reason: 'external' })],

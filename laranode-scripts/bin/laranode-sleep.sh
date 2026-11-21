@@ -30,12 +30,17 @@ die() { local code=$1; shift; echo "ERROR: $*" >&2; exit "$code"; }
 MANAGED_DIR=/etc/laranode
 SYSTEMD_DIR=/etc/systemd/system
 PHP_ETC=/etc/php
+AA_ENABLED=/sys/module/apparmor/parameters/enabled
+AA_PROFILES=/sys/kernel/security/apparmor/profiles
 TESTMODE=0
 if [ "${LARANODE_SLEEP_TEST:-}" = 1 ] && [ -z "${SUDO_UID:-}" ]; then
     TESTMODE=1
     MANAGED_DIR=${LARANODE_MANAGED_DIR:-$MANAGED_DIR}
     SYSTEMD_DIR=${LARANODE_SYSTEMD_DIR:-$SYSTEMD_DIR}
     PHP_ETC=${LARANODE_PHP_ETC:-$PHP_ETC}
+    # in test mode ONLY the injected files count, never the host the tests happen to run on
+    AA_ENABLED=${LARANODE_AA_ENABLED:-/nonexistent/apparmor-enabled}
+    AA_PROFILES=${LARANODE_AA_PROFILES:-/nonexistent/apparmor-profiles}
 fi
 
 # --- argument validation (before anything touches the system) ---------------------
@@ -108,6 +113,11 @@ done < "$REG_FILE"
 
 valid_unit() { [[ ${1-} =~ ^[A-Za-z0-9@:._-]+\.service$ ]]; }
 valid_port() { [[ ${1-} =~ ^[0-9]{1,5}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
+valid_ipv4() { # dotted quad, each octet 0..255, no leading junk
+    local o IFS=.
+    [[ ${1-} =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+    for o in $1; do [ "$((10#$o))" -le 255 ] || return 1; done
+}
 valid_path() { [[ ${1-} =~ ^/[A-Za-z0-9_./-]+$ ]] && [[ $1 != *..* ]]; }
 
 KIND=${R[kind]-}
@@ -118,6 +128,9 @@ case "$KEY" in
         [ "$KIND" = reverb ] || die $EX_REFUSED "registry kind mismatch for reverb"
         [[ $UNIT =~ ^laranode-reverb\.service$ ]] || die $EX_REFUSED "registry unit '$UNIT' is not the Laranode Reverb unit"
         valid_port "${R[public_port]-}" || die $EX_REFUSED "registry public_port invalid"
+        # The socket must listen exactly where Reverb itself listens (the installer binds it to
+        # 127.0.0.1 on Proxmox/CloudPanel). A missing/odd value is refused, never widened.
+        valid_ipv4 "${R[bind_host]-}" || die $EX_REFUSED "registry bind_host missing or invalid (re-run laranode-managed-register.sh)"
         ;;
     queue)
         [ "$KIND" = queue ] || die $EX_REFUSED "registry kind mismatch for queue"
@@ -143,9 +156,12 @@ esac
 # --- installer manifest gate (defence in depth) -----------------------------------
 # The installer records, per service, whether Laranode installed it (managed:true) or
 # found it already running (managed:false). When that manifest exists it is the source
-# of truth: a registry entry the manifest does not back is refused.
+# of truth: a registry entry the manifest does not back is refused. FAIL CLOSED: no manifest =
+# nothing can prove Laranode installed the service, so nothing is touched (re-run the installer,
+# which writes the manifest and re-registers).
 MANIFEST="$MANAGED_DIR/service-manifest.json"
-if [ -f "$MANIFEST" ]; then
+[ -f "$MANIFEST" ] || die $EX_REFUSED "service manifest $MANIFEST is missing: cannot prove Laranode installed '$KEY' (re-run the Laranode installer)"
+{
     if [ "$TESTMODE" != 1 ]; then
         read -r muid mmode < <(stat -c '%u %a' "$MANIFEST")
         [ "$muid" = 0 ] && [[ $mmode =~ ^[0-7]*[0145][0145]$ ]] || die $EX_REFUSED "service manifest $MANIFEST is not root-owned/non-writable"
@@ -163,7 +179,7 @@ if [ -f "$MANIFEST" ]; then
         [[ $MDB =~ ^(mysql|mariadb|mysqld)\.service$ ]] \
             || die $EX_REFUSED "service manifest database unit '$MDB' is not a Laranode-installed MySQL/MariaDB"
     fi
-fi
+}
 
 # --- state helpers ----------------------------------------------------------------
 declare -A S=()
@@ -259,6 +275,24 @@ guard_hostdb() {
     fi
 }
 
+# AppArmor: Ubuntu ships an enforced profile for mysqld that only allows /run/mysqld/*. Hosting-DB
+# sleep moves the real server socket to /run/laranode-hostdb/, which that profile denies, so the
+# database would fail to start on the first wake. We never rewrite security policy from this script:
+# refuse instead. Only an ENFORCED profile matters (complain mode logs, never denies). AppArmor
+# enabled but the profile list unreadable = cannot prove it is safe = refuse.
+apparmor_blocks_hostdb() {
+    local en=""
+    [ -r "$AA_ENABLED" ] && en=$(tr -d "[:space:]" < "$AA_ENABLED" 2>/dev/null)
+    [ "$en" = Y ] || return 1
+    [ -r "$AA_PROFILES" ] || return 0
+    grep -Eq '(^|/)(mysqld|mariadbd)[[:space:]]+[(]enforce[)]$' "$AA_PROFILES" 2>/dev/null
+}
+guard_apparmor() {
+    if apparmor_blocks_hostdb; then
+        die $EX_REFUSED "cannot sleep: an enforced AppArmor profile for mysqld/mariadbd is active; it would deny the moved database socket and the database would not start on wake. Hosting-DB sleep stays off on this host."
+    fi
+}
+
 # =====================================================================================
 # generic: record prior boot/run state once, restore on disable/rollback
 # =====================================================================================
@@ -332,7 +366,7 @@ enable_reverb() {
 Description=Laranode sleep: public socket for Reverb (a connection wakes it)
 
 [Socket]
-ListenStream=${R[public_port]}
+ListenStream=${R[bind_host]}:${R[public_port]}
 
 [Install]
 WantedBy=sockets.target
@@ -363,6 +397,7 @@ EOF
 enable_hostdb() {
     require_proxyd
     guard_hostdb
+    guard_apparmor
     local priv=/run/laranode-hostdb/mysqld.sock
     [ "$(sc show -p Id --value "$UNIT" 2>/dev/null)" = "$UNIT" ] \
         || die $EX_REFUSED "registry unit $UNIT is an alias; re-register the canonical unit"
@@ -417,6 +452,10 @@ activate_proxied() { # backend port (reverb) or ""
         sc daemon-reload &&
         sc disable "$UNIT" >/dev/null 2>&1; true
     }
+    # A re-enable (installer re-run) may rewrite the socket unit with a NEW port/bind host while the
+    # old socket is still active: `enable --now` would leave it listening on the stale address.
+    # Stop socket + proxy first so the fresh unit is what actually binds.
+    sc stop "$(proxy_socket)" "$(proxy_service)" >/dev/null 2>&1
     if ! { sc stop "$UNIT" >/dev/null 2>&1; sc enable --now "$(proxy_socket)" >/dev/null 2>&1; }; then
         echo "enable failed; rolling back" >&2
         sc disable --now "$(proxy_socket)" >/dev/null 2>&1
@@ -430,7 +469,7 @@ activate_proxied() { # backend port (reverb) or ""
 }
 
 wake_proxied() {
-    [ "$KEY" = hostdb ] && guard_hostdb
+    [ "$KEY" = hostdb ] && { guard_hostdb; guard_apparmor; }
     is_enabled || die $EX_REFUSED "sleep is not enabled for $KEY"
     poke_tcp "${R[public_port]}" || die $EX_FAIL "could not connect to the $KEY socket"
     wait_active "$UNIT" 90 || die $EX_FAIL "$UNIT did not come up"
