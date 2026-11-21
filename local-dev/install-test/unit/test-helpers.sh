@@ -7,6 +7,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALLER="${SCRIPT_DIR}/../../../laranode-scripts/bin/laranode-installer.sh"
 
+# The installer drops its test seams (LARANODE_OS_RELEASE_FILE, ...) from the inherited
+# environment unless this is set; the preflight tests below re-source it in subshells.
+export LARANODE_INSTALLER_TEST=1
+
 # Source the installer — source-guard must prevent main() from running
 # shellcheck source=/dev/null
 source "$INSTALLER"
