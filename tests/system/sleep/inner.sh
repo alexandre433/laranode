@@ -21,6 +21,8 @@ check() { # name, command...
     local name=$1; shift
     if "$@" >/dev/null 2>&1; then pass "$name"; else fail "$name"; fi
 }
+# hcheck: a hostdb functional check; skipped (loudly) where the HOST kernel's AppArmor profile blocks the DB
+hcheck() { if [ "${HOST_AA_DB:-0}" = 1 ]; then echo "SKIP  $1 (host AppArmor mysqld profile)"; else check "$@"; fi; }
 now_ms() { python3 -c 'import time;print(int(time.time()*1000))'; }
 snapshot() {
     {
@@ -47,7 +49,16 @@ echo "=== host: $(. /etc/os-release; echo "$PRETTY_NAME")"
 # the gate itself, per mode, against injected kernel files.
 AA_KERNEL=$(tr -d '[:space:]' < /sys/module/apparmor/parameters/enabled 2>/dev/null || echo n/a)
 echo "INFO  kernel apparmor enabled=${AA_KERNEL:-n/a} (shared with the container)"
-if [ "$AA_KERNEL" = Y ]; then
+HOST_AA_DB=0
+# A host kernel that has the distro's mysqld/mariadbd profile loaded (GitHub's ubuntu runner does:
+# `apparmor="DENIED" operation="mknod" profile="/usr/sbin/mysqld" name="/run/laranode-hostdb/..."`)
+# really denies the moved socket. Do NOT mask that: the real gate must refuse, and the functional
+# hostdb checks are skipped (the profile belongs to the host, not to this container).
+if [ "$AA_KERNEL" = Y ] && { [ -e /etc/apparmor.d/usr.sbin.mysqld ] || [ -e /etc/apparmor.d/usr.sbin.mariadbd ]; } \
+    && dmesg 2>/dev/null | grep -q 'profile_load.*name="\(/usr/sbin/\)\?\(mysqld\|mariadbd\)"'; then
+    HOST_AA_DB=1
+    echo "INFO  host kernel has a mysqld/mariadbd AppArmor profile loaded: NOT masking; hostdb functional checks are skipped, the real gate is asserted instead"
+elif [ "$AA_KERNEL" = Y ]; then
     echo N > /tmp/ln-aa-kernel-off
     mount --bind /tmp/ln-aa-kernel-off /sys/module/apparmor/parameters/enabled \
         && echo "INFO  bind-mounted apparmor enabled=N over the kernel file (functional checks run as a no-AppArmor host)" \
@@ -170,14 +181,21 @@ printf 'DB_CONNECTION=sqlite\nREVERB_SERVER_PORT=8080\n' > "$PANEL/.env"
 # ─── 3. reverb + hostdb: socket owns the port, idle stop, wake on connect ─────────
 RSS_AWAKE=$(rss_db)
 check "reverb enable 1min" test "$(run "$SLEEP" reverb enable 1)" = 0
-check "hostdb enable 1min" test "$(run "$SLEEP" hostdb enable 1)" = 0
+if [ "$HOST_AA_DB" = 1 ]; then
+    HRC=$(run "$SLEEP" hostdb enable 1)
+    check "REAL host kernel AppArmor (unmasked): hostdb enable refused (exit 3)" test "$HRC" = 3
+    check "…message names AppArmor" grep -qi apparmor /tmp/ln-last.out
+    check "…database untouched (still active, no proxy units)" bash -c "systemctl is-active $DBUNIT >/dev/null && [ ! -e $UNITS/laranode-sleep-hostdb.socket ]"
+else
+    check "hostdb enable 1min" test "$(run "$SLEEP" hostdb enable 1)" = 0
+fi
 sleep 1
 check "reverb: socket (systemd) owns :8080" bash -c "ss -ltnp 'sport = :8080' | grep -q systemd"
 check "reverb: real unit asleep after enable" bash -c "! systemctl is-active laranode-reverb.service >/dev/null"
 check "reverb: real unit not wanted at boot any more" bash -c "! systemctl is-enabled laranode-reverb.service >/dev/null 2>&1"
-check "hostdb: socket (systemd) owns TCP :3306" bash -c "ss -ltnp 'sport = :3306' | grep -q systemd"
-check "hostdb: socket (systemd) owns the canonical unix socket" bash -c "ss -lxp | grep -q 'mysqld.sock.*systemd\|mysqld.sock.*users:((\"systemd\"'  || ss -lx | grep -q mysqld.sock"
-check "hostdb: database process gone (RAM freed)" test "$(rss_db)" = 0
+hcheck "hostdb: socket (systemd) owns TCP :3306" bash -c "ss -ltnp 'sport = :3306' | grep -q systemd"
+hcheck "hostdb: socket (systemd) owns the canonical unix socket" bash -c "ss -lxp | grep -q 'mysqld.sock.*systemd\|mysqld.sock.*users:((\"systemd\"'  || ss -lx | grep -q mysqld.sock"
+hcheck "hostdb: database process gone (RAM freed)" test "$(rss_db)" = 0
 echo "METRIC db_rss_awake_kb=$RSS_AWAKE db_rss_asleep_kb=$(rss_db)"
 
 t0=$(now_ms); code=$(http_get 8080 2>/dev/null); t1=$(now_ms)
@@ -186,9 +204,9 @@ echo "METRIC reverb_wake_ms=$((t1 - t0))"
 check "reverb: real unit active after wake" systemctl is-active --quiet laranode-reverb.service
 
 t0=$(now_ms); n=$($CLI -h127.0.0.1 -P3306 -uspk -ppw -N -e 'select count(*) from spikedb.t' 2>/tmp/ln-dberr); t1=$(now_ms)
-check "hostdb: TCP connect wakes it and returns data" test "$n" = 1
+hcheck "hostdb: TCP connect wakes it and returns data" test "$n" = 1
 echo "METRIC db_tcp_wake_ms=$((t1 - t0))  rss_awake_again_kb=$(rss_db)"
-if [ "$n" != 1 ]; then # evidence for a failed wake (CI runner kernels enforce their own AppArmor)
+if [ "$n" != 1 ] && [ "$HOST_AA_DB" != 1 ]; then # evidence for a failed wake (CI runner kernels enforce their own AppArmor)
     echo "DIAG  client error: $(head -c 300 /tmp/ln-dberr 2>/dev/null)"
     echo "DIAG  unit state: $(systemctl is-active "$DBUNIT" 2>&1) / $(systemctl show -p Result,ExecMainStatus "$DBUNIT" 2>&1 | tr '\n' ' ')"
     journalctl -u "$DBUNIT" -n 25 --no-pager 2>&1 | sed 's/^/DIAG  journal: /'
@@ -200,13 +218,13 @@ if [ "$n" != 1 ]; then # evidence for a failed wake (CI runner kernels enforce t
     echo "DIAG  drop-in: $(ls "$UNITS/$DBUNIT.d" 2>/dev/null | tr '\n' ' ')"
 fi
 
-check "hostdb: manual sleep" test "$(run "$SLEEP" hostdb sleep)" = 0
-check "hostdb: db down after manual sleep" bash -c "! systemctl is-active $DBUNIT >/dev/null"
-$DUMP -h127.0.0.1 -P3306 -uspk -ppw spikedb > /tmp/ln-backup.sql 2>/tmp/ln-dberr
-check "backup while asleep: dump wakes the DB and succeeds" grep -q 'CREATE TABLE' /tmp/ln-backup.sql
+hcheck "hostdb: manual sleep" test "$(run "$SLEEP" hostdb sleep)" = 0
+hcheck "hostdb: db down after manual sleep" bash -c "! systemctl is-active $DBUNIT >/dev/null"
+if [ "$HOST_AA_DB" != 1 ]; then $DUMP -h127.0.0.1 -P3306 -uspk -ppw spikedb > /tmp/ln-backup.sql 2>/tmp/ln-dberr; fi
+hcheck "backup while asleep: dump wakes the DB and succeeds" grep -q 'CREATE TABLE' /tmp/ln-backup.sql
 SOCKPATH=$(awk -F= '/^public_socket=/{print $2}' /etc/laranode/managed.d/hostdb.conf)
 t0=$(now_ms); n=$($CLI -S "$SOCKPATH" -uspk -ppw -N -e 'select count(*) from spikedb.t' 2>/dev/null); t1=$(now_ms)
-check "hostdb: unix-socket client (canonical path) works" test "$n" = 1
+hcheck "hostdb: unix-socket client (canonical path) works" test "$n" = 1
 echo "METRIC db_unix_ms=$((t1 - t0))"
 
 check "reverb: manual sleep" test "$(run "$SLEEP" reverb sleep)" = 0
@@ -216,7 +234,7 @@ check "reverb: up after manual wake" systemctl is-active --quiet laranode-reverb
 
 # idle: both must stop on their own (idle=1min). poll up to 150 s
 http_get 8080 >/dev/null 2>&1; $CLI -h127.0.0.1 -uspk -ppw -e 'select 1' >/dev/null 2>&1   # reset idle clocks
-T0=$(date +%s); R=0; D=0
+T0=$(date +%s); R=0; D=0; [ "$HOST_AA_DB" = 1 ] && D=1
 while [ $(( $(date +%s) - T0 )) -lt 150 ]; do
     systemctl is-active --quiet laranode-reverb.service || R=1
     systemctl is-active --quiet "$DBUNIT" || D=1
@@ -225,7 +243,7 @@ while [ $(( $(date +%s) - T0 )) -lt 150 ]; do
 done
 echo "METRIC idle_stop_after_s=$(( $(date +%s) - T0 ))"
 check "reverb: stops itself after idle" test $R = 1
-check "hostdb: stops itself after idle" test $D = 1
+hcheck "hostdb: stops itself after idle" test $D = 1
 check "decoy external service untouched through all of it" systemctl is-active --quiet ln-decoy-external.service
 
 # ─── 4. queue ────────────────────────────────────────────────────────────────────
@@ -246,7 +264,7 @@ check "fpm: foreign pools (www, clouddeploy) byte-identical" bash -c "grep -q '^
 check "fpm disable restores every pool byte-for-byte" bash -c "$SLEEP fpm disable >/dev/null 2>&1; [ \"\$(md5sum $PD/*.conf | md5sum)\" = \"$H\" ]"
 
 # ─── 6. everything off again = original system ───────────────────────────────────
-for k in reverb hostdb; do check "disable $k" test "$(run "$SLEEP" "$k" disable)" = 0; done
+for k in reverb hostdb; do hk=check; [ "$k" = hostdb ] && hk=hcheck; $hk "disable $k" test "$(run "$SLEEP" "$k" disable)" = 0; done
 sleep 1
 check "full cycle leaves units/pools/enablement byte-identical" test "$(snapshot)" = "$BASE"
 check "db awake and usable after disable" test "$($CLI -h127.0.0.1 -uspk -ppw -N -e 'select count(*) from spikedb.t' 2>/dev/null)" = 1
