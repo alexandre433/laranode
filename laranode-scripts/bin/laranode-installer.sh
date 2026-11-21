@@ -1397,6 +1397,9 @@ _artisan() { _as_panel_user /usr/bin/php8.4 artisan "$@"; }
 # trusted: they are deleted and rebuilt by composer's package:discover.
 _prepare_panel_tree() {
   local p="${PANEL_PATH}"
+  # the home itself too: a root-created home (a pre-made panel dir; `useradd -m` leaves an
+  # existing home alone) is 750 root, and the panel user could not even read composer.json
+  chown laranode_ln:laranode_ln /home/laranode_ln
   chown -R -h laranode_ln:laranode_ln "$p"
   if [ -d "$p/bootstrap/cache" ] && [ ! -L "$p/bootstrap/cache" ]; then
     find "$p/bootstrap/cache" -maxdepth 1 -type f -name '*.php' -delete

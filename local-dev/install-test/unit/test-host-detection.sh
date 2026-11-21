@@ -1312,6 +1312,19 @@ t "no composer/artisan line in the installer runs as root"                    pr
 t "the permission settle leaves bootstrap/cache out of the web-writable set"  priv_settle_not_web_writable
 t "the tree is chowned to the panel user and bootstrap caches wiped"          priv_prepare_wipes_caches
 t "phase_app prepares the tree before any composer/artisan call"              priv_phase_app_prepares_first
+# a root-created /home/laranode_ln (the scenarios mkdir the panel dir before the installer, and
+# `useradd -m` leaves an existing home alone) is 750 root: laranode_ln could not even read
+# composer.json. The home itself must be handed to the panel user too, not only the panel tree.
+priv_prepare_chowns_home() { local out d
+  d=$(mktemp -d); mkdir -p "$d/bootstrap/cache"
+  out=$(bash -c "
+    source '$INSTALLER'
+    PANEL_PATH='$d'
+    chown() { printf 'chown %s\n' \"\$*\"; }
+    _prepare_panel_tree")
+  rm -rf "$d"
+  case "$out" in *'chown laranode_ln:laranode_ln /home/laranode_ln'$'\n'*|*'chown laranode_ln:laranode_ln /home/laranode_ln') : ;; *) echo "home not chowned; chown calls: $out"; return 1 ;; esac; }
+t "the panel home dir itself is handed to the panel user before composer runs"  priv_prepare_chowns_home
 echo ""
 echo "Results: passed=$PASS  failed=$FAIL"
 [ "$FAIL" -eq 0 ] && echo "ALL PASS" && exit 0
