@@ -29,6 +29,7 @@ base() {
   unset LARANODE_DB_ENGINE LARANODE_HTTP_PORT LARANODE_BIND LARANODE_PG_PORT
   have_cmd()    { return 1; }
   port_in_use() { return 1; }
+  _probe_available() { return 0; }
   pkg_installed() { return 1; }
   pg_cluster_count() { echo 0; }
   log() { :; }; warn() { :; }
@@ -635,7 +636,7 @@ wb_setup() {  # wb_setup <owned 0|1> <running 0|1> <port>
   base; svc_stub; log() { :; }
   AD=$(mktemp -d); mkdir -p "$AD/sites-available" "$AD/sites-enabled"
   cp "${FIX}/ports.conf" "$AD/ports.conf"; cp "$AD/ports.conf" "$AD/ports.conf.orig"
-  export LARANODE_APACHE_DIR="$AD" LARANODE_POLICY_RC_D="$AD/policy-rc.d"
+  export LARANODE_APACHE_DIR="$AD" LARANODE_POLICY_RC_D="$AD/policy-rc.d" LARANODE_APACHE_MODS_STATE="$AD/mods.state"
   PANEL_PATH=$(mktemp -d); mkdir -p "$PANEL_PATH/laranode-scripts/templates"
   printf '<VirtualHost *:__PORT__>\n    DocumentRoot __DOCROOT__\n</VirtualHost>\n' > "$PANEL_PATH/laranode-scripts/templates/apache-panel.template"
   APACHE_OWNED=$1; HTTP_PORT=$3; BIND_ADDR=""; IS_PROXMOX=0; IS_CLOUDPANEL=0
@@ -644,6 +645,7 @@ wb_setup() {  # wb_setup <owned 0|1> <running 0|1> <port>
   apt_install()  { :; }
   a2query()      { case "$ENABLED_MODS" in *" $2 "*) return 0;; *) return 1;; esac; }
   a2enmod()      { echo "a2enmod $*" >> "$WLOG"; }
+  a2dismod()     { echo "a2dismod $*" >> "$WLOG"; }
   a2ensite()     { echo "a2ensite $*" >> "$WLOG"; : > "$AD/sites-enabled/$1.conf"; }
   a2dissite()    { echo "a2dissite $*" >> "$WLOG"; rm -f "$AD/sites-enabled/$1.conf"; }
   apachectl()    { [ "${CONFTEST_FAIL:-0}" != 1 ]; }
@@ -723,6 +725,199 @@ wb_rerun_rollback() { wb_setup 0 1 8080; echo OLDVHOST > "$AD/sites-available/la
   ( phase_webserver ) >/dev/null 2>&1 && return 1
   grep -qx OLDVHOST "$AD/sites-available/laranode.conf" && [ -e "$AD/sites-enabled/laranode.conf" ] && cmp -s "$AD/ports.conf" "$AD/ports.conf.orig"; }
 t "failed re-run on a pre-existing Apache restores the previous working panel vhost" wb_rerun_rollback
+
+# ==============================================================================
+# Round 3 (review of b11daf2)
+# ==============================================================================
+
+# ---- 1. policy-rc.d guard: marked, cleaned when stale, never removed when not ours ----
+echo "=== policy-rc.d guard ==="
+PG_MARK='laranode-installer policy-rc.d guard'
+pg_setup() { base; PRC="$(mktemp -d)/policy-rc.d"; export LARANODE_POLICY_RC_D="$PRC"; }
+dead_pid() { (exit 0) & local p=$!; wait "$p" 2>/dev/null; echo "$p"; }
+pg_marked() { pg_setup; _policy_guard_on; grep -q "$PG_MARK" "$PRC" && grep -q 'exit 101' "$PRC" && [ "$_PRC_ADDED" = 1 ] \
+  && _policy_guard_off && [ ! -e "$PRC" ]; }
+pg_foreign_kept() { pg_setup; printf '#!/bin/sh\nexit 0\n' > "$PRC"; _policy_guard_on; _policy_guard_off; _policy_guard_clean_stale
+  [ "$_PRC_ADDED" = 0 ] && [ "$(cat "$PRC")" = "$(printf '#!/bin/sh\nexit 0')" ]; }
+pg_foreign_mark_like_kept() { pg_setup; printf '#!/bin/sh\n# mine, not laranode\nexit 101\n' > "$PRC"; _policy_guard_clean_stale; [ -e "$PRC" ]; }
+pg_stale_cleaned() { pg_setup; printf '#!/bin/sh\n# %s pid=%s\nexit 101\n' "$PG_MARK" "$(dead_pid)" > "$PRC"; _policy_guard_clean_stale 2>/dev/null; [ ! -e "$PRC" ]; }
+pg_live_kept()  { pg_setup; printf '#!/bin/sh\n# %s pid=%s\nexit 101\n' "$PG_MARK" "$$" > "$PRC"; _policy_guard_clean_stale 2>/dev/null; [ -e "$PRC" ]; }
+pg_die_removes(){ pg_setup; ( _policy_guard_on; die boom ) >/dev/null 2>&1; [ ! -e "$PRC" ]; }
+pg_signal() {  # pg_signal TERM|INT|HUP -> the guard is gone after the installer is signalled
+  pg_setup
+  # The installer signals ITSELF in a foreground subshell: a background job of a
+  # non-interactive shell starts with SIGINT ignored, which would hide whether the trap
+  # is installed. If the signal is not turned into an exit, the shell dies without
+  # running its EXIT trap and the guard survives.
+  ( source "$INSTALLER"; export LARANODE_POLICY_RC_D="$PRC"; _policy_guard_on; kill -"$1" "$BASHPID"; sleep 5 & wait $! ) >/dev/null 2>&1
+  [ ! -e "$PRC" ] || { echo "guard survived SIG$1"; return 1; }
+}
+pg_sigkill_then_cleanup() {
+  pg_setup
+  # a separate process (not a subshell): the guard records the installer's own $$, which is
+  # the process SIGKILL takes away
+  export INSTALLER PRC
+  bash -c 'source "$INSTALLER"; export LARANODE_POLICY_RC_D="$PRC"; _policy_guard_on; sleep 30' >/dev/null 2>&1 &
+  local p=$! i
+  for i in $(seq 1 60); do [ -e "$PRC" ] && break; sleep 0.1; done
+  kill -9 "$p" 2>/dev/null; wait "$p" 2>/dev/null
+  [ -e "$PRC" ] || { echo "SIGKILL left nothing to clean (guard was never created?)"; return 1; }
+  # the NEXT installer start removes what the killed one left behind
+  _policy_guard_clean_stale 2>/dev/null; [ ! -e "$PRC" ]
+}
+pg_main_cleans_first() {
+  pg_setup; printf '#!/bin/sh\n# %s pid=%s\nexit 101\n' "$PG_MARK" "$(dead_pid)" > "$PRC"
+  MLOG=$(mktemp); detect_os() { :; }
+  preflight() { [ -e "$PRC" ] && echo "stale-at-preflight" >> "$MLOG" || echo "clean-at-preflight" >> "$MLOG"; }
+  phase_packages() { :; }; phase_fetch_panel() { :; }; phase_database() { :; }; phase_webserver() { :; }; phase_php_node() { :; }
+  phase_app() { :; }; phase_services() { :; }; phase_summary() { :; }
+  main >/dev/null 2>&1
+  [ "$(head -1 "$MLOG")" = clean-at-preflight ]
+}
+t  "guard file carries the marker, exit 101, and is removed by _policy_guard_off"        pg_marked
+t  "a policy-rc.d that is not ours is never replaced, removed or 'cleaned'"                pg_foreign_kept
+t  "an unmarked policy-rc.d that merely looks similar is not cleaned"                      pg_foreign_mark_like_kept
+pg_foreign_swapped_in() {   # the owner drops their own policy-rc.d while our guard is up: off must not delete it
+  pg_setup; _policy_guard_on; [ -e "$PRC" ] || { echo "guard not created"; return 1; }
+  printf '#!/bin/sh\n# owner policy\nexit 101\n' > "$PRC"
+  _policy_guard_off; [ -f "$PRC" ] && grep -q 'owner policy' "$PRC"
+}
+t  "a policy-rc.d the owner put in place while our guard was up is not removed"            pg_foreign_swapped_in
+t  "a stale marked guard (its installer is dead) is removed at the next start"             pg_stale_cleaned
+t  "a marked guard whose installer is still alive is left alone"                           pg_live_kept
+t  "die while the guard is on removes it"                                                  pg_die_removes
+t  "SIGTERM while the guard is on removes it"                                              pg_signal TERM
+t  "SIGINT while the guard is on removes it"                                               pg_signal INT
+t  "SIGHUP while the guard is on removes it"                                               pg_signal HUP
+t  "SIGKILL leaves the guard, the next start cleans it"                                    pg_sigkill_then_cleanup
+t  "main cleans a stale guard BEFORE preflight (and before any apt call)"                  pg_main_cleans_first
+
+# phase_webserver / the php package install use the marked guard, and never touch a foreign one
+wb_guard_marked() { wb_setup 0 1 8080
+  apt_install() { [ -e "$LARANODE_POLICY_RC_D" ] && grep -q "$PG_MARK" "$LARANODE_POLICY_RC_D" && echo guarded >> "$WLOG"; }
+  ( phase_webserver ) >/dev/null 2>&1 || return 1
+  [ "$(grep -c guarded "$WLOG")" = 2 ] && [ ! -e "$LARANODE_POLICY_RC_D" ]; }
+wb_guard_foreign() { wb_setup 0 1 8080; printf '#!/bin/sh\nexit 0\n' > "$LARANODE_POLICY_RC_D"
+  apt_install() { grep -q "$PG_MARK" "$LARANODE_POLICY_RC_D" && echo ours >> "$WLOG"; }
+  ( phase_webserver ) >/dev/null 2>&1 || return 1
+  ! grep -q ours "$WLOG" && [ "$(cat "$LARANODE_POLICY_RC_D")" = "$(printf '#!/bin/sh\nexit 0')" ]; }
+t "phase_webserver wraps its apt installs in the MARKED guard and removes it"              wb_guard_marked
+t "phase_webserver leaves a foreign policy-rc.d exactly as it was"                         wb_guard_foreign
+
+# ---- 7. a live pre-existing php8.4-fpm must not be restarted by the extension postinsts ----
+echo "=== php packages vs a live pre-existing php8.4-fpm ==="
+pn_run() {  # pn_run <PHPFPM_OWNED>  -> phase_php_node with the world stubbed; PNLOG lists each apt_install and whether the guard was up
+  base; PNLOG=$(mktemp); svc_stub; ACTIVE_UNITS="php8.4-fpm"
+  PRC="$(mktemp -d)/policy-rc.d"; export LARANODE_POLICY_RC_D="$PRC"
+  PHPFPM_OWNED=$1; APACHE_OWNED=0; IS_CLOUDPANEL=0; OS_ID=ubuntu; OS_VERSION=24.04
+  apt_install() { echo "$([ -e "$PRC" ] && grep -q "$PG_MARK" "$PRC" && echo guarded || echo open) $*" >> "$PNLOG"; }
+  add-apt-repository() { :; }; apt-get() { :; }; update-alternatives() { :; }; curl() { :; }
+  node() { echo v22.1.0; }; php8.4() { :; }
+  phase_php_node >/dev/null 2>&1
+}
+pn_pre_guarded() { pn_run 0; grep -q '^guarded php8.4 php8.4-fpm' "$PNLOG" && [ ! -e "$PRC" ]; }
+pn_owned_open()  { pn_run 1; grep -q '^open php8.4 php8.4-fpm' "$PNLOG"; }
+pn_other_open()  { pn_run 0; ! grep -E '^guarded (postgresql-client|nodejs)' "$PNLOG"; }
+pn_die_unguards(){ pn_run 0; apt_install() { die "apt broke"; }; ( phase_php_node ) >/dev/null 2>&1; [ ! -e "$PRC" ]; }
+t "pre-existing php8.4-fpm: the php/extension install runs under the marked guard, guard removed after" pn_pre_guarded
+t "php8.4-fpm that we installed: no guard (nothing live to protect)"                      pn_owned_open
+t "only the php packages are guarded, not postgresql-client or nodejs"                    pn_other_open
+t "a failing php install still removes the guard"                                         pn_die_unguards
+
+# ---- 2/3. rollback after the reload, and of the modules we enabled ----
+echo "=== webserver rollback after reload, modules rolled back and recorded ==="
+rb_ok() { cmp -s "$AD/ports.conf" "$AD/ports.conf.orig" && [ ! -e "$AD/sites-enabled/laranode.conf" ] && [ ! -e "$AD/sites-available/laranode.conf" ]; }
+mods_dismodded() { local m; for m in "$@"; do grep -qx "a2dismod $m" "$WLOG" || { echo "no a2dismod $m"; return 1; }; done; }
+wb_rb_nolisten() { wb_setup 0 1 8080; ss() { :; }
+  ( phase_webserver ) >/dev/null 2>&1 && return 1
+  rb_ok && [ "$(grep -cx 'reload apache2' "$SVC_LOG")" = 2 ] && ! grep -q '^start' "$SVC_LOG" && mods_dismodded proxy proxy_fcgi rewrite; }
+wb_rb_notactive() { wb_setup 0 1 8080
+  svc_active() { ! grep -qx 'reload apache2' "$SVC_LOG"; }   # up until the first reload, down after it
+  ( phase_webserver ) >/dev/null 2>&1 && return 1
+  rb_ok && ! grep -q '^start' "$SVC_LOG" && [ "$(grep -cx 'reload apache2' "$SVC_LOG")" = 2 ] && mods_dismodded proxy proxy_fcgi rewrite; }
+wb_rb_stopped_stays_stopped() { wb_setup 0 0 8080; ss() { :; }
+  ( phase_webserver ) >/dev/null 2>&1 && return 1
+  rb_ok && grep -qx 'stop apache2' "$SVC_LOG" && mods_dismodded proxy proxy_fcgi rewrite; }
+wb_rb_late_die() { wb_setup 0 1 8080; _configure_firewall() { die "firewall boom"; }
+  ( phase_webserver ) >/dev/null 2>&1 && return 1
+  rb_ok && mods_dismodded proxy proxy_fcgi rewrite; }
+wb_rb_a2ensite() { wb_setup 0 1 8080; a2ensite() { return 1; }
+  ( phase_webserver ) >/dev/null 2>&1 && return 1
+  rb_ok && mods_dismodded proxy proxy_fcgi rewrite && [ ! -s "$AD/mods.state" ]; }
+wb_rb_midloop() { wb_setup 0 1 8080; a2enmod() { echo "a2enmod $*" >> "$WLOG"; [ "$1" != proxy_fcgi ]; }
+  ( phase_webserver ) >/dev/null 2>&1 && return 1
+  mods_dismodded proxy && ! grep -qxE 'a2dismod (proxy_fcgi|rewrite)' "$WLOG" && rb_ok; }
+wb_rb_only_ours() { wb_setup 0 1 8080; ENABLED_MODS=" proxy rewrite "; ss() { :; }
+  ( phase_webserver ) >/dev/null 2>&1 && return 1
+  mods_dismodded proxy_fcgi && ! grep -qxE 'a2dismod (proxy|rewrite)' "$WLOG"; }
+wb_owned_no_rb() { wb_setup 1 0 8080; ss() { :; }; ( phase_webserver ) >/dev/null 2>&1 && return 1
+  ! grep -q a2dismod "$WLOG" && ! cmp -s "$AD/ports.conf" "$AD/ports.conf.orig"; }
+wb_state_persists() { wb_setup 0 1 8080; ( phase_webserver ) >/dev/null 2>&1 || return 1
+  [ "$(sort -u "$AD/mods.state" | tr '\n' ' ')" = "proxy proxy_fcgi rewrite " ]; }
+wb_state_to_manifest() { mf_setup; export LARANODE_APACHE_MODS_STATE="$(mktemp)"; printf 'proxy\nproxy_fcgi\n' > "$LARANODE_APACHE_MODS_STATE"
+  APACHE_MODS_ENABLED=""; write_service_manifest
+  grep -q '"apache_modules_enabled":\["proxy","proxy_fcgi"\]' "$LARANODE_MANIFEST_FILE" && [ ! -s "$LARANODE_APACHE_MODS_STATE" ]; }
+t "reload ok but the listener never opens: files, modules restored, Apache reloaded again"   wb_rb_nolisten
+t "reload ok but apache2 is not active afterwards: files and modules restored, never started" wb_rb_notactive
+t "a stopped Apache we started (opt-in) is stopped again when the install fails"             wb_rb_stopped_stays_stopped
+t "any later die inside the phase rolls the pre-existing Apache back"                        wb_rb_late_die
+t "a die after a2enmod (a2ensite fails): modules dismodded, record cleared"                  wb_rb_a2ensite
+t "a die in the middle of the module loop dismods what was already enabled"                  wb_rb_midloop
+t "rollback dismods only the modules THIS run enabled"                                       wb_rb_only_ours
+t "an Apache we installed is not rolled back (it is ours)"                                   wb_owned_no_rb
+t "enabled modules are persisted at once (state file), before any later phase"               wb_state_persists
+t "the manifest unions the state file, then clears it"                                       wb_state_to_manifest
+
+# ---- 4. no apt, no iproute2 before the plan is confirmed: /proc/net/tcp fallback ----
+echo "=== port probe without ss ==="
+proc_setup() {  # a host without iproute2: listeners come from /proc/net/tcp{,6}
+  base; source "$INSTALLER"; log() { :; }; warn() { :; }; have_cmd() { return 1; }
+  _have_ss() { return 1; }
+  PD=$(mktemp -d); mkdir -p "$PD/net" "$PD/proc"; export LARANODE_PROC_NET_DIR="$PD/net" LARANODE_PROC_DIR="$PD/proc"
+  H='  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode'
+  { echo "$H"
+    echo '   0: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1234 1 0000000000000000 100 0 0 10 0'
+    echo '   1: 0100007F:1F90 0100007F:ABCD 01 00000000:00000000 00:00000000 00000000     0        0 5555 1 0000000000000000 100 0 0 10 0'
+    echo '   2: 0100007F:2328 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 7777 1 0000000000000000 100 0 0 10 0'; } > "$PD/net/tcp"
+  { echo "$H"
+    echo '   0: 00000000000000000000000000000000:1F91 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4321 1 0000000000000000 100 0 0 10 0'; } > "$PD/net/tcp6"
+  mkdir -p "$PD/proc/4242/fd" "$PD/proc/99/fd"; echo apache2 > "$PD/proc/4242/comm"; echo python3 > "$PD/proc/99/comm"
+  ln -s 'socket:[1234]' "$PD/proc/4242/fd/3" 2>/dev/null; ln -s 'socket:[4321]' "$PD/proc/99/fd/5" 2>/dev/null
+  HAVE_SYMLINKS=0; [ -L "$PD/proc/4242/fd/3" ] && HAVE_SYMLINKS=1
+}
+pr_busy_v4()      { proc_setup; port_in_use 80; }
+pr_busy_v4_high() { proc_setup; port_in_use 9000; }           # 0x2328 listening on 127.0.0.1
+pr_busy_v6()      { proc_setup; port_in_use 8081; }
+pr_free_est()     { proc_setup; ! port_in_use 8080; }         # 8080 is only an ESTABLISHED connection
+pr_free_none()    { proc_setup; ! port_in_use 8099; }
+pr_no_tcp6()      { proc_setup; rm -f "$PD/net/tcp6"; port_in_use 80 && ! port_in_use 8081; }
+pr_holder()       { proc_setup; [ "$HAVE_SYMLINKS" = 1 ] || { echo "(no symlinks here: skipped)"; return 0; }; [ "$(_port_holder 80)" = apache2 ] && [ "$(_port_holder 8081)" = python3 ]; }
+pr_holder_unknown(){ proc_setup; [ "$(_port_holder 9000)" = "another process" ]; }
+pr_probe_missing(){ proc_setup; rm -f "$PD/net/tcp" "$PD/net/tcp6"; pkg_installed() { return 1; }; pg_cluster_count() { echo 0; }; preflight; }
+pr_preflight_busy() { proc_setup; pkg_installed() { return 1; }; pg_cluster_count() { echo 0; }; export LARANODE_HTTP_PORT=8081 LARANODE_MANIFEST_FILE=/nonexistent
+  out=$( (preflight) 2>&1 ); [ $? -ne 0 ] && printf '%s' "$out" | grep -q '8081'; }
+pr_preflight_own_rerun() { proc_setup; [ "$HAVE_SYMLINKS" = 1 ] || { echo "(no symlinks here: skipped)"; return 0; }
+  pkg_installed() { [ "$1" = apache2 ]; }; svc_active() { [ "$1" = apache2 ]; }; pg_cluster_count() { echo 0; }
+  export LARANODE_HTTP_PORT=80 LARANODE_MANIFEST_FILE=/nonexistent; _panel_vhost_enabled() { return 0; }; preflight; }
+mn_no_apt_before_plan() { base; _have_ss() { return 1; }; MLOG=$(mktemp); detect_os() { :; }
+  apt-get() { echo "apt-get $*" >> "$MLOG"; }; apt_install() { echo "apt_install $*" >> "$MLOG"; }
+  preflight() { echo "PREFLIGHT" >> "$MLOG"; }
+  phase_packages() { :; }; phase_fetch_panel() { :; }; phase_database() { :; }; phase_webserver() { :; }; phase_php_node() { :; }
+  phase_app() { :; }; phase_services() { :; }; phase_summary() { :; }
+  main >/dev/null 2>&1
+  [ "$(head -1 "$MLOG")" = PREFLIGHT ] && ! grep -q apt "$MLOG"; }
+t  "no ss: a v4 listener on :80 is found via /proc/net/tcp"                               pr_busy_v4
+t  "no ss: a listener on a high port (0x2328) is found"                                    pr_busy_v4_high
+t  "no ss: an IPv6-only listener (tcp6) is found"                                          pr_busy_v6
+t  "no ss: an ESTABLISHED connection is not a listener"                                    pr_free_est
+t  "no ss: an unused port is free"                                                         pr_free_none
+t  "no ss: a missing tcp6 file is fine"                                                    pr_no_tcp6
+t  "no ss: the holder's name is found through /proc/<pid>/fd"                               pr_holder
+t  "no ss: an unknown holder reads 'another process'"                                      pr_holder_unknown
+tf "neither ss nor /proc/net/tcp: refused (every port would read free)"                    pr_probe_missing
+t  "no ss: a busy panel port is still refused, naming the port"                            pr_preflight_busy
+t  "no ss: the panel's own Apache on a re-run is still accepted (holder from /proc)"       pr_preflight_own_rerun
+t  "main: nothing runs apt before preflight (no apt-get update, no iproute2) when ss is missing" mn_no_apt_before_plan
 echo ""
 echo "Results: passed=$PASS  failed=$FAIL"
 [ "$FAIL" -eq 0 ] && echo "ALL PASS" && exit 0

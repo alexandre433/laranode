@@ -79,6 +79,7 @@ echo "=== preflight ==="
   # shellcheck source=/dev/null
   source "$INSTALLER"
   port_in_use() { return 1; }
+  _probe_available() { return 0; }
   have_cmd()    { return 1; }
   pkg_installed() { return 1; }   # hermetic: a runner with apache2/php installed must not leak in
   svc_active()    { return 1; }
@@ -95,6 +96,7 @@ echo "=== preflight ==="
   # shellcheck source=/dev/null
   source "$INSTALLER"
   port_in_use() { return 1; }
+  _probe_available() { return 0; }
   have_cmd()    { return 1; }
   pkg_installed() { return 1; }   # hermetic: a runner with apache2/php installed must not leak in
   svc_active()    { return 1; }
@@ -110,6 +112,7 @@ echo "=== preflight ==="
   # shellcheck source=/dev/null
   source "$INSTALLER"
   port_in_use() { [ "$1" = 80 ]; }
+  _probe_available() { return 0; }
   have_cmd()    { return 1; }
   pkg_installed() { return 1; }   # hermetic: a runner with apache2/php installed must not leak in
   svc_active()    { return 1; }
@@ -125,6 +128,7 @@ echo "=== preflight ==="
   # shellcheck source=/dev/null
   source "$INSTALLER"
   port_in_use() { [ "$1" = 80 ]; }
+  _probe_available() { return 0; }
   have_cmd()    { return 1; }
   pkg_installed() { return 1; }   # hermetic: a runner with apache2/php installed must not leak in
   svc_active()    { return 1; }

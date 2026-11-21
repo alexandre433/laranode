@@ -107,6 +107,9 @@ Pre-existing Apache / php-fpm (manifest `managed:false`) are never restarted: a 
 | nginx on :80 | Panel vhost written to `laranode.conf` on :8080; existing server fully untouched |
 | Apache on :80 (live sites) | Its `Listen`/`000-default`/sites/mod_ssl are never changed; panel gets its own vhost + `Listen 8080` (PHP-FPM handler inline in that vhost, no global `a2enconf`); Apache is **gracefully reloaded** (same PID, no dropped connections), never restarted or `a2dissite`d. `LARANODE_BIND` + :80 is refused (cannot narrow its wildcard `Listen 80`) |
 | Apache/php-fpm installed but STOPPED | Not ours: ownership means *the package was absent before this run* (or a previous run recorded it `managed:true`), not *it is running*. Refused in preflight (nothing changed) unless `LARANODE_START_STOPPED=1`; with it the unit is only started, never enabled, `ports.conf`/`000-default`/modules of the owner are untouched. Refused regardless of the opt-in when its own `Listen` port is held by another service (it could not start) |
+| php8.4-fpm installed and LIVE | The php8.4 extension packages' postinst try-restart a running php8.4-fpm (an outage for its pools). While they install, a marked `policy-rc.d` guard (`exit 101`) holds back service starts; `phase_services` then **reloads** the pool. The guard is only created when no `policy-rc.d` exists, carries a marker + the installer pid, is removed on every exit/signal, and a marked leftover from a SIGKILL/OOM/power loss is removed at the next start (a `policy-rc.d` without the marker is never touched) |
+| Pre-existing Apache, a later step fails | From the moment the owner's files are snapshotted, ANY later `die` (configtest, reload, "not active", "not listening", firewall, ...) restores `ports.conf`, removes/restores the panel vhost, disables the modules this run enabled (recorded one by one in `/etc/laranode/apache-modules-enabled` so the record survives a die) and reloads the owner's Apache back onto its old config. An Apache this installer installed is never rolled back |
+| No `ss` on the host | Port probing falls back to `/proc/net/tcp{,6}` (holder via `/proc/<pid>/fd`); the installer never runs `apt-get update` or installs iproute2 before the confirm prompt. If neither probe works, preflight refuses |
 | Panel port already in use | `HTTP_PORT` (default 80, fallback 8080/8090, or `LARANODE_HTTP_PORT`) must be free before Apache config is touched; a graceful reload that cannot bind a new `Listen` can take a running Apache down and `apachectl configtest` does not bind. Refused with the holder named. Only the panel's own Apache vhost from a previous run is accepted |
 | MySQL with a root password | Authenticates with `LARANODE_MYSQL_ROOT_PASSWORD`; root password **never changed** |
 | Multiple Postgres clusters | `LARANODE_PG_PORT` required; only that cluster's socket is touched |
@@ -148,7 +151,7 @@ world-readable, one service per line so shell and PHP can both parse it:
 
 ### Install-test matrix
 
-CI (`.github/workflows/installer-tests.yml`) runs the unit tests, `local-dev/install-test/mutation-smoke.sh` (reverts each reviewed guard in a copy of the installer; every mutation must turn the unit tests red) and the `port-busy`, `apache-stopped`, `apache80` and `nginx80` scenarios on every PR and on pushes to `development`.
+CI (`.github/workflows/installer-tests.yml`) runs the unit tests, `local-dev/install-test/mutation-smoke.sh` (reverts each reviewed guard in a copy of the installer; every mutation must turn the unit tests red) and ALL 12 container scenarios (one parallel matrix job each, wall time = slowest scenario) on every PR and on pushes to `development`. Extra test seams: `LARANODE_APACHE_MODS_STATE`, `LARANODE_PROC_NET_DIR`, `LARANODE_PROC_DIR`, `LARANODE_POLICY_RC_D`.
 
 Clean-room integration tests in `local-dev/install-test/` boot one vanilla
 `jrei/systemd-ubuntu:24.04` container per scenario, inject the repo, run the real
@@ -157,9 +160,9 @@ installer, and assert services active + HTTP 200 + admin login. Run from the rep
     make -f local-dev/Makefile install-test-unit       # host helper + host-detection unit tests (no container, ~2 s)
     make -f local-dev/Makefile install-test-templates  # host template-content tests (no container)
     make -f local-dev/Makefile install-test            # baseline scenario only
-    make -f local-dev/Makefile install-test-matrix     # all 11 scenarios (~1-2 hr)
+    make -f local-dev/Makefile install-test-matrix     # all 12 scenarios (~1-2 hr)
 
-Scenarios: `baseline` | `nginx80` | `mysql-rootpw` | `pgsql` | `rerun` | `debian13` | `pve` | `cloudpanel` | `apache80` | `port-busy` | `apache-stopped`.
+Scenarios: `baseline` | `nginx80` | `mysql-rootpw` | `pgsql` | `rerun` | `debian13` | `pve` | `cloudpanel` | `apache80` | `port-busy` | `apache-stopped` | `phpfpm-live`.
 Run or debug a single scenario:
 
     bash local-dev/install-test/run.sh pgsql
