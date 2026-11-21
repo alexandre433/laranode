@@ -58,6 +58,8 @@ fx_reset() {
     printf '%s\n' "$evil" > /tmp/evil.template
     chown -R www-data:www-data /tmp/evildir /tmp/evil.template
     runuser -u www-data -- ln -sfn /etc /home/alice_ln/domains/linketc
+    # a FIFO planted by the web user: opening it would block a root script for ever
+    runuser -u www-data -- mkfifo /home/alice_ln/domains/example.com/public/fifo
     runuser -u www-data -- ln -sfn /etc/hostname /tmp/laranode-link-out
     runuser -u www-data -- ln -sfn /etc/shadow /tmp/laranode-restore-link
     # valid temp inputs, created by www-data like PHP's tempnam()
@@ -103,6 +105,8 @@ V_domain=example.com
 H_domain=( '../x' 'a/b' 'a b' "a${NL}b" '-x.com' '*' 'x.com;id' 'x..com' '' 'a.com/../../etc/cron.d/x' '.hidden' 'a.com.' 'a$(id).com' 'a|b.com' '-' 'a#b.com' )
 V_phpver=8.4;   H_phpver=( '8.4;id' '../8.4' '-o Dpkg::Pre-Invoke=id' '8.4 8.3' '*' 8 "8.4${NL}" '' 8.4.1 x '8.4-*' )
 V_phpold=8.3;   H_phpold=( "${H_phpver[@]}" )
+# uninstalling php8.4 would remove the PHP the panel itself runs on: refused
+V_phpverrm=8.3; H_phpverrm=( "${H_phpver[@]}" 8.4 )
 V_docroot=/public
 H_docroot=( '/../../..' '/a b' "/a${NL}b" '/a;id' '/a&b' '/a|b' '/a"b' '/$(id)' '~' '/a#b' '/a\\b' '/../etc' )
 V_port=9100;    H_port=( 0 99 9099 9500 99999 '9100;id' -1 '9100 ' '' 0x2000 "9100${NL}9101" )
@@ -127,7 +131,7 @@ H_destdir=( /etc /etc/cron.d '/home/alice_ln/domains/../../../etc' /home/bob_ln/
 V_dirpath=/home/alice_ln/domains/new.com/public
 H_dirpath=( /etc/cron.d/x '/home/alice_ln/domains/../../../etc/x' /home/bob_ln/domains/x /tmp/x "/home/alice_ln/domains/x${NL}y" relative -x '' /home/alice_ln/domains/linketc/x /etc )
 V_relpath=domains/example.com/public/index.php
-H_relpath=( domains/linketc/hostname domains/linketc/passwd '../../etc/passwd' '../../../etc/hostname' 'domains/../../../etc/hostname' domains/linketc "a${NL}b" '' '-x' '../bob_ln/domains/example.org/public' '../../../../etc/hostname' )
+H_relpath=( domains/example.com/public/fifo domains/linketc/hostname domains/linketc/passwd '../../etc/passwd' '../../../etc/hostname' 'domains/../../../etc/hostname' domains/linketc "a${NL}b" '' '-x' '../bob_ln/domains/example.org/public' '../../../../etc/hostname' )
 V_tpl_pool="$TPL/php-fpm-pool.template"
 H_tpl_pool=( /tmp/evil.template /etc/passwd "$TPL/../../../../tmp/evil.template" "$TPL/php-fpm-pool.template${NL}" '' relative.template -x /tmp/evildir/php-fpm-pool.template "$TPL/apache-vhost.template" )
 V_tpl_vhost="$TPL/apache-vhost.template"
@@ -178,7 +182,7 @@ SPECS=(
  'php-install|laranode-php-install.sh|root|phpver|grep -q "php8.4-fpm" /var/log/laranode-stub.log'
  'php-list|laranode-php-list.sh|root||true'
  'php-service|laranode-php-service.sh|root|phpaction phpver|grep -q "systemctl restart php8.4-fpm" /var/log/laranode-stub.log'
- 'php-uninstall|laranode-php-uninstall.sh|root|phpver|grep -q "apt-get remove" /var/log/laranode-stub.log'
+ 'php-uninstall|laranode-php-uninstall.sh|root|phpverrm|grep -q "apt-get remove -y php8.3-" /var/log/laranode-stub.log'
  'remove-all-pools|laranode-remove-all-user-php-fpm-pools.sh|root|userrm|[ ! -e /etc/php/8.4/fpm/pool.d/alice_ln.conf ]'
  'remove-pool-user|laranode-remove-php-fpm-pool-for-user.sh|root|userrm phpver|[ ! -e /etc/php/8.4/fpm/pool.d/alice_ln.conf ]'
  'restart-php-fpm|laranode-restart-php-fpm.sh|root|phpver|true'

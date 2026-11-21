@@ -1272,6 +1272,46 @@ t "an inherited LARANODE_ROLLBACK_DIR cannot point the rollback's rm -rf elsewhe
 t "an inherited APT_ALLOW_SERVICE_START=1 cannot unguard the base apt installs"             env_apt_flag_ignored
 t "the documented overrides (MANIFEST_FILE, PROBE_PROC, LARANODE_OS) are still honoured"    env_documented_overrides_kept
 
+
+# ---- root never executes PHP that lives in the panel tree --------------------
+# (www-data can write parts of the tree; Laravel `require`s bootstrap/cache/*.php on every
+# artisan call, so a root artisan/composer run would execute whatever was planted there)
+priv_artisan_via_runuser() { local out
+  out=$(bash -c "
+    source '$INSTALLER'
+    runuser() { printf 'runuser %s\n' \"\$*\"; }
+    _artisan migrate --force")
+  case "$out" in
+    'runuser -u laranode_ln -- env HOME=/home/laranode_ln'*' /usr/bin/php8.4 artisan migrate --force') : ;;
+    *) echo "unexpected command: $out"; return 1 ;;
+  esac; }
+priv_no_root_php_lines() { local bad
+  # every line that runs artisan or composer must go through the panel-user helpers
+  bad=$(grep -nE '(^|[^[:alnum:]_])/usr/bin/php8\.4 +(artisan|/usr/local/bin/composer)' "$INSTALLER" \
+        | grep -vE '_as_panel_user|sudo -u laranode_ln' || true)
+  [ -z "$bad" ] || { echo "root runs PHP in the panel tree:"; echo "$bad"; return 1; }
+  grep -qE '^[[:space:]]+(artisan|php8\.4 artisan|php artisan) ' "$INSTALLER" && return 1
+  return 0; }
+priv_settle_not_web_writable() { local body
+  body=$(bash -c "source '$INSTALLER'; declare -f _settle_permissions")
+  [ -n "$body" ] || return 1
+  case "$body" in *bootstrap/cache*) echo "settle touches bootstrap/cache"; return 1 ;; esac; }
+priv_prepare_wipes_caches() { local body
+  body=$(bash -c "source '$INSTALLER'; declare -f _prepare_panel_tree")
+  case "$body" in *'chown -R'*laranode_ln*) : ;; *) echo "tree not chowned to the panel user"; return 1 ;; esac
+  case "$body" in *bootstrap/cache*-delete*) : ;; *) echo "bootstrap/cache/*.php not deleted"; return 1 ;; esac; }
+priv_phase_app_prepares_first() { local body
+  body=$(bash -c "source '$INSTALLER'; declare -f phase_app")
+  # _prepare_panel_tree must precede the first composer/artisan call
+  local pre first
+  pre=$(printf '%s\n' "$body" | grep -n '_prepare_panel_tree' | head -1 | cut -d: -f1)
+  first=$(printf '%s\n' "$body" | grep -nE '_as_panel_user|_artisan' | head -1 | cut -d: -f1)
+  [ -n "$pre" ] && [ -n "$first" ] && [ "$pre" -lt "$first" ]; }
+t "artisan runs as laranode_ln (runuser), never as root"                      priv_artisan_via_runuser
+t "no composer/artisan line in the installer runs as root"                    priv_no_root_php_lines
+t "the permission settle leaves bootstrap/cache out of the web-writable set"  priv_settle_not_web_writable
+t "the tree is chowned to the panel user and bootstrap caches wiped"          priv_prepare_wipes_caches
+t "phase_app prepares the tree before any composer/artisan call"              priv_phase_app_prepares_first
 echo ""
 echo "Results: passed=$PASS  failed=$FAIL"
 [ "$FAIL" -eq 0 ] && echo "ALL PASS" && exit 0

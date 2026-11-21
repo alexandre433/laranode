@@ -217,6 +217,10 @@ ln_install_file() {
 ln_open9_under() {   # <path> <prefix>
     local real
     exec 9<&- 2>/dev/null || true
+    # opening a FIFO blocks until a writer shows up: a tenant could park a root script for ever.
+    # Only regular files and directories are ever opened here (a swap after this check can only
+    # delay the script, not redirect it: the inode we hold is still proven below).
+    { [ -f "$1" ] || [ -d "$1" ]; } && [ ! -p "$1" ] || ln_die "not a regular file or directory"
     if ! exec 9<"$1"; then ln_die "cannot open path"; fi
     real=$(readlink -f -- /proc/self/fd/9) || ln_die "cannot resolve path"
     case "$real" in "$2"/*) : ;; *) ln_die "path outside $2" ;; esac

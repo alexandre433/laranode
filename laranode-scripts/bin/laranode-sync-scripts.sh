@@ -49,26 +49,36 @@ chmod 755 "$STAGE"
 mkdir -p "$STAGE/bin" "$STAGE/lib" "$STAGE/templates" "$STAGE/etc/sudoers.d"
 
 # ---- bin: every laranode-*.sh, except the installer (run by hand from the tree) -------
+# stage_file <src> <dst> <mode>: copy WITHOUT following a symlink (cp -P opens the source
+# O_NOFOLLOW), then require a plain regular file. Everything is then checked and published
+# from the root-only COPY: the panel account cannot swap the source between check and use,
+# and a link swapped in after the symlink scan cannot make root copy /etc/shadow into the tree.
+stage_file() {
+    cp -P --no-preserve=all -- "$1" "$2" || die "cannot copy ${1##*/}"
+    [ -f "$2" ] && [ ! -L "$2" ] || die "${1##*/} is not a regular file"
+    chown root:root -- "$2"; chmod "$3" -- "$2"
+}
+
 n=0
 for f in "$SRC"/bin/laranode-*.sh; do
     b=${f##*/}
     [ "$b" = laranode-installer.sh ] && continue
     [[ $b =~ ^laranode-[a-z0-9-]+\.sh$ ]] || die "unexpected script name: $b"
-    bash -n "$f" || die "syntax error in $b"
-    install -o root -g root -m 755 -- "$f" "$STAGE/bin/$b"
+    stage_file "$f" "$STAGE/bin/$b" 755
+    bash -n "$STAGE/bin/$b" || die "syntax error in $b"
     n=$((n + 1))
 done
 [ "$n" -gt 0 ] || die "no scripts found in $SRC/bin"
 # the postgres sudoers snippet is data, kept for the pgsql branch
-[ -f "$SRC/bin/laranode-postgres-sudoers" ] && install -o root -g root -m 644 -- "$SRC/bin/laranode-postgres-sudoers" "$STAGE/bin/laranode-postgres-sudoers"
+[ -f "$SRC/bin/laranode-postgres-sudoers" ] && stage_file "$SRC/bin/laranode-postgres-sudoers" "$STAGE/bin/laranode-postgres-sudoers" 644
 
 for f in "$SRC"/lib/*.sh; do
-    bash -n "$f" || die "syntax error in lib/${f##*/}"
-    install -o root -g root -m 644 -- "$f" "$STAGE/lib/${f##*/}"
+    stage_file "$f" "$STAGE/lib/${f##*/}" 644
+    bash -n "$STAGE/lib/${f##*/}" || die "syntax error in lib/${f##*/}"
 done
 for f in "$SRC"/templates/*; do
     [ -f "$f" ] || continue
-    install -o root -g root -m 644 -- "$f" "$STAGE/templates/${f##*/}"
+    stage_file "$f" "$STAGE/templates/${f##*/}" 644
 done
 # ---- sudoers drop-ins: a strict ALLOWLIST, checked on the STAGED copy -------------------
 # The drop-in comes from the panel checkout (writable by laranode_ln). Copy it first into the
@@ -119,7 +129,7 @@ for f in "$SRC"/etc/sudoers.d/*; do
     [ -f "$f" ] || continue
     d=${f##*/}
     [[ $d =~ ^laranode-[a-z0-9-]+$ ]] || die "unexpected sudoers drop-in name: $d"
-    install -o root -g root -m 644 -- "$f" "$STAGE/etc/sudoers.d/$d"
+    stage_file "$f" "$STAGE/etc/sudoers.d/$d" 644
     visudo -c -f "$STAGE/etc/sudoers.d/$d" >/dev/null || die "sudoers drop-in $d failed syntax check"
     sudoers_file_ok "$STAGE/etc/sudoers.d/$d" || die "sudoers drop-in $d grants more than a laranode script inside $DEST/bin"
 done

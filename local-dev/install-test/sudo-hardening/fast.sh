@@ -56,7 +56,8 @@ chmod 750 /home/laranode_ln
 mkdir -p "$PANEL"
 ( cd "$SRC" && tar --exclude=.git --exclude=node_modules --exclude=vendor --exclude=public/build -cf - . ) | tar -xf - -C "$PANEL"
 printf 'APP_KEY=base64:x\nDB_PASSWORD=secret\n' > "$PANEL/.env"
-mkdir -p "$PANEL/storage" "$PANEL/bootstrap"
+mkdir -p "$PANEL/storage" "$PANEL/bootstrap/cache"
+: > "$PANEL/bootstrap/cache/packages.php"   # a generated cache file, as composer leaves it
 
 INSTALLER="$PANEL/laranode-scripts/bin/laranode-installer.sh"
 if grep -q '^_install_privileged_scripts()' "$INSTALLER"; then

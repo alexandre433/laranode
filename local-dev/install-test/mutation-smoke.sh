@@ -67,6 +67,13 @@ MUTATIONS=(
   'inherited APT_ALLOW_SERVICE_START kept|s#unset APT_ALLOW_SERVICE_START #unset #'
   'inherited LARANODE_ROLLBACK_DIR kept|s#LARANODE_ROLLBACK_DIR LARANODE_INSTALLER_PID#LARANODE_INSTALLER_PID#'
   'inherited LARANODE_INSTALLER_PID kept|s#LARANODE_INSTALLER_PID LARANODE_INSTALLER_START#LARANODE_INSTALLER_START#'
+  # sudo review r1: root never runs PHP from the panel tree
+  'artisan runs as root again|s#^_artisan() { _as_panel_user /usr/bin/php8.4 artisan "\$@"; }#_artisan() { /usr/bin/php8.4 artisan "$@"; }#'
+  'composer runs as root again|s#_as_panel_user /usr/bin/php8.4 /usr/local/bin/composer#/usr/bin/php8.4 /usr/local/bin/composer#'
+  'settle makes bootstrap/cache web-writable again|s#^  chmod 770 "\$h/logs"$#  chmod 770 "$h/logs" "$p/bootstrap/cache"#'
+  'panel tree not chowned before the first PHP run|s#chown -R -h laranode_ln:laranode_ln "\$p"#:#'
+  'planted bootstrap caches kept|s# -delete$# -print#'
+  'tree never prepared before the first composer/artisan run|s#^  _prepare_panel_tree$#  :#'
 )
 
 fail=0

@@ -8,6 +8,9 @@ LN_ARGC=$#
 # Usage: laranode-php-uninstall.sh {version}      Example: laranode-php-uninstall.sh 8.4
 ln_argc 1 1 "$0 {php version: example 8.4}"
 ln_phpver "$1" PHP_VERSION
+# the panel itself (artisan, queue worker, scheduler, Reverb) runs on php8.4: removing it would
+# take the panel down and could not be undone from the panel
+[ "$PHP_VERSION" != 8.4 ] || ln_die "php8.4 runs the panel and cannot be uninstalled from it"
 
 echo "Uninstalling PHP $PHP_VERSION-FPM..."
 

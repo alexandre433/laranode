@@ -82,6 +82,24 @@ hostile 'grant with no trailing newline'        "www-data ALL=(ALL) NOPASSWD: AL
 hostile 'drop-in with a foreign file name'      "" evil-dropin
 hostile 'drop-in name with a dot'               "" laranode.evil
 
+# a symlink anywhere in the tree must never be followed by the root copy (it would publish
+# e.g. /etc/shadow, world-readable, into the script directory)
+symlink_case() {   # <label> <path under laranode-scripts> <target>
+    local label="$1" rel="$2" target="$3" out rc
+    fresh "s$n"
+    ln -s "$target" "$T/panel/laranode-scripts/$rel"
+    out=$(run_sync); rc=$?
+    n=$((n + 1))
+    if [ "$rc" -eq 0 ]; then bad "sync FOLLOWED/ignored a symlink: $label"
+    elif [ -e "$D" ]; then bad "sync refused ($label) but had already published a copy"
+    else ok "refused: $label"; fi
+}
+echo "== sync-scripts: symlinks in the source tree are refused =="
+symlink_case 'script is a symlink'    bin/laranode-evil.sh   /etc/hostname
+symlink_case 'lib file is a symlink'  lib/evil.sh            /etc/hostname
+symlink_case 'template is a symlink'  templates/evil.template /etc/shadow
+symlink_case 'sudoers drop-in is a symlink' etc/sudoers.d/laranode-evil /etc/hostname
+
 echo "sync-scripts cases run: $n"
 if [ "$fail" = 0 ]; then echo "SYNC: PASS"; else echo "SYNC: FAIL" >&2; fi
 exit "$fail"

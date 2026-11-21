@@ -25,6 +25,10 @@ L=lib/validate.sh
 #   ln_sysuser first regex, ln_newuser dash/panel-user (useradd refuses), ln_install_file symlink
 #   (needs a symlink in a root-only dir), ln_siteroot symlink, restore-files user (BASE path check),
 #   file-permissions "..", symlink (fd prefix check), sync script owner (settle chown -R root)
+#   r2 sync allowlist: a trailing backslash, a CR, a NUL byte (each line is also refused by the
+#   per-line grammar, or is inert inside a comment: defense in depth), the staged-copy symlink check
+#   (the source-tree symlink scan refuses first; the check only closes a race), _prepare_panel_tree
+#   chmod 750 on bootstrap/cache (the settle step re-chmods the whole tree right after)
 # --- shared guards ---------------------------------------------------------------------
 mut $L 'ln_secret accepts a newline (chpasswd line injection)' \
     '    [[ $v == *$'"'"'\n'"'"'* || $v == *$'"'"'\r'"'"'* ]] && ln_die "invalid password"' ''
@@ -66,12 +70,37 @@ mut etc/sudoers.d/laranode-ufw 'sudoers: ufw binary grant back' '' 'www-data ALL
 mut bin/laranode-installer.sh 'installer: panel dirs left group-writable' 'find "$h" -type d -exec chmod 750 {} +' 'find "$h" -type d -exec chmod 770 {} +'
 mut bin/laranode-installer.sh 'installer: panel files group-writable' 'find "$h" -type f -exec chmod 640 {} +' 'find "$h" -type f -exec chmod 660 {} +'
 mut bin/laranode-installer.sh 'installer: .env group-writable' '[ -f "$p/.env" ] && chmod 640 "$p/.env"' '[ -f "$p/.env" ] && chmod 660 "$p/.env"'
-mut bin/laranode-sync-scripts.sh 'sync: script copy group-writable' '-o root -g root -m 755 -- "$f" "$STAGE/bin/$b"' '-o root -g root -m 775 -- "$f" "$STAGE/bin/$b"'
-mut bin/laranode-sync-scripts.sh 'sync: lib copy world-writable' '-o root -g root -m 644 -- "$f" "$STAGE/lib/' '-o root -g root -m 666 -- "$f" "$STAGE/lib/'
+mut bin/laranode-sync-scripts.sh 'sync: script copy group-writable' 'stage_file "$f" "$STAGE/bin/$b" 755' 'stage_file "$f" "$STAGE/bin/$b" 775'
+mut bin/laranode-sync-scripts.sh 'sync: lib copy world-writable' 'stage_file "$f" "$STAGE/lib/${f##*/}" 644' 'stage_file "$f" "$STAGE/lib/${f##*/}" 666'
 mut etc/sudoers.d/laranode-panel 'sudoers: rm glob grant back' '' 'www-data ALL=(ALL) NOPASSWD: /usr/bin/rm /etc/apache2/sites-available/*.conf'
 mut etc/sudoers.d/laranode-panel 'sudoers: script from the writable panel tree' '' 'www-data ALL=(ALL) NOPASSWD: /home/laranode_ln/panel/laranode-scripts/bin/laranode-cron.sh'
 mut etc/sudoers.d/laranode-panel 'sudoers: any-args a2dissite back' '' 'www-data ALL=(ALL) NOPASSWD: /usr/sbin/a2dissite'
 mut etc/sudoers.d/laranode-panel 'sudoers: wildcard over the script directory' '' 'www-data ALL=(ALL) NOPASSWD: /usr/local/lib/laranode/bin/*'
+# --- r2: sync-scripts sudoers allowlist (each bypass of review r1 + the new parse rules) ---
+S=bin/laranode-sync-scripts.sh
+mut $S 'sync: any line not matching a grant shape passes (NOPASSWD: ALL)' \
+    $'    done\n    return 1\n}\nsudoers_file_ok()' $'    done\n    return 0\n}\nsudoers_file_ok()'
+mut $S 'sync: comma list after the script allowed' \
+    '[[ $rest =~ ^laranode-[a-z0-9-]+\.sh(\ \"\")?$ ]] && return 0' '[[ $rest =~ ^laranode- ]] && return 0'
+mut $S 'sync: Defaults line may carry anything after the script' \
+    '[[ $rest =~ ^laranode-[a-z0-9-]+\.sh\ \!requiretty$ ]] && return 0' '[[ $rest =~ ^laranode- ]] && return 0'
+mut $S 'sync: #include / #includedir comment allowed' \
+    '[[ $l =~ ^#[[:space:]]*(include|includedir)([[:space:]]|$) ]] && return 1' ':'
+mut $S 'sync: unterminated last line not refused' \
+    '[ ! -s "$f" ] || [ -z "$(tail -c1 "$f")" ] || return 1' ':'
+mut $S 'sync: drop-in name not checked' \
+    '[[ $d =~ ^laranode-[a-z0-9-]+$ ]] || die "unexpected sudoers drop-in name: $d"' ':'
+mut $S 'sync: allowlist never applied to the staged drop-in' \
+    'sudoers_file_ok "$STAGE/etc/sudoers.d/$d" || die "sudoers drop-in $d grants more than a laranode script inside $DEST/bin"' ':'
+# --- r2: account creation without SSH, php-uninstall, FIFO, bootstrap/cache -------------
+mut bin/laranode-user-manager.sh 'user-manager: empty password operand refused (ssh-off regression)' \
+    'if [ $# -ge 4 ] && [ -n "$4" ]; then' 'if [ $# -ge 4 ]; then'
+mut bin/laranode-php-uninstall.sh 'php-uninstall: removes the php that runs the panel' \
+    '[ "$PHP_VERSION" != 8.4 ] || ln_die "php8.4 runs the panel and cannot be uninstalled from it"' ':'
+mut $L 'ln_open9_under opens a FIFO (root hangs for ever)' \
+    '{ [ -f "$1" ] || [ -d "$1" ]; } && [ ! -p "$1" ] || ln_die "not a regular file or directory"' ':'
+mut bin/laranode-installer.sh 'installer: settle step makes bootstrap/cache web-writable' \
+    '  chmod 770 "$h/logs"' '  chmod 770 "$h/logs" "$p/bootstrap/cache"'
 
 IMG=laranode-sudo-fast
 docker build -q -t "$IMG" - >/dev/null <<'DF'

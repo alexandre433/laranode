@@ -89,5 +89,12 @@ if [ -d "$H/panel" ]; then
     fi
 fi
 
+# create-directory.sh runs `chown -R -h` as root over a tenant tree. A tenant (or www-data,
+# which is in every tenant group) could hard-link a file it does not own into that tree and
+# have root chown the shared inode. fs.protected_hardlinks=1 (the Debian/Ubuntu default)
+# forbids linking a file you cannot read AND write.
+ph=$(cat /proc/sys/fs/protected_hardlinks 2>/dev/null || echo missing)
+if [ "$ph" = 1 ]; then ok "fs.protected_hardlinks=1"; else bad "fs.protected_hardlinks is '$ph' (must be 1: root chown -R runs over tenant trees)"; fi
+
 if [ "$fail" = 0 ]; then echo "PERMS: PASS"; else echo "PERMS: FAIL" >&2; fi
 exit "$fail"
