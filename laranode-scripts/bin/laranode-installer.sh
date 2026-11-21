@@ -1,6 +1,19 @@
 #!/bin/bash
 set -euo pipefail
 
+# ---- Test seams are not part of the operator interface ----------------------------------------
+# These variables redirect or weaken safety machinery (the rollback journal dir feeds an rm -rf,
+# APT_ALLOW_SERVICE_START unguards apt, the pid/start seams fake an installer identity, the
+# *_DIR / *_FILE seams fake host detection). They exist for the unit tests only, so an inherited
+# value (`APT_ALLOW_SERVICE_START=1 ./laranode-installer.sh`, a stray export in a profile) is
+# dropped here unless the test harness says so. The documented overrides (LARANODE_OS,
+# LARANODE_MANIFEST_FILE, LARANODE_PROBE_PROC, ...) are not touched.
+if [ "${LARANODE_INSTALLER_TEST:-0}" != 1 ]; then
+  unset APT_ALLOW_SERVICE_START LARANODE_ROLLBACK_DIR LARANODE_INSTALLER_PID LARANODE_INSTALLER_START \
+        LARANODE_POLICY_RC_D LARANODE_APACHE_DIR LARANODE_APACHE_MODS_STATE LARANODE_OS_RELEASE_FILE \
+        LARANODE_PVE_DIR LARANODE_CLP_DIR LARANODE_CRON_DIR LARANODE_PROC_NET_DIR LARANODE_PROC_DIR
+fi
+
 export DEBIAN_FRONTEND=noninteractive
 # needrestart (default on Ubuntu 22.04+/24.04 images) restarts services after apt
 # installs. List-only mode (l) and suspend stop it from restarting host services
@@ -31,8 +44,60 @@ warn() { echo "WARN: $*" >&2; }
 log()  { echo -e "\033[34m== $* ==\033[0m"; }
 
 have_cmd()    { command -v "$1" >/dev/null 2>&1; }
-port_in_use() { ss -tlnH "( sport = :$1 )" | grep -q .; }
 svc_active()  { systemctl is-active --quiet "$1"; }
+
+# ---- Exit hooks ---------------------------------------------------------------
+# One EXIT trap runs every registered cleanup, however the installer ends: normal exit,
+# die, or INT/TERM/HUP (turned into an exit so the trap fires; bash would otherwise skip
+# it). Only SIGKILL / OOM / power loss cannot be caught: what those leave behind is
+# marked so the next start can recognise and remove it (_policy_guard_clean_stale).
+_EXIT_HOOKS=()
+_run_exit_hooks() {
+  local rc=$? h
+  trap - EXIT
+  # A second Ctrl-C / TERM / HUP while the cleanups run must not abort them half-way.
+  trap '' INT TERM HUP
+  for h in "${_EXIT_HOOKS[@]}"; do "$h" || true; done
+  return "$rc"
+}
+_add_exit_hook() {
+  local h seen=0
+  for h in "${_EXIT_HOOKS[@]}"; do [ "$h" = "$1" ] && seen=1; done
+  [ "$seen" = 1 ] || _EXIT_HOOKS+=("$1")
+  # traps are reset in a subshell while the hook list is inherited: always (re)install them
+  trap '_run_exit_hooks' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+}
+
+# ---- Listening-socket probe -------------------------------------------------
+# The plan is shown (and the operator asked to confirm) BEFORE anything is installed, so
+# the busy-port checks must work on a host without iproute2: no `ss` means reading
+# /proc/net/tcp{,6} instead of apt-installing a package first. LARANODE_PROC_NET_DIR and
+# LARANODE_PROC_DIR are test seams.
+# LARANODE_PROBE_PROC=1 forces the /proc/net/tcp fallback (test seam: a host without iproute2).
+_have_ss() { [ "${LARANODE_PROBE_PROC:-0}" != 1 ] && command -v ss >/dev/null 2>&1; }
+_proc_net() { echo "${LARANODE_PROC_NET_DIR:-/proc/net}"; }
+_proc_dir() { echo "${LARANODE_PROC_DIR:-/proc}"; }
+# _probe_available — listeners can be read (ss, or /proc/net/tcp).
+_probe_available() { _have_ss || [ -r "$(_proc_net)/tcp" ]; }
+# _proc_listen_inodes PORT — socket inode of every TCP LISTEN (state 0A) socket on PORT.
+_proc_listen_inodes() {
+  local hex f; hex=$(printf '%04X' "$1")
+  for f in "$(_proc_net)/tcp" "$(_proc_net)/tcp6"; do
+    [ -r "$f" ] || continue
+    awk -v hex="$hex" 'NR > 1 && $4 == "0A" { n = split($2, a, ":"); if (a[n] == hex) print $10 }' "$f"
+  done
+}
+port_in_use() {
+  if _have_ss; then ss -tlnH "( sport = :$1 )" | grep -q .
+  else
+    # NOT `... | grep -q .`: grep exits at the first inode, the second awk (tcp6) then writes
+    # to a closed pipe and, under pipefail, the SIGPIPE makes a dual-stack listener read FREE.
+    [ -n "$(_proc_listen_inodes "$1")" ]
+  fi
+}
 
 # Apache config root and the policy-rc.d guard path are overridable so the unit tests can run the
 # Apache phase against a scratch directory.
@@ -40,9 +105,104 @@ _apache_dir()    { echo "${LARANODE_APACHE_DIR:-/etc/apache2}"; }
 _policy_rc_d()   { echo "${LARANODE_POLICY_RC_D:-/usr/sbin/policy-rc.d}"; }
 # _port_holder PORT — name of the process listening on PORT ("another process" if unknown).
 _port_holder() {
-  local h
-  h=$(ss -tlnp "( sport = :$1 )" 2>/dev/null | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -1 || true)
+  local h="" ino fd pid
+  if _have_ss; then
+    h=$(ss -tlnp "( sport = :$1 )" 2>/dev/null | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -1 || true)
+  else
+    for ino in $(_proc_listen_inodes "$1"); do
+      for fd in "$(_proc_dir)"/[0-9]*/fd/*; do
+        [ "$(readlink "$fd" 2>/dev/null)" = "socket:[${ino}]" ] || continue
+        pid=${fd%/fd/*}
+        h=$(cat "${pid}/comm" 2>/dev/null || true)
+        [ -z "$h" ] || break 2
+      done
+    done
+  fi
   echo "${h:-another process}"
+}
+
+# ---- policy-rc.d guard ----------------------------------------------------------
+# While apt installs apache2 / the php packages, a policy-rc.d that answers 101 stops the
+# postinst scripts from starting or restarting services (a fresh Apache's default
+# 'Listen 80' would collide with nginx; a live php8.4-fpm must not be bounced). The file
+# is ours only if it carries the marker: one that is not is the owner's and is never
+# created over, removed or "cleaned". It records the installer's pid, so a guard left by
+# a killed installer (SIGKILL, OOM, power loss) is recognised as stale at the next start.
+_PG_MARK='laranode-installer policy-rc.d guard'
+_PRC_ADDED=0
+_PG_DEPTH=0
+# The installer's own pid (a test seam: unit tests run phases in subshells).
+_installer_pid() { echo "${LARANODE_INSTALLER_PID:-$$}"; }
+# A pid alone does not identify a process: after a reboot (or enough churn) another process can
+# hold the pid a dead installer had. The identity is pid + start time: "<boot id>.<starttime>" from
+# /proc/<pid>/stat (field 22, in clock ticks since boot; the boot id tells two boots apart). Empty
+# when it cannot be read; a record without it falls back to the plain pid check.
+_pid_start() {
+  local st boot
+  st=$(sed 's/.*) //' "/proc/${1}/stat" 2>/dev/null | cut -d' ' -f20) || return 0
+  [ -n "$st" ] || return 0
+  boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
+  echo "${boot}.${st}"
+}
+_installer_start() { echo "${LARANODE_INSTALLER_START:-$(_pid_start "$(_installer_pid)")}"; }
+# _pid_alive PID [START] — PID is running AND (when START is given) it is the same process.
+_pid_alive() {
+  kill -0 "$1" 2>/dev/null || return 1
+  [ -z "${2:-}" ] || [ "$(_pid_start "$1")" = "$2" ]
+}
+_policy_guard_is_ours() { [ -f "$(_policy_rc_d)" ] && grep -q "$_PG_MARK" "$(_policy_rc_d)" 2>/dev/null; }
+# The guard file answers 101 ("do not start") only while the installer that wrote it is alive.
+# After a SIGKILL / OOM / power loss the pid is dead and the file answers 0 ("allowed"): it is
+# inert at once and cannot block the owner's service starts, even before the next run removes it.
+# "Alive" means the same pid AND the same start time: a pid reused by another process after a
+# reboot answers 0 like a dead installer (see _pid_start). Without a readable start time the
+# script falls back to the pid check alone.
+_policy_guard_script() {  # _policy_guard_script PID START
+  local pid="$1" start="$2"
+  if [ -n "$start" ]; then
+    printf '#!/bin/sh\n# %s pid=%s start=%s\nkill -0 %s 2>/dev/null && [ "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null).$(sed '"'"'s/.*) //'"'"' /proc/%s/stat 2>/dev/null | cut -d'"'"' '"'"' -f20)" = "%s" ] && exit 101\nexit 0\n' \
+      "$_PG_MARK" "$pid" "$start" "$pid" "$pid" "$start"
+  else
+    printf '#!/bin/sh\n# %s pid=%s\nkill -0 %s 2>/dev/null && exit 101\nexit 0\n' "$_PG_MARK" "$pid" "$pid"
+  fi
+}
+_policy_guard_on() {
+  local prc pid start; prc=$(_policy_rc_d); pid=$(_installer_pid); start=$(_installer_start)
+  # already held by this installer (an apt_install inside a guarded phase): count it
+  if [ "$_PRC_ADDED" = 1 ]; then _PG_DEPTH=$((_PG_DEPTH + 1)); return 0; fi
+  [ ! -e "$prc" ] || return 0                       # the owner's own policy-rc.d: leave it
+  # noclobber: never overwrite a policy-rc.d that appeared since the check above
+  if ( set -C; _policy_guard_script "$pid" "$start" > "$prc" ) 2>/dev/null; then
+    chmod +x "$prc"
+    _PRC_ADDED=1
+    _PG_DEPTH=1
+    _add_exit_hook _policy_guard_release
+  fi
+}
+# _policy_guard_off — balances one _policy_guard_on; the file goes with the outermost one.
+_policy_guard_off() {
+  [ "$_PRC_ADDED" = 1 ] || return 0
+  _PG_DEPTH=$((_PG_DEPTH - 1))
+  [ "$_PG_DEPTH" -le 0 ] || return 0
+  _policy_guard_release
+}
+# _policy_guard_release — the exit hook: remove OUR guard whatever the nesting depth.
+_policy_guard_release() {
+  [ "$_PRC_ADDED" = 1 ] || return 0
+  if _policy_guard_is_ours; then rm -f "$(_policy_rc_d)"; fi
+  _PRC_ADDED=0
+  _PG_DEPTH=0
+}
+# _policy_guard_clean_stale — run at installer start: remove a marked guard whose installer
+# is gone. Anything without the marker is not ours and stays.
+_policy_guard_clean_stale() {
+  local prc pid start; prc=$(_policy_rc_d)
+  _policy_guard_is_ours || return 0
+  pid=$(sed -n "s/^# ${_PG_MARK} pid=\([0-9][0-9]*\).*/\1/p" "$prc" | head -1)
+  start=$(sed -n "s/^# ${_PG_MARK} pid=[0-9][0-9]* start=\([^ ]*\).*/\1/p" "$prc" | head -1)
+  if [ -n "$pid" ] && _pid_alive "$pid" "$start"; then return 0; fi   # another installer is running
+  warn "removing a stale ${prc} left by an interrupted Laranode install (it would silently stop every later package install from starting services)"
+  rm -f "$prc"
 }
 # _panel_vhost_enabled — the panel's own Apache vhost is already enabled (a re-run).
 _panel_vhost_enabled() { [ -e "$(_apache_dir)/sites-enabled/laranode.conf" ]; }
@@ -194,7 +354,17 @@ apt_install() {
     | awk '{print $2}' | grep -E "$_PROTECTED_PKG_RE" || true)
   [ -z "$upgrades" ] \
     || die "Refusing to install: $* — apt would UPGRADE host-managed packages:"$'\n'"${upgrades}"
-  apt-get install --no-upgrade -y "$@"
+  # On a host that already runs services, any package's postinst (a library the install
+  # pulls in, not only the named package) can try-restart them. The marked policy-rc.d guard
+  # holds service starts back for the whole install, unless the caller installs a NEW service
+  # that has to start (APT_ALLOW_SERVICE_START=1 apt_install ...). Nests with the guarded phases.
+  local guarded=0 rc=0
+  if [ "${APT_ALLOW_SERVICE_START:-0}" != 1 ] && [ -n "${PRE_UNITS:-}" ]; then
+    _policy_guard_on; guarded=1
+  fi
+  apt-get install --no-upgrade -y "$@" || rc=$?
+  [ "$guarded" = 0 ] || _policy_guard_off
+  return "$rc"
 }
 
 # ------------------------------------------------------------------------------
@@ -203,6 +373,10 @@ apt_install() {
 # ------------------------------------------------------------------------------
 preflight() {
   log "Preflight: surveying environment"
+
+  # Port probing must work BEFORE the confirm prompt without touching apt: ss, or the
+  # /proc/net/tcp fallback. Neither → refuse rather than install iproute2 unasked.
+  _probe_available || die "Cannot read listening sockets: neither 'ss' nor /proc/net/tcp is available. Install iproute2 (apt-get install iproute2) and re-run."
 
   # ---- Host identity -----------------------------------------------------------
   detect_os
@@ -217,12 +391,13 @@ preflight() {
   if port_in_use 80; then
     port80_free=0
     # Best-effort identification; cosmetic only — never fails the install.
-    local _ss_out
-    _ss_out=$(ss -tlnp '( sport = :80 )' 2>/dev/null || true)
-    if   echo "$_ss_out" | grep -qi 'nginx';  then port80_holder="nginx"
-    elif echo "$_ss_out" | grep -qi 'apache'; then port80_holder="apache2"
-    else                                           port80_holder="unknown"
-    fi
+    local _h80
+    _h80=$(_port_holder 80 || true)
+    case "$_h80" in
+      *nginx*)  port80_holder="nginx" ;;
+      *apache*|*httpd*) port80_holder="apache2" ;;
+      *)        port80_holder="unknown" ;;
+    esac
     warn ":80 is held by ${port80_holder} — panel will be placed on a different port"
   fi
 
@@ -416,7 +591,9 @@ preflight() {
 phase_packages() {
   log "Installing base tools"
   apt-get update -q
-  apt_install git curl ca-certificates sudo openssl iproute2 gnupg cron
+  apt_install git curl ca-certificates sudo openssl iproute2 gnupg
+  # cron is a NEW service that has to run (the panel's scheduler); sysstat likewise below.
+  APT_ALLOW_SERVICE_START=1 apt_install cron
   # add-apt-repository (ppa:ondrej/php) exists only on Ubuntu, and only the PPA
   # path needs it. Debian 13 ships php8.4 itself.
   if [ "$OS_ID" = ubuntu ] && [ "$IS_CLOUDPANEL" = 0 ]; then
@@ -424,7 +601,7 @@ phase_packages() {
   fi
 
   log "Installing sysstat"
-  apt_install sysstat
+  APT_ALLOW_SERVICE_START=1 apt_install sysstat
   systemctl enable sysstat
 }
 
@@ -473,7 +650,7 @@ _mysql_branch() {
     warn "Panel will create the 'laranode' account with ALL PRIVILEGES on this existing server."
   else
     log "Database — MySQL: installing mysql-server"
-    apt_install mysql-server
+    APT_ALLOW_SERVICE_START=1 apt_install mysql-server   # a NEW service: it has to start
     PANEL_DB_MANAGED=1
   fi
   # enable+start is idempotent whether mysql was just installed or pre-existed.
@@ -577,7 +754,7 @@ _pgsql_branch() {
         >> "$pgcc_conf"
       log "PostgreSQL data directory base: ${LARANODE_DATA_DIR%/}/postgresql/<ver>/<cluster>"
     fi
-    apt_install postgresql postgresql-client
+    APT_ALLOW_SERVICE_START=1 apt_install postgresql postgresql-client   # a NEW cluster: it has to start
     PANEL_DB_MANAGED=1
   fi
 
@@ -785,7 +962,7 @@ _apache_ports_conf() {
     # :443 is reserved on a Proxmox host (reverse proxies, tailnet serve): never grab it
     # with a wildcard listener, even while it happens to be free.
     sed -i -E 's/^([[:space:]]*)Listen[[:space:]]+443([[:space:]]+https)?[[:space:]]*$/\1# laranode: :443 reserved on Proxmox, disabled: Listen 443\2/' "$ports_conf"
-  elif port_in_use 443 && ! ss -tlnp '( sport = :443 )' 2>/dev/null | grep -q apache2; then
+  elif port_in_use 443 && [ "$(_port_holder 443)" != apache2 ]; then
     sed -i -E 's/^([[:space:]]*)Listen[[:space:]]+443([[:space:]]+https)?[[:space:]]*$/\1# laranode: :443 busy, disabled: Listen 443\2/' "$ports_conf"
     warn ":443 is in use on this host — Apache's 'Listen 443' disabled; panel stays HTTP-only (use the SSH tunnel)."
   elif [ -n "$BIND_ADDR" ]; then
@@ -873,14 +1050,117 @@ _configure_firewall() {
 # that is only the small set the panel itself uses, and only the modules not already
 # on; whatever this installer switched on is recorded (APACHE_MODS_ENABLED, manifest).
 APACHE_MODS_ENABLED=""
+# Where the modules this installer enabled are persisted AT ONCE (the manifest is only
+# written in the last phase, so a die in between would otherwise lose the record).
+_apache_mods_state() { echo "${LARANODE_APACHE_MODS_STATE:-/etc/laranode/apache-modules-enabled}"; }
 _apache_enable_modules() {
-  local m new=""
+  local m st; st=$(_apache_mods_state)
+  APACHE_MODS_ENABLED=""
   for m in $(_apache_modules); do
     a2query -m "$m" >/dev/null 2>&1 && continue
     a2enmod "$m" >/dev/null || die "a2enmod ${m} failed"
-    new+="${new:+ }${m}"
+    # recorded one by one: a die in the middle of the loop still knows what is ours
+    APACHE_MODS_ENABLED+="${APACHE_MODS_ENABLED:+ }${m}"
+    mkdir -p "$(dirname "$st")"
+    echo "$m" >> "$st"
   done
-  APACHE_MODS_ENABLED="$new"
+}
+
+# ---- rollback of a pre-existing Apache -----------------------------------------------------
+# Armed once the owner's files are snapshotted; runs on ANY later die (configtest, reload,
+# "not active", "not listening", a2ensite, ...), so the owner's next reload/restart never trips
+# over a Listen line, vhost or module we added. An Apache this installer installed is ours and
+# is never rolled back.
+#
+# The snapshot is a JOURNAL on disk (LARANODE_ROLLBACK_DIR, default /etc/laranode/apache-rollback),
+# written BEFORE the first change and removed on success. A SIGKILL / OOM / power loss cannot
+# run the exit hook, so the next installer start finds the journal of a dead installer and rolls
+# its changes back first (_apache_journal_recover); if that is not possible it refuses and says
+# where the journal is. Files: pid, start (pid identity), apache_dir, vhost_dest, ports.conf (the original),
+# vhost.orig (a previous panel vhost), vhost_enabled, mods.before (modules recorded before this run),
+# was_active, reloaded, started_by_run (this run started a stopped Apache), complete.
+_journal_dir() { echo "${LARANODE_ROLLBACK_DIR:-/etc/laranode/apache-rollback}"; }
+_WB_ARMED=0
+_apache_journal_open() {  # _apache_journal_open APACHE_DIR VHOST_DEST
+  local j ad="$1" dest="$2"; j=$(_journal_dir)
+  rm -rf "$j"; mkdir -p "$j"
+  _installer_pid > "$j/pid"
+  _installer_start > "$j/start"      # pid + start time: a reused pid is not this installer
+  # The modules recorded BEFORE this run (an earlier run's, kept in the state file): a rollback
+  # disables only what was enabled since this point, never an earlier run's modules.
+  if [ -f "$(_apache_mods_state)" ]; then cp "$(_apache_mods_state)" "$j/mods.before"; else : > "$j/mods.before"; fi
+  echo "$ad" > "$j/apache_dir"; echo "$dest" > "$j/vhost_dest"
+  cp -p "${ad}/ports.conf" "$j/ports.conf"
+  if [ -e "$dest" ]; then cp -p "$dest" "$j/vhost.orig"; fi
+  if [ -e "${ad}/sites-enabled/laranode.conf" ]; then : > "$j/vhost_enabled"; fi
+  if svc_active apache2; then : > "$j/was_active"; fi
+  : > "$j/complete"      # a journal without this was cut short before any change: nothing to undo
+}
+_apache_commit() {
+  _WB_ARMED=0
+  rm -rf "$(_journal_dir)"
+}
+# _apache_rollback_journal — put the owner's Apache back from the journal. The journal is kept
+# (return 1) when a restore failed, so the next start retries or refuses instead of forgetting.
+_apache_rollback_journal() {
+  local j ad dest m st rc=0 mods keep=""; j=$(_journal_dir); st=$(_apache_mods_state)
+  [ -f "$j/complete" ] || { rm -rf "$j"; return 0; }
+  ad=$(cat "$j/apache_dir"); dest=$(cat "$j/vhost_dest")
+  cp -p "$j/ports.conf" "${ad}/ports.conf" || { warn "could not restore ${ad}/ports.conf from ${j}/ports.conf"; rc=1; }
+  if [ -f "$j/vhost.orig" ]; then
+    cp -p "$j/vhost.orig" "$dest" || { warn "could not restore ${dest} from ${j}/vhost.orig"; rc=1; }   # the previous working panel vhost
+    [ -f "$j/vhost_enabled" ] || a2dissite laranode >/dev/null 2>&1 || true
+  else
+    a2dissite laranode >/dev/null 2>&1 || true
+    rm -f "$dest"
+  fi
+  # modules THIS run switched on (recorded one by one in the state file, and not in the snapshot
+  # taken when the journal opened), newest first (proxy_fcgi depends on proxy). An earlier run's
+  # modules stay enabled and stay recorded: its vhost, restored just above, needs them.
+  if [ -f "$st" ]; then
+    mods=$(sed '/^$/d' "$st" | tac)
+    for m in $mods; do
+      if [ -f "$j/mods.before" ] && grep -qxF "$m" "$j/mods.before"; then keep+="${m}"$'\n'; continue; fi
+      if a2dismod "$m" >/dev/null 2>&1; then :; else warn "could not disable module ${m}"; keep+="${m}"$'\n'; fi
+    done
+    if [ -n "$keep" ]; then printf '%s' "$keep" | tac > "$st"; else rm -f "$st"; fi
+  fi
+  APACHE_MODS_ENABLED=""
+  # Put the running Apache back on the restored configuration, but only if it may have loaded
+  # ours (the reload was reached). An Apache that was running before this run is NEVER stopped;
+  # only one this run started is stopped again, and only when the journal says THIS run started
+  # it (started_by_run): an Apache that is active now but was not started by this run (the owner,
+  # or a boot, started it after a SIGKILL) is the owner's and is left running. The owner's stopped
+  # Apache is never started.
+  if [ -f "$j/was_active" ]; then
+    if [ -f "$j/reloaded" ]; then
+      systemctl reload apache2 || warn "apache2 reload after the rollback failed: check it before its next restart"
+    fi
+  elif [ -f "$j/started_by_run" ] && svc_active apache2; then
+    systemctl stop apache2 || warn "could not stop the apache2 this run started"
+  fi
+  [ "$rc" = 0 ] || return 1
+  rm -rf "$j"
+}
+_apache_rollback() {            # the exit hook of the running installer
+  [ "$_WB_ARMED" = 1 ] || return 0
+  _WB_ARMED=0
+  warn "rolling back this run's changes to the pre-existing Apache"
+  _apache_rollback_journal || warn "the rollback is incomplete: journal kept in $(_journal_dir)"
+}
+# _apache_journal_recover — run at start: a previous installer was killed (SIGKILL / OOM / power
+# loss) between its first change to a pre-existing Apache and its end. Undo that first.
+_apache_journal_recover() {
+  local j pid start; j=$(_journal_dir)
+  [ -d "$j" ] || return 0
+  pid=$(cat "$j/pid" 2>/dev/null || true)
+  start=$(cat "$j/start" 2>/dev/null || true)
+  if [ -n "$pid" ] && [ "$pid" != "$(_installer_pid)" ] && _pid_alive "$pid" "$start"; then
+    die "Another Laranode installer (pid ${pid}) is changing this host's Apache right now. Wait for it to finish, then re-run."
+  fi
+  warn "a previous Laranode install was killed while it was changing apache2: undoing its changes first (restoring ports.conf and the panel vhost from ${j}, disabling the modules it enabled)"
+  _apache_rollback_journal || true
+  [ ! -d "$j" ] || die "Could not undo a killed install's changes to apache2. The original ports.conf is ${j}/ports.conf: restore it by hand (and remove the Listen/vhost/modules that install added), delete ${j}, then re-run. Nothing else was changed."
 }
 
 phase_webserver() {
@@ -889,22 +1169,11 @@ phase_webserver() {
   # Suppress service auto-start during apt: on a host where :80 is already held
   # (e.g. nginx) Apache's default 'Listen 80' would fail to bind and abort the
   # install under set -e. We configure ports first, then start Apache ourselves.
-  local _added_policy=0 _prc; _prc=$(_policy_rc_d)
-  if [ ! -e "$_prc" ]; then
-    printf '#!/bin/sh\nexit 101\n' > "$_prc"
-    chmod +x "$_prc"
-    _added_policy=1
-    # Safety net: if an apt-get below aborts under set -e, still remove the guard
-    # we created (the explicit rm after the installs handles the success path).
-    # shellcheck disable=SC2064
-    trap "rm -f '$_prc'" EXIT
-  fi
+  # The guard is removed on success, die and signals; a policy-rc.d that is not ours is left alone.
+  _policy_guard_on
   apt_install apache2
   apt_install certbot python3-certbot-apache
-  [ "$_added_policy" -eq 1 ] && rm -f "$_prc"
-
-  log "Enabling required Apache modules"
-  _apache_enable_modules
+  _policy_guard_off
 
   [ -n "${HTTP_PORT:-}" ]  || die "HTTP_PORT not set — preflight must run first"
   [ -n "${PANEL_PATH:-}" ] || die "PANEL_PATH not set — preflight must run first"
@@ -913,16 +1182,20 @@ phase_webserver() {
   local tmpl="${PANEL_PATH}/laranode-scripts/templates/apache-panel.template"
   local dest="${ad}/sites-available/laranode.conf"
   [ -f "$tmpl" ] || die "apache-panel.template missing at ${tmpl}"
-  # A pre-existing Apache's own files are restored if anything below fails: the next
-  # reload/restart by its owner must not trip over a line we added.
-  local _ports_bak="" _vhost_bak="" _vhost_on=0
+  # A pre-existing Apache's own files are restored if anything below fails (modules
+  # included, so the snapshot comes first): the next reload/restart by its owner must not
+  # trip over a line we added.
   if [ "$APACHE_OWNED" = 0 ]; then
-    _ports_bak=$(mktemp)
-    cp -p "${ad}/ports.conf" "$_ports_bak"
-    # A re-run overwrites a previously working panel vhost: keep it for the rollback.
-    if [ -e "$dest" ]; then _vhost_bak=$(mktemp); cp -p "$dest" "$_vhost_bak"; fi
-    [ ! -e "${ad}/sites-enabled/laranode.conf" ] || _vhost_on=1
+    # The snapshot is a journal on disk (also read by the next start after a SIGKILL); a
+    # re-run's previously working panel vhost is part of it.
+    _apache_journal_open "$ad" "$dest"
+    _WB_ARMED=1
+    _add_exit_hook _apache_rollback
   fi
+
+  log "Enabling required Apache modules"
+  _apache_enable_modules
+
   _vhost_render "$tmpl" "$dest" "$HTTP_PORT" "${PANEL_PATH}/public"
 
   # Panel never uses the stock default site (only an Apache we installed loses it).
@@ -931,29 +1204,18 @@ phase_webserver() {
   _apache_ports_conf "${ad}/ports.conf"
 
   a2ensite laranode || die "a2ensite laranode failed"
-  _apache_rollback() {
-    [ "$APACHE_OWNED" = 0 ] || return 0
-    cp -p "$_ports_bak" "${ad}/ports.conf"
-    if [ -n "$_vhost_bak" ]; then
-      cp -p "$_vhost_bak" "$dest"                 # previous working panel vhost
-      [ "$_vhost_on" = 1 ] || a2dissite laranode >/dev/null 2>&1 || true
-    else
-      a2dissite laranode >/dev/null 2>&1 || true
-      rm -f "$dest"
-    fi
-  }
-  if ! apachectl configtest; then
-    # Leave a pre-existing Apache exactly as it was.
-    _apache_rollback
-    die "Apache config test failed — review ${dest}"
-  fi
+  # A die from here on rolls a pre-existing Apache back (the EXIT hook armed above).
+  apachectl configtest || die "Apache config test failed — review ${dest}"
 
   [ "$APACHE_OWNED" = 0 ] || systemctl enable apache2 >/dev/null 2>&1 || true
-  if ! ( _refresh_service apache2 "$APACHE_OWNED" ); then
-    _apache_rollback
-    die "apache2 reload/start failed — the panel's changes to ${ad} were rolled back"
-  fi
-  svc_active apache2 || die "apache2 is not active after (re)load"
+  # from here the running Apache may have loaded our config: a rollback must reload it back
+  [ "$_WB_ARMED" = 0 ] || : > "$(_journal_dir)/reloaded"
+  ( _refresh_service apache2 "$APACHE_OWNED" ) \
+    || die "apache2 reload/start failed — the panel's changes to ${ad} were rolled back"
+  # THIS run started a stopped pre-existing Apache (opt-in): record it, so a rollback or the next
+  # start's recovery stops only an Apache that this run started, never one the owner started since.
+  if [ "$_WB_ARMED" = 1 ] && [ ! -f "$(_journal_dir)/was_active" ]; then : > "$(_journal_dir)/started_by_run"; fi
+  svc_active apache2 || die "apache2 is not active after (re)load — the panel's changes to ${ad} were rolled back (the running Apache keeps its previous configuration)"
 
   # Confirm the socket is open (full HTTP 200 check is phase_services, after the
   # app is bootstrapped). This surfaces port-fork bugs early.
@@ -964,9 +1226,10 @@ phase_webserver() {
     sleep 1
   done
   ss -tlnH "( sport = :${HTTP_PORT} )" | grep -q . \
-    || die "Apache is not listening on :${HTTP_PORT} after (re)load"
+    || die "Apache is not listening on :${HTTP_PORT} after (re)load (a pre-existing Apache is rolled back to its previous configuration)"
 
   _configure_firewall
+  _apache_commit
 
   log "Apache panel vhost active on :${HTTP_PORT}"
 }
@@ -974,6 +1237,18 @@ phase_webserver() {
 # ==============================================================================
 # Phase 5 — PHP 8.4, Node.js, Composer, PostgreSQL client
 # ==============================================================================
+
+# _install_php_packages PKG... — the php8.4 / extension install. On a host whose php8.4-fpm
+# pre-dates this run, the package postinst scripts restart that live pool (verified: the
+# pool's PID changes during the extension install), which the "never restart someone else's
+# service" rule forbids. The marked policy-rc.d guard stops that; phase_services then
+# reloads the pool, which is how it picks the new extensions up. When the installer installed
+# php8.4-fpm itself there is nothing live to protect and no guard is used.
+_install_php_packages() {
+  if [ "${PHPFPM_OWNED:-1}" = 0 ]; then _policy_guard_on; fi
+  apt_install "$@" || { _policy_guard_off; return 1; }
+  _policy_guard_off
+}
 
 # _php_fpm_up — enable and start php8.4-fpm, but only when this installer installed
 # it. A pre-existing php8.4-fpm keeps its boot state and its running process; the
@@ -1036,7 +1311,7 @@ phase_php_node() {
     [[ " ${php_pkgs[*]} " == *" php8.4-fpm "* && " ${php_pkgs[*]} " == *" php8.4-cli "* ]] \
       || die "php8.4-fpm / php8.4-cli not available from the configured apt sources — install them first and re-run"
   fi
-  apt_install "${php_pkgs[@]}" || die "apt-get install php8.4 extensions failed"
+  _install_php_packages "${php_pkgs[@]}" || die "apt-get install php8.4 extensions failed"
 
   # Restore the operator's prior alternative if apt auto-flipped it to 8.4. The
   # panel always calls /usr/bin/php8.4 directly, so the system default must stay
@@ -1378,7 +1653,10 @@ write_service_manifest() {
   if [ -f "$mf" ]; then
     mods_prior=$(grep -o '"apache_modules_enabled":\[[^]]*\]' "$mf" | sed 's/^[^[]*\[//; s/\]$//' | tr -d '"' | tr ',' ' ' || true)
   fi
-  mods_all=$(printf '%s\n' $mods_prior ${APACHE_MODS_ENABLED:-} | sed '/^$/d' | sort -u)
+  # ... plus what the webserver phase persisted at once (covers a run that died before this point)
+  local mods_state="" st; st=$(_apache_mods_state)
+  [ ! -f "$st" ] || mods_state=$(cat "$st")
+  mods_all=$(printf '%s\n' $mods_prior $mods_state ${APACHE_MODS_ENABLED:-} | sed '/^$/d' | sort -u)
   for m in $mods_all; do mods_json+="${mods_json:+,}\"${m}\""; done
 
   mkdir -p "$(dirname "$mf")"
@@ -1395,6 +1673,7 @@ write_service_manifest() {
     printf ']}\n'
   } > "$mf"
   chmod 644 "$mf"
+  rm -f "$st"      # the manifest is now the record
   log "Service manifest written: ${mf}"
 }
 
@@ -1519,22 +1798,16 @@ phase_summary() {
 # Entrypoint
 # ==============================================================================
 
-# ensure_probe_tools — preflight reads listeners with `ss`. A minimal image (e.g. a
-# bare Debian 13) may not ship iproute2; without it every port would read as free.
-# Installing iproute2 is the only change made before the plan is shown.
-ensure_probe_tools() {
-  have_cmd ss && return 0
-  log "Installing iproute2 (provides ss, needed to detect busy ports)"
-  apt-get update -q
-  apt_install iproute2
-  have_cmd ss || die "ss (iproute2) is required for port detection"
-}
-
 main() {
-  # An unsupported OS is refused BEFORE the first apt call (ensure_probe_tools
-  # installs a package). preflight runs detect_os again; it is a pure read.
+  # An unsupported OS is refused first. Nothing touches apt (no `apt-get update`, no package)
+  # until the plan has been shown and confirmed: the preflight reads listeners with `ss`, or
+  # /proc/net/tcp when iproute2 is absent. preflight runs detect_os again; it is a pure read.
   detect_os
-  ensure_probe_tools
+  # A guard left by an installer that was killed (SIGKILL / OOM / power loss) would silently
+  # stop every later package install on this host from starting services.
+  _policy_guard_clean_stale
+  # The same for a pre-existing Apache a killed installer left half-configured.
+  _apache_journal_recover
   preflight
   phase_packages
   phase_fetch_panel

@@ -5,6 +5,8 @@
 # the installer's own helpers or the LARANODE_*_DIR / LARANODE_OS_RELEASE_FILE
 # overrides, so the tests run the same on Git Bash, WSL and Linux.
 set -uo pipefail
+# The installer drops its test seams from the inherited environment unless this is set.
+export LARANODE_INSTALLER_TEST=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALLER="${LARANODE_INSTALLER:-${SCRIPT_DIR}/../../../laranode-scripts/bin/laranode-installer.sh}"
@@ -29,6 +31,7 @@ base() {
   unset LARANODE_DB_ENGINE LARANODE_HTTP_PORT LARANODE_BIND LARANODE_PG_PORT
   have_cmd()    { return 1; }
   port_in_use() { return 1; }
+  _probe_available() { return 0; }
   pkg_installed() { return 1; }
   pg_cluster_count() { echo 0; }
   log() { :; }; warn() { :; }
@@ -635,7 +638,7 @@ wb_setup() {  # wb_setup <owned 0|1> <running 0|1> <port>
   base; svc_stub; log() { :; }
   AD=$(mktemp -d); mkdir -p "$AD/sites-available" "$AD/sites-enabled"
   cp "${FIX}/ports.conf" "$AD/ports.conf"; cp "$AD/ports.conf" "$AD/ports.conf.orig"
-  export LARANODE_APACHE_DIR="$AD" LARANODE_POLICY_RC_D="$AD/policy-rc.d"
+  export LARANODE_APACHE_DIR="$AD" LARANODE_POLICY_RC_D="$AD/policy-rc.d" LARANODE_APACHE_MODS_STATE="$AD/mods.state" LARANODE_ROLLBACK_DIR="$AD/rollback"
   PANEL_PATH=$(mktemp -d); mkdir -p "$PANEL_PATH/laranode-scripts/templates"
   printf '<VirtualHost *:__PORT__>\n    DocumentRoot __DOCROOT__\n</VirtualHost>\n' > "$PANEL_PATH/laranode-scripts/templates/apache-panel.template"
   APACHE_OWNED=$1; HTTP_PORT=$3; BIND_ADDR=""; IS_PROXMOX=0; IS_CLOUDPANEL=0
@@ -644,6 +647,7 @@ wb_setup() {  # wb_setup <owned 0|1> <running 0|1> <port>
   apt_install()  { :; }
   a2query()      { case "$ENABLED_MODS" in *" $2 "*) return 0;; *) return 1;; esac; }
   a2enmod()      { echo "a2enmod $*" >> "$WLOG"; }
+  a2dismod()     { echo "a2dismod $*" >> "$WLOG"; }
   a2ensite()     { echo "a2ensite $*" >> "$WLOG"; : > "$AD/sites-enabled/$1.conf"; }
   a2dissite()    { echo "a2dissite $*" >> "$WLOG"; rm -f "$AD/sites-enabled/$1.conf"; }
   apachectl()    { [ "${CONFTEST_FAIL:-0}" != 1 ]; }
@@ -723,6 +727,551 @@ wb_rerun_rollback() { wb_setup 0 1 8080; echo OLDVHOST > "$AD/sites-available/la
   ( phase_webserver ) >/dev/null 2>&1 && return 1
   grep -qx OLDVHOST "$AD/sites-available/laranode.conf" && [ -e "$AD/sites-enabled/laranode.conf" ] && cmp -s "$AD/ports.conf" "$AD/ports.conf.orig"; }
 t "failed re-run on a pre-existing Apache restores the previous working panel vhost" wb_rerun_rollback
+
+# ==============================================================================
+# Round 3 (review of b11daf2)
+# ==============================================================================
+
+# ---- 1. policy-rc.d guard: marked, cleaned when stale, never removed when not ours ----
+echo "=== policy-rc.d guard ==="
+PG_MARK='laranode-installer policy-rc.d guard'
+pg_setup() { base; PRC="$(mktemp -d)/policy-rc.d"; export LARANODE_POLICY_RC_D="$PRC"; }
+dead_pid() { (exit 0) & local p=$!; wait "$p" 2>/dev/null; echo "$p"; }
+pg_marked() { pg_setup; _policy_guard_on; grep -q "$PG_MARK" "$PRC" && grep -q 'exit 101' "$PRC" && [ "$_PRC_ADDED" = 1 ] \
+  && _policy_guard_off && [ ! -e "$PRC" ]; }
+pg_foreign_kept() { pg_setup; printf '#!/bin/sh\nexit 0\n' > "$PRC"; _policy_guard_on; _policy_guard_off; _policy_guard_clean_stale
+  [ "$_PRC_ADDED" = 0 ] && [ "$(cat "$PRC")" = "$(printf '#!/bin/sh\nexit 0')" ]; }
+pg_foreign_mark_like_kept() { pg_setup; printf '#!/bin/sh\n# mine, not laranode\nexit 101\n' > "$PRC"; _policy_guard_clean_stale; [ -e "$PRC" ]; }
+pg_stale_cleaned() { pg_setup; printf '#!/bin/sh\n# %s pid=%s\nexit 101\n' "$PG_MARK" "$(dead_pid)" > "$PRC"; _policy_guard_clean_stale 2>/dev/null; [ ! -e "$PRC" ]; }
+pg_live_kept()  { pg_setup; printf '#!/bin/sh\n# %s pid=%s\nexit 101\n' "$PG_MARK" "$$" > "$PRC"; _policy_guard_clean_stale 2>/dev/null; [ -e "$PRC" ]; }
+pg_die_removes(){ pg_setup; ( _policy_guard_on; die boom ) >/dev/null 2>&1; [ ! -e "$PRC" ]; }
+pg_signal() {  # pg_signal TERM|INT|HUP -> the guard is gone after the installer is signalled
+  pg_setup
+  # The installer signals ITSELF in a foreground subshell: a background job of a
+  # non-interactive shell starts with SIGINT ignored, which would hide whether the trap
+  # is installed. If the signal is not turned into an exit, the shell dies without
+  # running its EXIT trap and the guard survives.
+  ( source "$INSTALLER"; export LARANODE_POLICY_RC_D="$PRC"; _policy_guard_on; kill -"$1" "$BASHPID"; sleep 5 & wait $! ) >/dev/null 2>&1
+  [ ! -e "$PRC" ] || { echo "guard survived SIG$1"; return 1; }
+}
+pg_sigkill_then_cleanup() {
+  pg_setup
+  # a separate process (not a subshell): the guard records the installer's own $$, which is
+  # the process SIGKILL takes away
+  export INSTALLER PRC
+  bash -c 'source "$INSTALLER"; export LARANODE_POLICY_RC_D="$PRC"; _policy_guard_on; sleep 30' >/dev/null 2>&1 &
+  local p=$! i
+  for i in $(seq 1 60); do [ -e "$PRC" ] && break; sleep 0.1; done
+  kill -9 "$p" 2>/dev/null; wait "$p" 2>/dev/null
+  [ -e "$PRC" ] || { echo "SIGKILL left nothing to clean (guard was never created?)"; return 1; }
+  # the NEXT installer start removes what the killed one left behind
+  _policy_guard_clean_stale 2>/dev/null; [ ! -e "$PRC" ]
+}
+pg_main_cleans_first() {
+  pg_setup; printf '#!/bin/sh\n# %s pid=%s\nexit 101\n' "$PG_MARK" "$(dead_pid)" > "$PRC"
+  MLOG=$(mktemp); detect_os() { :; }
+  preflight() { [ -e "$PRC" ] && echo "stale-at-preflight" >> "$MLOG" || echo "clean-at-preflight" >> "$MLOG"; }
+  phase_packages() { :; }; phase_fetch_panel() { :; }; phase_database() { :; }; phase_webserver() { :; }; phase_php_node() { :; }
+  phase_app() { :; }; phase_services() { :; }; phase_summary() { :; }
+  main >/dev/null 2>&1
+  [ "$(head -1 "$MLOG")" = clean-at-preflight ]
+}
+t  "guard file carries the marker, exit 101, and is removed by _policy_guard_off"        pg_marked
+t  "a policy-rc.d that is not ours is never replaced, removed or 'cleaned'"                pg_foreign_kept
+t  "an unmarked policy-rc.d that merely looks similar is not cleaned"                      pg_foreign_mark_like_kept
+pg_foreign_swapped_in() {   # the owner drops their own policy-rc.d while our guard is up: off must not delete it
+  pg_setup; _policy_guard_on; [ -e "$PRC" ] || { echo "guard not created"; return 1; }
+  printf '#!/bin/sh\n# owner policy\nexit 101\n' > "$PRC"
+  _policy_guard_off; [ -f "$PRC" ] && grep -q 'owner policy' "$PRC"
+}
+t  "a policy-rc.d the owner put in place while our guard was up is not removed"            pg_foreign_swapped_in
+t  "a stale marked guard (its installer is dead) is removed at the next start"             pg_stale_cleaned
+t  "a marked guard whose installer is still alive is left alone"                           pg_live_kept
+t  "die while the guard is on removes it"                                                  pg_die_removes
+t  "SIGTERM while the guard is on removes it"                                              pg_signal TERM
+t  "SIGINT while the guard is on removes it"                                               pg_signal INT
+t  "SIGHUP while the guard is on removes it"                                               pg_signal HUP
+t  "SIGKILL leaves the guard, the next start cleans it"                                    pg_sigkill_then_cleanup
+t  "main cleans a stale guard BEFORE preflight (and before any apt call)"                  pg_main_cleans_first
+
+# phase_webserver / the php package install use the marked guard, and never touch a foreign one
+wb_guard_marked() { wb_setup 0 1 8080
+  apt_install() { [ -e "$LARANODE_POLICY_RC_D" ] && grep -q "$PG_MARK" "$LARANODE_POLICY_RC_D" && echo guarded >> "$WLOG"; }
+  ( phase_webserver ) >/dev/null 2>&1 || return 1
+  [ "$(grep -c guarded "$WLOG")" = 2 ] && [ ! -e "$LARANODE_POLICY_RC_D" ]; }
+wb_guard_foreign() { wb_setup 0 1 8080; printf '#!/bin/sh\nexit 0\n' > "$LARANODE_POLICY_RC_D"
+  apt_install() { grep -q "$PG_MARK" "$LARANODE_POLICY_RC_D" && echo ours >> "$WLOG"; }
+  ( phase_webserver ) >/dev/null 2>&1 || return 1
+  ! grep -q ours "$WLOG" && [ "$(cat "$LARANODE_POLICY_RC_D")" = "$(printf '#!/bin/sh\nexit 0')" ]; }
+t "phase_webserver wraps its apt installs in the MARKED guard and removes it"              wb_guard_marked
+t "phase_webserver leaves a foreign policy-rc.d exactly as it was"                         wb_guard_foreign
+
+# ---- 7. a live pre-existing php8.4-fpm must not be restarted by the extension postinsts ----
+echo "=== php packages vs a live pre-existing php8.4-fpm ==="
+pn_run() {  # pn_run <PHPFPM_OWNED>  -> phase_php_node with the world stubbed; PNLOG lists each apt_install and whether the guard was up
+  base; PNLOG=$(mktemp); svc_stub; ACTIVE_UNITS="php8.4-fpm"
+  PRC="$(mktemp -d)/policy-rc.d"; export LARANODE_POLICY_RC_D="$PRC"
+  PHPFPM_OWNED=$1; APACHE_OWNED=0; IS_CLOUDPANEL=0; OS_ID=ubuntu; OS_VERSION=24.04
+  apt_install() { echo "$([ -e "$PRC" ] && grep -q "$PG_MARK" "$PRC" && echo guarded || echo open) $*" >> "$PNLOG"; }
+  add-apt-repository() { :; }; apt-get() { :; }; update-alternatives() { :; }; curl() { :; }
+  node() { echo v22.1.0; }; php8.4() { :; }
+  phase_php_node >/dev/null 2>&1
+}
+pn_pre_guarded() { pn_run 0; grep -q '^guarded php8.4 php8.4-fpm' "$PNLOG" && [ ! -e "$PRC" ]; }
+pn_owned_open()  { pn_run 1; grep -q '^open php8.4 php8.4-fpm' "$PNLOG"; }
+pn_other_open()  { pn_run 0; ! grep -E '^guarded (postgresql-client|nodejs)' "$PNLOG"; }
+pn_die_unguards(){ pn_run 0; apt_install() { die "apt broke"; }; ( phase_php_node ) >/dev/null 2>&1; [ ! -e "$PRC" ]; }
+t "pre-existing php8.4-fpm: the php/extension install runs under the marked guard, guard removed after" pn_pre_guarded
+t "php8.4-fpm that we installed: no guard (nothing live to protect)"                      pn_owned_open
+t "only the php packages are guarded, not postgresql-client or nodejs"                    pn_other_open
+t "a failing php install still removes the guard"                                         pn_die_unguards
+
+# ---- 2/3. rollback after the reload, and of the modules we enabled ----
+echo "=== webserver rollback after reload, modules rolled back and recorded ==="
+rb_ok() { cmp -s "$AD/ports.conf" "$AD/ports.conf.orig" && [ ! -e "$AD/sites-enabled/laranode.conf" ] && [ ! -e "$AD/sites-available/laranode.conf" ]; }
+mods_dismodded() { local m; for m in "$@"; do grep -qx "a2dismod $m" "$WLOG" || { echo "no a2dismod $m"; return 1; }; done; }
+wb_rb_nolisten() { wb_setup 0 1 8080; ss() { :; }
+  ( phase_webserver ) >/dev/null 2>&1 && return 1
+  rb_ok && [ "$(grep -cx 'reload apache2' "$SVC_LOG")" = 2 ] && ! grep -q '^start' "$SVC_LOG" && mods_dismodded proxy proxy_fcgi rewrite; }
+wb_rb_notactive() { wb_setup 0 1 8080
+  svc_active() { ! grep -qx 'reload apache2' "$SVC_LOG"; }   # up until the first reload, down after it
+  ( phase_webserver ) >/dev/null 2>&1 && return 1
+  rb_ok && ! grep -q '^start' "$SVC_LOG" && [ "$(grep -cx 'reload apache2' "$SVC_LOG")" = 2 ] && mods_dismodded proxy proxy_fcgi rewrite; }
+wb_rb_stopped_stays_stopped() { wb_setup 0 0 8080; ss() { :; }
+  ( phase_webserver ) >/dev/null 2>&1 && return 1
+  rb_ok && grep -qx 'stop apache2' "$SVC_LOG" && mods_dismodded proxy proxy_fcgi rewrite; }
+wb_rb_late_die() { wb_setup 0 1 8080; _configure_firewall() { die "firewall boom"; }
+  ( phase_webserver ) >/dev/null 2>&1 && return 1
+  rb_ok && mods_dismodded proxy proxy_fcgi rewrite; }
+wb_rb_a2ensite() { wb_setup 0 1 8080; a2ensite() { return 1; }
+  ( phase_webserver ) >/dev/null 2>&1 && return 1
+  rb_ok && mods_dismodded proxy proxy_fcgi rewrite && [ ! -s "$AD/mods.state" ]; }
+wb_rb_midloop() { wb_setup 0 1 8080; a2enmod() { echo "a2enmod $*" >> "$WLOG"; [ "$1" != proxy_fcgi ]; }
+  ( phase_webserver ) >/dev/null 2>&1 && return 1
+  mods_dismodded proxy && ! grep -qxE 'a2dismod (proxy_fcgi|rewrite)' "$WLOG" && rb_ok; }
+wb_rb_only_ours() { wb_setup 0 1 8080; ENABLED_MODS=" proxy rewrite "; ss() { :; }
+  ( phase_webserver ) >/dev/null 2>&1 && return 1
+  mods_dismodded proxy_fcgi && ! grep -qxE 'a2dismod (proxy|rewrite)' "$WLOG"; }
+wb_owned_no_rb() { wb_setup 1 0 8080; ss() { :; }; ( phase_webserver ) >/dev/null 2>&1 && return 1
+  ! grep -q a2dismod "$WLOG" && ! cmp -s "$AD/ports.conf" "$AD/ports.conf.orig"; }
+wb_state_persists() { wb_setup 0 1 8080; ( phase_webserver ) >/dev/null 2>&1 || return 1
+  [ "$(sort -u "$AD/mods.state" | tr '\n' ' ')" = "proxy proxy_fcgi rewrite " ]; }
+wb_state_to_manifest() { mf_setup; export LARANODE_APACHE_MODS_STATE="$(mktemp)"; printf 'proxy\nproxy_fcgi\n' > "$LARANODE_APACHE_MODS_STATE"
+  APACHE_MODS_ENABLED=""; write_service_manifest
+  grep -q '"apache_modules_enabled":\["proxy","proxy_fcgi"\]' "$LARANODE_MANIFEST_FILE" && [ ! -s "$LARANODE_APACHE_MODS_STATE" ]; }
+t "reload ok but the listener never opens: files, modules restored, Apache reloaded again"   wb_rb_nolisten
+t "reload ok but apache2 is not active afterwards: files and modules restored, never started" wb_rb_notactive
+t "a stopped Apache we started (opt-in) is stopped again when the install fails"             wb_rb_stopped_stays_stopped
+t "any later die inside the phase rolls the pre-existing Apache back"                        wb_rb_late_die
+t "a die after a2enmod (a2ensite fails): modules dismodded, record cleared"                  wb_rb_a2ensite
+t "a die in the middle of the module loop dismods what was already enabled"                  wb_rb_midloop
+t "rollback dismods only the modules THIS run enabled"                                       wb_rb_only_ours
+t "an Apache we installed is not rolled back (it is ours)"                                   wb_owned_no_rb
+t "enabled modules are persisted at once (state file), before any later phase"               wb_state_persists
+t "the manifest unions the state file, then clears it"                                       wb_state_to_manifest
+
+# ---- 4. no apt, no iproute2 before the plan is confirmed: /proc/net/tcp fallback ----
+echo "=== port probe without ss ==="
+proc_setup() {  # a host without iproute2: listeners come from /proc/net/tcp{,6}
+  base; source "$INSTALLER"; log() { :; }; warn() { :; }; have_cmd() { return 1; }
+  _have_ss() { return 1; }
+  PD=$(mktemp -d); mkdir -p "$PD/net" "$PD/proc"; export LARANODE_PROC_NET_DIR="$PD/net" LARANODE_PROC_DIR="$PD/proc"
+  H='  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode'
+  { echo "$H"
+    echo '   0: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1234 1 0000000000000000 100 0 0 10 0'
+    echo '   1: 0100007F:1F90 0100007F:ABCD 01 00000000:00000000 00:00000000 00000000     0        0 5555 1 0000000000000000 100 0 0 10 0'
+    echo '   2: 0100007F:2328 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 7777 1 0000000000000000 100 0 0 10 0'; } > "$PD/net/tcp"
+  { echo "$H"
+    echo '   0: 00000000000000000000000000000000:1F91 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4321 1 0000000000000000 100 0 0 10 0'; } > "$PD/net/tcp6"
+  mkdir -p "$PD/proc/4242/fd" "$PD/proc/99/fd"; echo apache2 > "$PD/proc/4242/comm"; echo python3 > "$PD/proc/99/comm"
+  ln -s 'socket:[1234]' "$PD/proc/4242/fd/3" 2>/dev/null; ln -s 'socket:[4321]' "$PD/proc/99/fd/5" 2>/dev/null
+  HAVE_SYMLINKS=0; [ -L "$PD/proc/4242/fd/3" ] && HAVE_SYMLINKS=1
+}
+pr_busy_v4()      { proc_setup; port_in_use 80; }
+pr_busy_v4_high() { proc_setup; port_in_use 9000; }           # 0x2328 listening on 127.0.0.1
+pr_busy_v6()      { proc_setup; port_in_use 8081; }
+pr_free_est()     { proc_setup; ! port_in_use 8080; }         # 8080 is only an ESTABLISHED connection
+pr_free_none()    { proc_setup; ! port_in_use 8099; }
+pr_no_tcp6()      { proc_setup; rm -f "$PD/net/tcp6"; port_in_use 80 && ! port_in_use 8081; }
+pr_holder()       { proc_setup; [ "$HAVE_SYMLINKS" = 1 ] || { echo "(no symlinks here: skipped)"; return 0; }; [ "$(_port_holder 80)" = apache2 ] && [ "$(_port_holder 8081)" = python3 ]; }
+pr_holder_unknown(){ proc_setup; [ "$(_port_holder 9000)" = "another process" ]; }
+pr_probe_missing(){ proc_setup; rm -f "$PD/net/tcp" "$PD/net/tcp6"; pkg_installed() { return 1; }; pg_cluster_count() { echo 0; }; preflight; }
+pr_preflight_busy() { proc_setup; pkg_installed() { return 1; }; pg_cluster_count() { echo 0; }; export LARANODE_HTTP_PORT=8081 LARANODE_MANIFEST_FILE=/nonexistent
+  out=$( (preflight) 2>&1 ); [ $? -ne 0 ] && printf '%s' "$out" | grep -q '8081'; }
+pr_preflight_own_rerun() { proc_setup; [ "$HAVE_SYMLINKS" = 1 ] || { echo "(no symlinks here: skipped)"; return 0; }
+  pkg_installed() { [ "$1" = apache2 ]; }; svc_active() { [ "$1" = apache2 ]; }; pg_cluster_count() { echo 0; }
+  export LARANODE_HTTP_PORT=80 LARANODE_MANIFEST_FILE=/nonexistent; _panel_vhost_enabled() { return 0; }; preflight; }
+mn_no_apt_before_plan() { base; _have_ss() { return 1; }; MLOG=$(mktemp); detect_os() { :; }
+  apt-get() { echo "apt-get $*" >> "$MLOG"; }; apt_install() { echo "apt_install $*" >> "$MLOG"; }
+  preflight() { echo "PREFLIGHT" >> "$MLOG"; }
+  phase_packages() { :; }; phase_fetch_panel() { :; }; phase_database() { :; }; phase_webserver() { :; }; phase_php_node() { :; }
+  phase_app() { :; }; phase_services() { :; }; phase_summary() { :; }
+  main >/dev/null 2>&1
+  [ "$(head -1 "$MLOG")" = PREFLIGHT ] && ! grep -q apt "$MLOG"; }
+t  "no ss: a v4 listener on :80 is found via /proc/net/tcp"                               pr_busy_v4
+t  "no ss: a listener on a high port (0x2328) is found"                                    pr_busy_v4_high
+t  "no ss: an IPv6-only listener (tcp6) is found"                                          pr_busy_v6
+t  "no ss: an ESTABLISHED connection is not a listener"                                    pr_free_est
+t  "no ss: an unused port is free"                                                         pr_free_none
+t  "no ss: a missing tcp6 file is fine"                                                    pr_no_tcp6
+t  "no ss: the holder's name is found through /proc/<pid>/fd"                               pr_holder
+t  "no ss: an unknown holder reads 'another process'"                                      pr_holder_unknown
+tf "neither ss nor /proc/net/tcp: refused (every port would read free)"                    pr_probe_missing
+t  "no ss: a busy panel port is still refused, naming the port"                            pr_preflight_busy
+t  "no ss: the panel's own Apache on a re-run is still accepted (holder from /proc)"       pr_preflight_own_rerun
+t  "main: nothing runs apt before preflight (no apt-get update, no iproute2) when ss is missing" mn_no_apt_before_plan
+# ==== round 4 =================================================================================
+# ---- 2. a dual-stack listener (tcp AND tcp6) must not read FREE (SIGPIPE under pipefail) ----
+echo "=== port probe: several listener inodes (tcp + tcp6) ==="
+proc_dual() {  # port 80 listens on v4 (inodes 1234, 1235) AND v6 (4400); no ss
+  proc_setup
+  H='  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode'
+  { echo "$H"
+    echo '   0: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1234 1 0000000000000000 100 0 0 10 0'
+    echo '   1: 0100007F:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1235 1 0000000000000000 100 0 0 10 0'; } > "$PD/net/tcp"
+  { echo "$H"
+    echo '   0: 00000000000000000000000000000000:0050 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4400 1 0000000000000000 100 0 0 10 0'; } > "$PD/net/tcp6"
+}
+pr_dual_busy() { proc_dual; local i; for i in $(seq 1 200); do port_in_use 80 || { echo "iteration $i: :80 read FREE with tcp+tcp6 listeners"; return 1; }; done; }
+pr_dual_v6_only_busy() { proc_dual; : > "$PD/net/tcp"; echo "$H" > "$PD/net/tcp"; local i; for i in $(seq 1 50); do port_in_use 80 || return 1; done; }
+pr_dual_free() { proc_dual; local i; for i in $(seq 1 50); do ! port_in_use 8099 || return 1; done; }
+pr_dual_holder() { proc_dual; [ "$HAVE_SYMLINKS" = 1 ] || { echo "(no symlinks here: skipped)"; return 0; }
+  ln -s 'socket:[1235]' "$PD/proc/4242/fd/4" 2>/dev/null; [ "$(_port_holder 80)" = apache2 ]; }
+pr_dual_inodes() { proc_dual; [ "$(_proc_listen_inodes 80 | tr '\n' ' ')" = "1234 1235 4400 " ]; }
+t "no ss: :80 held on tcp (2 sockets) AND tcp6 reads busy, 200 times (no SIGPIPE under pipefail)" pr_dual_busy
+t "no ss: a tcp6-only listener beside an empty tcp reads busy"                                     pr_dual_v6_only_busy
+t "no ss: an unused port stays free with both tables populated"                                    pr_dual_free
+t "no ss: _proc_listen_inodes returns every inode of tcp then tcp6"                                pr_dual_inodes
+t "no ss: _port_holder walks several inodes"                                                       pr_dual_holder
+seam_probe_proc() { base; ss() { return 0; }; command() { [ "$1" = -v ] && [ "$2" = ss ] && return 0; builtin command "$@"; }; _have_ss || return 1
+  LARANODE_PROBE_PROC=1; ! _have_ss; }
+t "LARANODE_PROBE_PROC=1 forces the /proc probe even where ss exists"                                seam_probe_proc
+
+# ---- 1. the rollback matrix: was running x reload reached x where it failed ----
+echo "=== rollback matrix (a running pre-existing Apache is NEVER stopped) ==="
+wb_fail() {  # wb_fail <was_active 0|1> <failpoint> -> runs the phase, expects it to die; SVC_LOG/WLOG/AD for the checks
+  wb_setup 0 "$1" 8080
+  case "$2" in
+    configtest) CONFTEST_FAIL=1;;
+    a2ensite)   a2ensite() { return 1; };;
+    a2enmod)    a2enmod() { echo "a2enmod $*" >> "$WLOG"; return 1; };;
+    reload)     systemctl() { echo "$*" >> "$SVC_LOG"; [ "$1" != reload ]; };;
+    listener)   ss() { :; };;
+    late)       _configure_firewall() { die "firewall boom"; };;
+  esac
+  ( phase_webserver ) >/dev/null 2>&1 && { echo "phase unexpectedly succeeded"; return 1; }
+  return 0
+}
+no_stop()      { ! grep -q '^stop' "$SVC_LOG" || { echo "systemctl stop was called:"; cat "$SVC_LOG"; return 1; }; }
+no_systemctl() { [ ! -s "$SVC_LOG" ] || { echo "systemctl was called:"; cat "$SVC_LOG"; return 1; }; }
+# running before, the reload was never reached: the owner's Apache is untouched, so is its unit
+wb_m_run_pre()    { wb_fail 1 "$1" && rb_ok && no_systemctl; }
+# running before, our config was reloaded: reload it back, never stop
+wb_m_run_post()   { wb_fail 1 "$1" && rb_ok && no_stop && [ "$(grep -cx 'reload apache2' "$SVC_LOG")" -ge 2 ] && ! grep -qE '^(start|restart)' "$SVC_LOG"; }
+# stopped before (opt-in start), the start was never reached: nothing to stop
+wb_m_stop_pre()   { wb_fail 0 "$1" && rb_ok && no_systemctl; }
+# stopped before, we started it: stop it again
+wb_m_stop_post()  { wb_fail 0 "$1" && rb_ok && grep -qx 'stop apache2' "$SVC_LOG" && [ "$(grep -c '^stop' "$SVC_LOG")" = 1 ]; }
+for fp in configtest a2ensite a2enmod; do
+  t "running Apache, $fp fails before the reload: files back, systemctl never called (no stop!)" wb_m_run_pre "$fp"
+  t "stopped Apache, $fp fails before the start: files back, systemctl never called"             wb_m_stop_pre "$fp"
+done
+for fp in reload listener late; do
+  t "running Apache, $fp fails after our config was loaded: reloaded back, never stopped"        wb_m_run_post "$fp"
+done
+for fp in listener late; do
+  t "stopped Apache we started, $fp fails: stopped again, exactly once"                          wb_m_stop_post "$fp"
+done
+wb_conftest_never_stops() { wb_setup 0 1 8080; CONFTEST_FAIL=1; ( phase_webserver ) >/dev/null 2>&1 && return 1
+  no_stop && ! grep -q '^reload' "$SVC_LOG"; }
+t "failed configtest on a running pre-existing Apache: no stop, no reload"                       wb_conftest_never_stops
+wb_ok_no_journal() { wb_setup 0 1 8080; ( phase_webserver ) >/dev/null 2>&1 || return 1; [ ! -e "$LARANODE_ROLLBACK_DIR" ] && ! grep -q '^stop' "$SVC_LOG"; }
+wb_owned_no_journal() { wb_setup 1 0 80; ( phase_webserver ) >/dev/null 2>&1 || return 1; [ ! -e "$LARANODE_ROLLBACK_DIR" ]; }
+wb_journal_during() { wb_setup 0 1 8080; JOUT=$(mktemp)
+  apachectl() { local j="$LARANODE_ROLLBACK_DIR"; [ -f "$j/complete" ] && [ -f "$j/pid" ] && cmp -s "$j/ports.conf" "$AD/ports.conf.orig" && echo yes > "$JOUT"; return 0; }
+  ( phase_webserver ) >/dev/null 2>&1 || return 1; [ "$(cat "$JOUT" 2>/dev/null)" = yes ]; }
+t "a successful install leaves no rollback journal"                                              wb_ok_no_journal
+t "an Apache we installed is ours: no journal at all"                                            wb_owned_no_journal
+t "the journal (original ports.conf, pid, complete) exists before the config is tested"          wb_journal_during
+
+# ---- 5. SIGKILL: the next start rolls the half-configured Apache back ----
+echo "=== journal: a killed installer is recovered at the next start ==="
+wb_killed() {  # run the phase in a subshell that dies by SIGKILL at configtest, as a separate "installer pid"
+  wb_setup 0 "${1:-1}" 8080
+  ( export LARANODE_INSTALLER_PID=$BASHPID; apachectl() { kill -9 "$BASHPID"; }; phase_webserver ) >/dev/null 2>&1
+  [ $? -eq 137 ] || { echo "the subshell was not SIGKILLed (rc=$?)"; return 1; }
+}
+jr_recovers() { wb_killed 1 || return 1
+  [ -d "$LARANODE_ROLLBACK_DIR" ] || { echo "no journal left by the killed installer"; return 1; }
+  ! cmp -s "$AD/ports.conf" "$AD/ports.conf.orig" || { echo "premise: ports.conf was never changed"; return 1; }
+  : > "$WLOG"; : > "$SVC_LOG"
+  ( _apache_journal_recover ) >/dev/null 2>&1 || { echo "recovery failed"; return 1; }
+  rb_ok && mods_dismodded proxy proxy_fcgi rewrite && no_systemctl && [ ! -e "$LARANODE_ROLLBACK_DIR" ]; }
+jr_recovers_stopped() { wb_killed 0 || return 1; : > "$SVC_LOG"; ( _apache_journal_recover ) >/dev/null 2>&1 || return 1
+  rb_ok && no_systemctl && [ ! -e "$LARANODE_ROLLBACK_DIR" ]; }
+jr_live_pid_refused() { wb_setup 0 1 8080; sleep() { command sleep "$@"; }; command sleep 30 & local lp=$!
+  ( export LARANODE_INSTALLER_PID=$lp; _apache_journal_open "$AD" "$AD/sites-available/laranode.conf" )
+  cp -p "$AD/ports.conf" "$AD/ports.conf.keep"; echo "Listen 9999" >> "$AD/ports.conf"
+  out=$( ( _apache_journal_recover ) 2>&1 ); local rc=$?
+  kill "$lp" 2>/dev/null
+  [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "$lp" && grep -qx 'Listen 9999' "$AD/ports.conf" && [ -d "$LARANODE_ROLLBACK_DIR" ]; }
+jr_failed_restore_refuses() { wb_killed 1 || return 1
+  out=$( ( cp() { return 1; }; _apache_journal_recover ) 2>&1 ); local rc=$?
+  [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "$LARANODE_ROLLBACK_DIR" && [ -d "$LARANODE_ROLLBACK_DIR" ] && [ -s "$LARANODE_ROLLBACK_DIR/ports.conf" ]; }
+jr_incomplete_discarded() { wb_setup 0 1 8080; mkdir -p "$LARANODE_ROLLBACK_DIR"; dead_pid > "$LARANODE_ROLLBACK_DIR/pid"
+  echo "Listen 9999" >> "$AD/ports.conf"
+  ( _apache_journal_recover ) >/dev/null 2>&1 && [ ! -e "$LARANODE_ROLLBACK_DIR" ] && grep -qx 'Listen 9999' "$AD/ports.conf" && no_systemctl; }
+jr_none_is_noop() { wb_setup 0 1 8080; ( _apache_journal_recover ) >/dev/null 2>&1 && no_systemctl && [ ! -e "$LARANODE_ROLLBACK_DIR" ]; }
+jr_main_recovers_first() {
+  base; MLOG=$(mktemp); detect_os() { :; }
+  _apache_journal_recover() { echo RECOVER >> "$MLOG"; }
+  preflight() { echo PREFLIGHT >> "$MLOG"; }
+  phase_packages() { :; }; phase_fetch_panel() { :; }; phase_database() { :; }; phase_webserver() { :; }; phase_php_node() { :; }
+  phase_app() { :; }; phase_services() { :; }; phase_summary() { :; }
+  main >/dev/null 2>&1
+  [ "$(head -2 "$MLOG" | tr '\n' ' ')" = "RECOVER PREFLIGHT " ]; }
+t  "SIGKILL at configtest: the next start restores ports.conf, vhost and modules, calls no systemctl" jr_recovers
+t  "SIGKILL on a stopped Apache we were starting: recovered, nothing started or stopped"               jr_recovers_stopped
+t  "a journal whose installer is still alive is refused (two installers), nothing touched"             jr_live_pid_refused
+t  "a restore that fails keeps the journal and refuses, naming where it is"                           jr_failed_restore_refuses
+t  "a journal cut short before any change (no 'complete') is discarded"                               jr_incomplete_discarded
+t  "no journal: recovery does nothing"                                                                jr_none_is_noop
+t  "main recovers a killed install BEFORE preflight"                                                  jr_main_recovers_first
+
+# ---- 3. the guard answers 0 once its installer is dead; 101 while it lives ----
+echo "=== policy-rc.d guard: self-expiring ==="
+pg_expiry_dead() { pg_setup; export LARANODE_INSTALLER_PID; LARANODE_INSTALLER_PID=$(dead_pid); _policy_guard_on; [ -e "$PRC" ] || return 1
+  sh "$PRC" start apache2; [ $? -eq 0 ]; }
+pg_expiry_live() { pg_setup; command sleep 30 & local lp=$!; export LARANODE_INSTALLER_PID=$lp; _policy_guard_on
+  sh "$PRC" start apache2; local rc=$?; kill "$lp" 2>/dev/null; [ $rc -eq 101 ]; }
+pg_expiry_stale_still_cleaned() { pg_setup; LARANODE_INSTALLER_PID=$(dead_pid); export LARANODE_INSTALLER_PID; _policy_guard_on; _PRC_ADDED=0
+  ( unset LARANODE_INSTALLER_PID; _policy_guard_clean_stale 2>/dev/null ); [ ! -e "$PRC" ]; }
+t "guard of a dead installer answers 0 (a service start is allowed again)"                pg_expiry_dead
+t "guard of a live installer answers 101 (service starts held back)"                      pg_expiry_live
+t "a dead installer's guard is still removed at the next start"                           pg_expiry_stale_still_cleaned
+
+# ---- 4/7. signals: traps, deferral while a child runs, no abort of the cleanups ----
+echo "=== signals and exit hooks ==="
+sig_child() {  # sig_child INT|TERM|HUP: the signal arrives while a foreground child runs; the hook must run AFTER the child
+  local D; D=$(mktemp -d); export D SIGN="$1"
+  ( source "$INSTALLER"; hook() { [ -f "$D/child.done" ] && echo saw-child-done > "$D/hook"; }
+    _add_exit_hook hook
+    me=$BASHPID; ( command sleep 0.3; kill -"$SIGN" "$me" ) &
+    sh -c 'sleep 1; touch "$D/child.done"'
+    touch "$D/after" ) >/dev/null 2>&1
+  local rc=$? want; case "$1" in INT) want=130;; TERM) want=143;; HUP) want=129;; esac
+  [ -f "$D/hook" ] || { echo "hook did not run after the child (or at all)"; return 1; }
+  [ ! -f "$D/after" ] || { echo "the script kept going after SIG$1"; return 1; }
+  [ "$rc" = "$want" ] || { echo "exit status $rc, wanted $want"; return 1; }
+}
+sig_second_signal() {  # a second TERM while the cleanups run must not abort them
+  local D; D=$(mktemp -d); export D
+  ( source "$INSTALLER"; slow() { command sleep 1; echo slow > "$D/slow"; }; later() { echo later > "$D/later"; }
+    _add_exit_hook slow; _add_exit_hook later
+    me=$BASHPID; ( command sleep 0.2; kill -TERM "$me"; command sleep 0.4; kill -TERM "$me" ) &
+    command sleep 5 & wait $! ) >/dev/null 2>&1
+  [ -f "$D/slow" ] && [ -f "$D/later" ] || { echo "cleanups cut short: $(ls "$D" | tr '\n' ' ')"; return 1; }
+}
+hook_dedupe() { local D; D=$(mktemp -d); export D
+  ( source "$INSTALLER"; h() { echo x >> "$D/runs"; }; _add_exit_hook h; _add_exit_hook h; _add_exit_hook h ) >/dev/null 2>&1
+  [ "$(wc -l < "$D/runs")" = 1 ]; }
+hook_order() { local D; D=$(mktemp -d); export D
+  ( source "$INSTALLER"; a() { echo a >> "$D/o"; }; b() { echo b >> "$D/o"; }; _add_exit_hook a; _add_exit_hook b; _add_exit_hook a ) >/dev/null 2>&1
+  [ "$(tr '\n' ' ' < "$D/o")" = "a b " ]; }
+hook_failing_does_not_stop_next() { local D; D=$(mktemp -d); export D
+  ( source "$INSTALLER"; bad() { return 1; }; good() { echo g > "$D/g"; }; _add_exit_hook bad; _add_exit_hook good ) >/dev/null 2>&1; [ -f "$D/g" ]; }
+hook_keeps_exit_status() { ( source "$INSTALLER"; h() { return 0; }; _add_exit_hook h; exit 7 ) >/dev/null 2>&1; [ $? -eq 7 ]; }
+t "SIGINT during a foreground child: deferred until it ends, hook runs after it, status 130" sig_child INT
+t "SIGTERM during a foreground child: deferred until it ends, hook runs after it, status 143" sig_child TERM
+t "SIGHUP during a foreground child: deferred until it ends, hook runs after it, status 129"  sig_child HUP
+t "a second TERM while the exit hooks run does not abort the remaining cleanups"              sig_second_signal
+t "the same hook registered three times runs once"                                            hook_dedupe
+t "hooks run in registration order, a repeat does not reorder them"                           hook_order
+t "a failing hook does not stop the next one"                                                 hook_failing_does_not_stop_next
+t "the exit status survives the hooks"                                                        hook_keeps_exit_status
+
+# ---- 3b. noclobber: a link planted at the policy-rc.d path is never written through ----
+echo "=== guard creation never writes through a planted link ==="
+pg_noclobber_link() { pg_setup; local T; T="$(mktemp -d)/victim"
+  ln -s "$T" "$PRC" 2>/dev/null || { echo "(no symlinks here: skipped)"; return 0; }
+  _policy_guard_on
+  [ ! -e "$T" ] && [ "$_PRC_ADDED" = 0 ] && [ -L "$PRC" ]; }
+t "a dangling link at the policy-rc.d path: no file is created through it, guard not claimed" pg_noclobber_link
+
+# ---- 6. guard scope: every apt install on a host with pre-existing services ----
+echo "=== apt_install guard scope ==="
+ai_run() {  # ai_run "<PRE_UNITS>" CMD... ; AILOG gets "guarded|open" per real install
+  base; AILOG=$(mktemp); PRC="$(mktemp -d)/policy-rc.d"; export LARANODE_POLICY_RC_D="$PRC"; PRE_UNITS="$1"; shift
+  apt-get() { if [ "$2" = "-s" ]; then return 0; fi
+    echo "$([ -e "$PRC" ] && grep -q "$PG_MARK" "$PRC" && echo guarded || echo open)" >> "$AILOG"; return "${APT_RC:-0}"; }
+  "$@"
+}
+ai_guarded()   { ai_run "nginx.service" apt_install foo; [ "$(cat "$AILOG")" = guarded ] && [ ! -e "$PRC" ]; }
+ai_open_none() { ai_run "" apt_install foo; [ "$(cat "$AILOG")" = open ]; }
+ai_open_flag() { ai_run "nginx.service" env_apt_flag; [ "$(cat "$AILOG")" = open ]; }
+env_apt_flag() { APT_ALLOW_SERVICE_START=1 apt_install foo; }
+ai_nested()    { ai_run "nginx.service" ai_nested_body; }
+ai_nested_body() { _policy_guard_on; apt_install foo; [ -e "$PRC" ] || { echo "inner apt_install took the outer guard away"; return 1; }
+  _policy_guard_off; [ ! -e "$PRC" ] && [ "$(cat "$AILOG")" = guarded ]; }
+ai_fail_unguards() { APT_RC=1; ai_run "nginx.service" apt_install foo; local rc=$?; [ $rc -ne 0 ] && [ ! -e "$PRC" ]; }
+ai_foreign_kept() { ai_run "nginx.service" ai_foreign_body; }
+ai_foreign_body() { printf '#!/bin/sh\nexit 0\n' > "$PRC"; apt_install foo; [ "$(cat "$PRC")" = "$(printf '#!/bin/sh\nexit 0')" ] && [ "$(cat "$AILOG")" = open ]; }
+t "host with pre-existing services: an ordinary apt_install runs under the marked guard"        ai_guarded
+t "no pre-existing services: no guard (a fresh host starts everything it installs)"             ai_open_none
+t "APT_ALLOW_SERVICE_START=1: no guard (a new service has to start)"                            ai_open_flag
+t "apt_install inside a guarded phase leaves the outer guard up"                                ai_nested
+t "a failing apt-get still removes the guard and reports the failure"                           ai_fail_unguards
+t "a foreign policy-rc.d is neither replaced nor removed by apt_install"                        ai_foreign_kept
+pk_flags() {  # phase_packages: which installs may start services
+  base; PKLOG=$(mktemp); OS_ID=ubuntu; IS_CLOUDPANEL=0
+  apt_install() { echo "${APT_ALLOW_SERVICE_START:-0} $*" >> "$PKLOG"; }
+  apt-get() { :; }; systemctl() { :; }
+  phase_packages >/dev/null 2>&1
+  grep -qx '1 cron' "$PKLOG" && grep -qx '1 sysstat' "$PKLOG" && grep -q '^0 git ' "$PKLOG" && grep -qx '0 software-properties-common' "$PKLOG"; }
+my_flag() { base; PANEL_PATH=$(mktemp -d); : > "$PANEL_PATH/.env.example"; MYLOG=$(mktemp)
+  apt_install() { echo "${APT_ALLOW_SERVICE_START:-0} $*" >> "$MYLOG"; }; systemctl() { return 0; }; mysql() { return 0; }; openssl() { echo pw; }; persist_secret() { :; }
+  _mysql_branch; grep -qx '1 mysql-server' "$MYLOG"; }
+pgf_flag() { pg_stubs; PG_PREEXISTING=0; ( _pgsql_branch ) >/dev/null 2>&1 || true; grep -qx '1 postgresql postgresql-client' "$APT_CALLS"; }
+pgf_flag_apt() { pg_stubs; apt_install() { echo "${APT_ALLOW_SERVICE_START:-0} $*" >> "$APT_CALLS"; }; PG_PREEXISTING=0; ( _pgsql_branch ) >/dev/null 2>&1 || true; grep -qx '1 postgresql postgresql-client' "$APT_CALLS"; }
+t "phase_packages: cron and sysstat may start (new services), base tools may not"                pk_flags
+t "mysql-server (new service on a host with other services) may start"                           my_flag
+t "a fresh PostgreSQL cluster may start; an existing cluster's server is never installed"        pgf_flag_apt
+
+
+# ==== round 5 ====================================================================
+# ---- 1. the journal knows whether THIS run started Apache ----
+echo "=== journal: started_by_run (an Apache the owner started is never stopped) ==="
+# stopped before; the owner (or a boot) starts their Apache while we are mid-run, then we die
+sb_owner_started_inprocess() { wb_setup 0 0 8080
+  apachectl() { ACTIVE_UNITS="apache2"; return 1; }      # configtest fails; meanwhile the owner's Apache came up
+  ( phase_webserver ) >/dev/null 2>&1 && return 1
+  rb_ok && no_stop && no_systemctl; }
+# SIGKILL before our start; the owner's Apache is up by the time the next installer starts
+sb_owner_started_recovery() { wb_killed 0 || return 1
+  ACTIVE_UNITS="apache2"; : > "$SVC_LOG"
+  ( _apache_journal_recover ) >/dev/null 2>&1 || { echo "recovery failed"; return 1; }
+  rb_ok && no_stop && no_systemctl && [ ! -e "$LARANODE_ROLLBACK_DIR" ]; }
+# SIGKILL AFTER we started the stopped Apache (marker written): recovery stops what we started
+sb_we_started_recovery() { wb_setup 0 0 8080
+  ( export LARANODE_INSTALLER_PID=$BASHPID; _configure_firewall() { kill -9 "$BASHPID"; }; phase_webserver ) >/dev/null 2>&1
+  [ $? -eq 137 ] || { echo "the subshell was not SIGKILLed"; return 1; }
+  [ -f "$LARANODE_ROLLBACK_DIR/started_by_run" ] || { echo "no started_by_run marker after the start"; return 1; }
+  grep -qx 'start apache2' "$SVC_LOG" || { echo "premise: we never started apache2"; return 1; }
+  ( _apache_journal_recover ) >/dev/null 2>&1 || { echo "recovery failed"; return 1; }
+  grep -qx 'stop apache2' "$SVC_LOG" && [ "$(grep -c '^stop' "$SVC_LOG")" = 1 ] && [ ! -e "$LARANODE_ROLLBACK_DIR" ]; }
+# a run that only reloads a running Apache never writes the marker
+sb_marker_absent_when_running() { wb_setup 0 1 8080; JOUT=$(mktemp)
+  _configure_firewall() { [ -f "$LARANODE_ROLLBACK_DIR/started_by_run" ] && echo bad > "$JOUT"; return 0; }
+  ( phase_webserver ) >/dev/null 2>&1 || return 1
+  [ ! -s "$JOUT" ] && [ ! -e "$LARANODE_ROLLBACK_DIR" ]; }
+t "stopped Apache, the owner starts it mid-run, then we die: it is NOT stopped"                     sb_owner_started_inprocess
+t "SIGKILL before our start, the owner's Apache is up at the next start: recovery does not stop it" sb_owner_started_recovery
+t "SIGKILL after we started the stopped Apache: recovery stops exactly that one (marker present)"   sb_we_started_recovery
+t "a running Apache we only reload never gets a started_by_run marker"                              sb_marker_absent_when_running
+
+# ---- 2. the modules record of an earlier run survives a later run's rollback ----
+echo "=== journal: modules enabled by an EARLIER run are not disabled by this run's rollback ==="
+mo_run1_survive() { wb_setup 0 1 8080; ENABLED_MODS=" proxy proxy_fcgi rewrite "
+  printf 'proxy\nproxy_fcgi\nrewrite\n' > "$LARANODE_APACHE_MODS_STATE"
+  CONFTEST_FAIL=1; ( phase_webserver ) >/dev/null 2>&1 && return 1
+  ! grep -q '^a2dismod' "$WLOG" || { echo "an earlier run's modules were disabled:"; cat "$WLOG"; return 1; }
+  [ "$(tr '\n' ' ' < "$LARANODE_APACHE_MODS_STATE")" = "proxy proxy_fcgi rewrite " ]; }
+mo_only_new_disabled() { wb_setup 0 1 8080; ENABLED_MODS=" proxy "
+  printf 'proxy\n' > "$LARANODE_APACHE_MODS_STATE"
+  CONFTEST_FAIL=1; ( phase_webserver ) >/dev/null 2>&1 && return 1
+  mods_dismodded rewrite proxy_fcgi && ! grep -qx 'a2dismod proxy' "$WLOG" \
+  && [ "$(tr '\n' ' ' < "$LARANODE_APACHE_MODS_STATE")" = "proxy " ]; }
+mo_recover_keeps_run1() { wb_setup 0 1 8080; ENABLED_MODS=" proxy proxy_fcgi rewrite "
+  printf 'proxy\nproxy_fcgi\nrewrite\n' > "$LARANODE_APACHE_MODS_STATE"
+  ( export LARANODE_INSTALLER_PID=$BASHPID; apachectl() { kill -9 "$BASHPID"; }; phase_webserver ) >/dev/null 2>&1
+  : > "$WLOG"; ( _apache_journal_recover ) >/dev/null 2>&1 || return 1
+  ! grep -q '^a2dismod' "$WLOG" && [ "$(wc -l < "$LARANODE_APACHE_MODS_STATE")" = 3 ]; }
+mo_failed_dismod_still_kept() { wb_setup 0 1 8080; ENABLED_MODS=" "
+  CONFTEST_FAIL=1; a2dismod() { return 1; }; ( phase_webserver ) >/dev/null 2>&1 && return 1
+  [ -f "$LARANODE_APACHE_MODS_STATE" ] && [ "$(wc -l < "$LARANODE_APACHE_MODS_STATE")" = 3 ]; }
+t "run 2 fails after run 1 enabled modules: run 1's modules stay enabled and recorded"    mo_run1_survive
+t "only the modules enabled since the journal opened are disabled, the rest stay recorded" mo_only_new_disabled
+t "a killed run 2 is recovered without disabling run 1's modules"                         mo_recover_keeps_run1
+t "a module that cannot be disabled stays recorded (as before)"                           mo_failed_dismod_still_kept
+
+# ---- 3. pid reuse: a pid alone does not identify an installer ----
+echo "=== pid + start time identify an installer (a reused pid is not it) ==="
+pr_start_stable() { base; command sleep 30 & local p1=$!; command sleep 0.2; command sleep 30 & local p2=$!
+  local a b c; a=$(_pid_start "$p1"); b=$(_pid_start "$p1"); c=$(_pid_start "$p2"); kill "$p1" "$p2" 2>/dev/null
+  [ -n "$a" ] && [ "$a" = "$b" ] && [ -n "$c" ] && [ "$a" != "$c" ]; }
+pr_start_dead_empty() { base; [ -z "$(_pid_start "$(dead_pid)")" ]; }
+pr_alive_match() { base; command sleep 30 & local lp=$!; local s; s=$(_pid_start "$lp"); _pid_alive "$lp" "$s"; local rc=$?; kill "$lp" 2>/dev/null; [ $rc -eq 0 ]; }
+pr_alive_mismatch() { base; command sleep 30 & local lp=$!; _pid_alive "$lp" "boot.123"; local rc=$?; kill "$lp" 2>/dev/null; [ $rc -ne 0 ]; }
+pr_alive_nostart() { base; command sleep 30 & local lp=$!; _pid_alive "$lp" ""; local rc=$?; kill "$lp" 2>/dev/null; [ $rc -eq 0 ]; }
+pr_alive_dead() { base; ! _pid_alive "$(dead_pid)" ""; }
+t "_pid_start is stable for one process and differs between processes"                    pr_start_stable
+t "_pid_start of a dead pid is empty"                                                     pr_start_dead_empty
+t "_pid_alive: live pid + its own start token is alive"                                   pr_alive_match
+t "_pid_alive: live pid + another start token is NOT alive (pid reused)"                  pr_alive_mismatch
+t "_pid_alive: a record without a start token falls back to kill -0 (old guards/journals)" pr_alive_nostart
+t "_pid_alive: dead pid is not alive"                                                     pr_alive_dead
+# the guard
+pg_reuse_answers_0() { pg_setup; command sleep 30 & local lp=$!
+  export LARANODE_INSTALLER_PID=$lp LARANODE_INSTALLER_START="boot.reused"; _policy_guard_on; [ -e "$PRC" ] || return 1
+  sh "$PRC" start apache2; local rc=$?; kill "$lp" 2>/dev/null; [ $rc -eq 0 ]; }
+pg_real_still_101() { pg_setup; command sleep 30 & local lp=$!
+  export LARANODE_INSTALLER_PID=$lp; unset LARANODE_INSTALLER_START; _policy_guard_on
+  sh "$PRC" start apache2; local rc=$?; kill "$lp" 2>/dev/null; [ $rc -eq 101 ]; }
+pg_reuse_cleaned() { pg_setup; command sleep 30 & local lp=$!
+  export LARANODE_INSTALLER_PID=$lp LARANODE_INSTALLER_START="boot.reused"; _policy_guard_on; _PRC_ADDED=0
+  ( unset LARANODE_INSTALLER_PID LARANODE_INSTALLER_START; _policy_guard_clean_stale 2>/dev/null ); kill "$lp" 2>/dev/null
+  [ ! -e "$PRC" ]; }
+pg_live_not_cleaned() { pg_setup; command sleep 30 & local lp=$!
+  export LARANODE_INSTALLER_PID=$lp; unset LARANODE_INSTALLER_START; _policy_guard_on; _PRC_ADDED=0
+  ( unset LARANODE_INSTALLER_PID LARANODE_INSTALLER_START; _policy_guard_clean_stale 2>/dev/null ); kill "$lp" 2>/dev/null
+  [ -e "$PRC" ]; }
+pg_old_format_live_kept() { pg_setup; command sleep 30 & local lp=$!   # a guard written by an older installer: pid only
+  printf '#!/bin/sh\n# %s pid=%s\nkill -0 %s 2>/dev/null && exit 101\nexit 0\n' "$_PG_MARK" "$lp" "$lp" > "$PRC"
+  ( _policy_guard_clean_stale 2>/dev/null ); kill "$lp" 2>/dev/null; [ -e "$PRC" ]; }
+t "guard whose pid was REUSED by another process answers 0 (starts allowed)"              pg_reuse_answers_0
+t "guard of the real live installer still answers 101"                                    pg_real_still_101
+t "start cleanup removes a guard whose pid was reused"                                    pg_reuse_cleaned
+t "start cleanup keeps the guard of a really running installer"                           pg_live_not_cleaned
+t "start cleanup keeps an old-format (pid only) guard of a live pid"                      pg_old_format_live_kept
+# the journal
+jr_reuse_recovers() { wb_setup 0 1 8080; command sleep 30 & local lp=$!
+  ( export LARANODE_INSTALLER_PID=$lp LARANODE_INSTALLER_START="boot.reused"; _apache_journal_open "$AD" "$AD/sites-available/laranode.conf" )
+  echo "Listen 9999" >> "$AD/ports.conf"
+  ( _apache_journal_recover ) >/dev/null 2>&1; local rc=$?; kill "$lp" 2>/dev/null
+  [ $rc -eq 0 ] && rb_ok && [ ! -e "$LARANODE_ROLLBACK_DIR" ]; }
+jr_old_journal_live_refused() { wb_setup 0 1 8080; command sleep 30 & local lp=$!
+  ( export LARANODE_INSTALLER_PID=$lp; _apache_journal_open "$AD" "$AD/sites-available/laranode.conf" )
+  rm -f "$LARANODE_ROLLBACK_DIR/start"            # a journal from an older installer: pid only
+  ( _apache_journal_recover ) >/dev/null 2>&1; local rc=$?; kill "$lp" 2>/dev/null
+  [ $rc -ne 0 ] && [ -d "$LARANODE_ROLLBACK_DIR" ]; }
+t "a journal whose pid was reused by another process is recovered, not refused"           jr_reuse_recovers
+t "a journal without a start token and a live pid is still refused (old journals)"        jr_old_journal_live_refused
+
+# ---- 4. the safety seams are not read from the inherited environment ----
+echo "=== env sanitising: test seams only with LARANODE_INSTALLER_TEST=1 ==="
+SEAMS="APT_ALLOW_SERVICE_START LARANODE_ROLLBACK_DIR LARANODE_INSTALLER_PID LARANODE_INSTALLER_START LARANODE_POLICY_RC_D LARANODE_APACHE_DIR LARANODE_APACHE_MODS_STATE LARANODE_OS_RELEASE_FILE LARANODE_PVE_DIR LARANODE_CLP_DIR LARANODE_CRON_DIR LARANODE_PROC_NET_DIR LARANODE_PROC_DIR"
+seam_env() { local v; for v in $SEAMS; do echo "$v=/tmp/inherited-$v"; done; }
+env_unset_without_flag() { local out
+  out=$(env -u LARANODE_INSTALLER_TEST $(seam_env) bash -c "source '$INSTALLER'; for v in $SEAMS; do [ -z \"\${!v+x}\" ] || echo \"STILL SET: \$v\"; done" 2>&1)
+  [ -z "$out" ] || { echo "$out"; return 1; }; }
+env_kept_with_flag() { local out
+  out=$(env LARANODE_INSTALLER_TEST=1 $(seam_env) bash -c "source '$INSTALLER'; for v in $SEAMS; do [ -n \"\${!v+x}\" ] || echo \"LOST: \$v\"; done" 2>&1)
+  [ -z "$out" ] || { echo "$out"; return 1; }; }
+env_journal_dir_default() { local d
+  d=$(env -u LARANODE_INSTALLER_TEST LARANODE_ROLLBACK_DIR=/tmp/evil-rollback bash -c "source '$INSTALLER'; _journal_dir")
+  [ "$d" = /etc/laranode/apache-rollback ]; }
+env_apt_flag_ignored() { local o
+  o=$(env -u LARANODE_INSTALLER_TEST APT_ALLOW_SERVICE_START=1 bash -c "source '$INSTALLER'; echo \"flag=\${APT_ALLOW_SERVICE_START:-0}\"")
+  [ "$o" = "flag=0" ]; }
+env_documented_overrides_kept() { local o
+  o=$(env -u LARANODE_INSTALLER_TEST LARANODE_MANIFEST_FILE=/x/m.json LARANODE_PROBE_PROC=1 LARANODE_OS=debian bash -c "source '$INSTALLER'; echo \"\${LARANODE_MANIFEST_FILE:-} \${LARANODE_PROBE_PROC:-} \${LARANODE_OS:-}\"")
+  [ "$o" = "/x/m.json 1 debian" ]; }
+t "every test seam is dropped from the inherited environment (no LARANODE_INSTALLER_TEST)"  env_unset_without_flag
+t "LARANODE_INSTALLER_TEST=1 keeps the seams (the unit tests need them)"                    env_kept_with_flag
+t "an inherited LARANODE_ROLLBACK_DIR cannot point the rollback's rm -rf elsewhere"         env_journal_dir_default
+t "an inherited APT_ALLOW_SERVICE_START=1 cannot unguard the base apt installs"             env_apt_flag_ignored
+t "the documented overrides (MANIFEST_FILE, PROBE_PROC, LARANODE_OS) are still honoured"    env_documented_overrides_kept
+
 echo ""
 echo "Results: passed=$PASS  failed=$FAIL"
 [ "$FAIL" -eq 0 ] && echo "ALL PASS" && exit 0

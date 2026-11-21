@@ -29,6 +29,8 @@ export PRESETUP='
     [ "$(curl -s --max-time 2 http://127.0.0.1:80/)" = "LIVE_SITE_80" ] \
         || { echo "PRESETUP: live site not answering on :80" >&2; exit 1; }
     systemctl show -p MainPID --value apache2 > /root/apache.pid.before
+    [ -f /usr/sbin/policy-rc.d ] || { echo "PRESETUP: image has no policy-rc.d" >&2; exit 1; }
+    md5sum < /usr/sbin/policy-rc.d > /root/prc.before
     cp /etc/apache2/ports.conf /root/ports.conf.before
     ls /etc/apache2/sites-enabled > /root/sites-enabled.before
     a2query -m ssl >/dev/null 2>&1 && echo yes > /root/ssl.before || echo no > /root/ssl.before
@@ -77,6 +79,10 @@ export POST_ASSERTS_CMD='
     grep -q "\"unit\":\"apache2.service\",\"managed\":false" /etc/laranode/service-manifest.json \
         || { echo "FAIL: manifest should list apache2.service as managed:false" >&2; cat /etc/laranode/service-manifest.json >&2; exit 1; }
     echo "PASS: manifest marks apache2.service managed:false"
+    # the host'"'"'s own policy-rc.d (the image ships one) is not ours: never removed or changed
+    [ -f /usr/sbin/policy-rc.d ] && [ "$(md5sum < /usr/sbin/policy-rc.d)" = "$(cat /root/prc.before)" ] \
+        || { echo "FAIL: the host'"'"'s own policy-rc.d was removed or changed" >&2; exit 1; }
+    echo "PASS: the owner'"'"'s policy-rc.d survived the install untouched"
 '
 
 run_scenario
