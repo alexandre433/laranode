@@ -13,6 +13,8 @@
 #                   (default: mysql)
 #   IMAGE           systemd base image (default: jrei/systemd-ubuntu:24.04;
 #                   Debian scenarios use jrei/systemd-debian:13)
+#   EXPECT_INSTALLER_FAIL  regex: the installer must refuse (non-zero, message matches)
+#                   and POST_ASSERTS_CMD then checks nothing was changed
 #   KEEP            1 = leave container after run for manual inspection (default: 0)
 
 set -uo pipefail
@@ -103,6 +105,22 @@ run_scenario() {
     local -a _composer_env=(-e COMPOSER_CACHE_DIR=/composer-cache)
     if [ -n "$_gh_token" ]; then
         _composer_env+=(-e "COMPOSER_AUTH={\"github-oauth\":{\"github.com\":\"${_gh_token}\"}}")
+    fi
+    # EXPECT_INSTALLER_FAIL=<regex>: the installer must REFUSE (non-zero exit, message
+    # matching the regex) and POST_ASSERTS_CMD must then show the host was not touched.
+    if [ -n "${EXPECT_INSTALLER_FAIL:-}" ]; then
+        local _out _rc=0
+        _out=$(docker exec "${_composer_env[@]}" "$cname" bash -c \
+            "$installer_env bash /home/laranode_ln/panel/laranode-scripts/bin/laranode-installer.sh" 2>&1) || _rc=$?
+        printf '%s\n' "$_out" | tail -12
+        [ "$_rc" -ne 0 ] || _fail "installer should have refused but exited 0"
+        printf '%s\n' "$_out" | grep -qE "$EXPECT_INSTALLER_FAIL" \
+            || _fail "refusal message did not match /${EXPECT_INSTALLER_FAIL}/"
+        echo "[post] Installer refused as expected; checking the host was not touched..."
+        if docker exec "$cname" bash -c "${POST_ASSERTS_CMD:-true}"; then
+            echo "RESULT[$scenario]: PASS"; _cleanup; return 0
+        fi
+        _fail "post-assertion failed after the refusal"
     fi
     docker exec "${_composer_env[@]}" "$cname" bash -c \
         "$installer_env bash /home/laranode_ln/panel/laranode-scripts/bin/laranode-installer.sh" \

@@ -34,6 +34,19 @@ have_cmd()    { command -v "$1" >/dev/null 2>&1; }
 port_in_use() { ss -tlnH "( sport = :$1 )" | grep -q .; }
 svc_active()  { systemctl is-active --quiet "$1"; }
 
+# Apache config root and the policy-rc.d guard path are overridable so the unit tests can run the
+# Apache phase against a scratch directory.
+_apache_dir()    { echo "${LARANODE_APACHE_DIR:-/etc/apache2}"; }
+_policy_rc_d()   { echo "${LARANODE_POLICY_RC_D:-/usr/sbin/policy-rc.d}"; }
+# _port_holder PORT — name of the process listening on PORT ("another process" if unknown).
+_port_holder() {
+  local h
+  h=$(ss -tlnp "( sport = :$1 )" 2>/dev/null | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -1 || true)
+  echo "${h:-another process}"
+}
+# _panel_vhost_enabled — the panel's own Apache vhost is already enabled (a re-run).
+_panel_vhost_enabled() { [ -e "$(_apache_dir)/sites-enabled/laranode.conf" ]; }
+
 # version_ge HAVE WANT — returns 0 (true) when HAVE >= WANT (version sort)
 version_ge() { printf '%s\n%s\n' "$2" "$1" | sort -V -C; }
 
@@ -167,7 +180,7 @@ pg_cluster_count() {
 # keeps apt from upgrading already-installed packages that are merely named on the
 # command line. Stops apt -y from silently replacing Percona, CloudPanel's nginx/php,
 # Proxmox packages, etc.
-_PROTECTED_PKG_RE='^(proxmox-|pve-|libpve-|qemu-server|lxc-pve|percona-|mysql-|mariadb-|postgresql|libpq|cloudpanel|nginx|libnginx|php[0-9]+\.[0-9]+-|varnish|redis|docker|containerd|tailscale|ufw|openssh-server)'
+_PROTECTED_PKG_RE='^(apache2|libapache2-|proxmox-|pve-|libpve-|qemu-server|lxc-pve|percona-|mysql-|mariadb-|postgresql|libpq|cloudpanel|nginx|libnginx|php[0-9]+\.[0-9]+-|varnish|redis|docker|containerd|tailscale|ufw|openssh-server)'
 apt_install() {
   local sim
   sim=$(apt-get install -s --no-upgrade -y "$@" 2>&1) \
@@ -308,6 +321,20 @@ preflight() {
         die "Port ${HTTP_PORT} is reserved by Proxmox/SSH on this host — choose another LARANODE_HTTP_PORT." ;;
     esac
   fi
+  # The panel's own Listen port must be free BEFORE Apache is touched. apachectl
+  # configtest does not bind, so a busy port passes it; a graceful reload that then
+  # cannot open the new listener can take a running Apache (and every live site on it)
+  # down. :80 has its own rules just below. The one accepted holder is the panel's own
+  # Apache vhost from a previous run.
+  if [ "$HTTP_PORT" != 80 ] && port_in_use "$HTTP_PORT"; then
+    local _busy_holder
+    _busy_holder=$(_port_holder "$HTTP_PORT")
+    if [ "$_busy_holder" = apache2 ] && _panel_vhost_enabled; then
+      log "Port ${HTTP_PORT} is the panel's own Apache vhost from a previous run - reusing it"
+    else
+      die "Port ${HTTP_PORT} is already in use by ${_busy_holder}. Nothing was changed. Set LARANODE_HTTP_PORT to a free port and re-run."
+    fi
+  fi
   # An explicit :80 is honoured when Apache already holds it (re-run / shared Apache:
   # the panel just adds its vhost). Any other holder makes the install impossible.
   if [ "$port80_free" = 0 ] && [ "$HTTP_PORT" = 80 ] && [ "$port80_holder" != "apache2" ]; then
@@ -319,6 +346,10 @@ preflight() {
   if [ "$APACHE_OWNED" = 0 ] && [ "$HTTP_PORT" = 80 ] && [ -n "$BIND_ADDR" ]; then
     die "A pre-existing Apache owns :80 on every interface; the panel cannot be bound to ${BIND_ADDR}:80 beside it. Set LARANODE_HTTP_PORT to another port (e.g. 8080) or LARANODE_BIND=all."
   fi
+
+  # A pre-existing but STOPPED apache2 / php8.4-fpm is someone else's service: refuse
+  # now, before any change, unless the operator opted in to starting it.
+  _refuse_stopped_preexisting
 
   # ---- Refuse impossible installs now, before any mutation ----------------------
   # (these used to abort halfway through the install, after packages were added)
@@ -360,6 +391,12 @@ preflight() {
 
   local _plan
   _plan="${_host_desc} · panel DB=${DB_ENGINE} · ${_port_desc} · bind=${BIND_ADDR:-all} · reverb=${REVERB_PORT} · web=apache"
+  if [ "$APACHE_OWNED" = 0 ]; then
+    _plan+=" · apache2: PRE-EXISTING, kept as is (panel vhost + Listen added, graceful reload; enables only the missing modules: $(_apache_modules))"
+    if [ "$HTTP_PORT" = 80 ]; then
+      warn "Sharing :80 with the existing Apache: the panel vhost (laranode.conf) has no ServerName, so a request with an unmatched Host or a bare IP goes to whichever vhost file loads FIRST. If your default vhost sorts BEFORE laranode.conf (e.g. 000-default.conf) the panel is NOT reachable by IP, only by a name you route to it. If it sorts AFTER (e.g. mysite.com.conf, zz-default.conf) the panel becomes the default vhost on :80 and hijacks your unmatched requests. Use LARANODE_HTTP_PORT=8080 to avoid both."
+    fi
+  fi
   _plan+=" · php8.4 added (${php_note})"
   _plan+=" · ${node_note}"
   _plan+=" · mysql: ${mysql_note}"
@@ -780,12 +817,17 @@ _disable_default_site() {
   return 0
 }
 
-# _apache_modules — modules the panel vhost needs. mod_ssl is only enabled on an
-# Apache we installed: on a pre-existing one it would open a new :443 listener.
+# _apache_modules — modules the panel vhost needs. A pre-existing Apache gets only
+# what the panel vhost itself uses (proxy_fcgi for the PHP-FPM handler, rewrite for
+# public/.htaccess); no mod_ssl (it would open a brand-new :443) and none of the
+# extras (headers, setenvif, proxy_http), which would change every existing site.
+# An Apache this installer installed gets the full set the panel's features use.
 _apache_modules() {
-  local m="proxy_fcgi rewrite setenvif headers proxy proxy_http"
-  [ "${APACHE_OWNED:-1}" = 0 ] || m+=" ssl"
-  echo "$m"
+  if [ "${APACHE_OWNED:-1}" = 0 ]; then
+    echo "proxy proxy_fcgi rewrite"
+  else
+    echo "proxy_fcgi rewrite setenvif headers proxy proxy_http ssl"
+  fi
 }
 
 # _vhost_render TEMPLATE DEST PORT DOCROOT — render the panel vhost. On a
@@ -827,51 +869,90 @@ _configure_firewall() {
   fi
 }
 
+# _apache_enable_modules — enable what the panel vhost needs. On a pre-existing Apache
+# that is only the small set the panel itself uses, and only the modules not already
+# on; whatever this installer switched on is recorded (APACHE_MODS_ENABLED, manifest).
+APACHE_MODS_ENABLED=""
+_apache_enable_modules() {
+  local m new=""
+  for m in $(_apache_modules); do
+    a2query -m "$m" >/dev/null 2>&1 && continue
+    a2enmod "$m" >/dev/null || die "a2enmod ${m} failed"
+    new+="${new:+ }${m}"
+  done
+  APACHE_MODS_ENABLED="$new"
+}
+
 phase_webserver() {
   log "Installing Apache Web Server"
+  local ad; ad=$(_apache_dir)
   # Suppress service auto-start during apt: on a host where :80 is already held
   # (e.g. nginx) Apache's default 'Listen 80' would fail to bind and abort the
   # install under set -e. We configure ports first, then start Apache ourselves.
-  local _added_policy=0
-  if [ ! -e /usr/sbin/policy-rc.d ]; then
-    printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
-    chmod +x /usr/sbin/policy-rc.d
+  local _added_policy=0 _prc; _prc=$(_policy_rc_d)
+  if [ ! -e "$_prc" ]; then
+    printf '#!/bin/sh\nexit 101\n' > "$_prc"
+    chmod +x "$_prc"
     _added_policy=1
     # Safety net: if an apt-get below aborts under set -e, still remove the guard
     # we created (the explicit rm after the installs handles the success path).
-    trap 'rm -f /usr/sbin/policy-rc.d' EXIT
+    # shellcheck disable=SC2064
+    trap "rm -f '$_prc'" EXIT
   fi
   apt_install apache2
   apt_install certbot python3-certbot-apache
-  [ "$_added_policy" -eq 1 ] && rm -f /usr/sbin/policy-rc.d
+  [ "$_added_policy" -eq 1 ] && rm -f "$_prc"
 
   log "Enabling required Apache modules"
-  # shellcheck disable=SC2046
-  a2enmod $(_apache_modules) >/dev/null
+  _apache_enable_modules
 
   [ -n "${HTTP_PORT:-}" ]  || die "HTTP_PORT not set — preflight must run first"
   [ -n "${PANEL_PATH:-}" ] || die "PANEL_PATH not set — preflight must run first"
 
   # Render the panel vhost from the template. NEVER writes 000-default.conf.
   local tmpl="${PANEL_PATH}/laranode-scripts/templates/apache-panel.template"
-  local dest="/etc/apache2/sites-available/laranode.conf"
+  local dest="${ad}/sites-available/laranode.conf"
   [ -f "$tmpl" ] || die "apache-panel.template missing at ${tmpl}"
+  # A pre-existing Apache's own files are restored if anything below fails: the next
+  # reload/restart by its owner must not trip over a line we added.
+  local _ports_bak="" _vhost_bak="" _vhost_on=0
+  if [ "$APACHE_OWNED" = 0 ]; then
+    _ports_bak=$(mktemp)
+    cp -p "${ad}/ports.conf" "$_ports_bak"
+    # A re-run overwrites a previously working panel vhost: keep it for the rollback.
+    if [ -e "$dest" ]; then _vhost_bak=$(mktemp); cp -p "$dest" "$_vhost_bak"; fi
+    [ ! -e "${ad}/sites-enabled/laranode.conf" ] || _vhost_on=1
+  fi
   _vhost_render "$tmpl" "$dest" "$HTTP_PORT" "${PANEL_PATH}/public"
 
   # Panel never uses the stock default site (only an Apache we installed loses it).
   _disable_default_site
 
-  _apache_ports_conf /etc/apache2/ports.conf
+  _apache_ports_conf "${ad}/ports.conf"
 
   a2ensite laranode || die "a2ensite laranode failed"
+  _apache_rollback() {
+    [ "$APACHE_OWNED" = 0 ] || return 0
+    cp -p "$_ports_bak" "${ad}/ports.conf"
+    if [ -n "$_vhost_bak" ]; then
+      cp -p "$_vhost_bak" "$dest"                 # previous working panel vhost
+      [ "$_vhost_on" = 1 ] || a2dissite laranode >/dev/null 2>&1 || true
+    else
+      a2dissite laranode >/dev/null 2>&1 || true
+      rm -f "$dest"
+    fi
+  }
   if ! apachectl configtest; then
-    # Leave a pre-existing, running Apache exactly as it was.
-    [ "$APACHE_OWNED" = 1 ] || a2dissite laranode >/dev/null 2>&1 || true
+    # Leave a pre-existing Apache exactly as it was.
+    _apache_rollback
     die "Apache config test failed — review ${dest}"
   fi
 
   [ "$APACHE_OWNED" = 0 ] || systemctl enable apache2 >/dev/null 2>&1 || true
-  _refresh_service apache2 "$APACHE_OWNED"
+  if ! ( _refresh_service apache2 "$APACHE_OWNED" ); then
+    _apache_rollback
+    die "apache2 reload/start failed — the panel's changes to ${ad} were rolled back"
+  fi
   svc_active apache2 || die "apache2 is not active after (re)load"
 
   # Confirm the socket is open (full HTTP 200 check is phase_services, after the
@@ -893,6 +974,19 @@ phase_webserver() {
 # ==============================================================================
 # Phase 5 — PHP 8.4, Node.js, Composer, PostgreSQL client
 # ==============================================================================
+
+# _php_fpm_up — enable and start php8.4-fpm, but only when this installer installed
+# it. A pre-existing php8.4-fpm keeps its boot state and its running process; the
+# services phase reloads it (or, with LARANODE_START_STOPPED=1, starts it).
+_php_fpm_up() {
+  if [ "${PHPFPM_OWNED:-1}" = 1 ]; then
+    log "Enabling PHP-FPM"
+    systemctl enable php8.4-fpm || die "systemctl enable php8.4-fpm failed"
+    systemctl start php8.4-fpm  || die "systemctl start php8.4-fpm failed"
+  else
+    log "Pre-existing php8.4-fpm: boot state and running process left as they are"
+  fi
+}
 
 phase_php_node() {
   log "PHP 8.4 + Node"
@@ -957,9 +1051,7 @@ phase_php_node() {
     warn "System 'php' alternative left as ${sys_php}. Panel uses /usr/bin/php8.4 directly."
   fi
 
-  log "Enabling PHP-FPM"
-  systemctl enable php8.4-fpm || die "systemctl enable php8.4-fpm failed"
-  systemctl start php8.4-fpm  || die "systemctl start php8.4-fpm failed"
+  _php_fpm_up
 
   # php8.4-fpm package provides /etc/apache2/conf-available/php8.4-fpm.conf;
   # a2enconf must run after the package is installed.
@@ -1191,11 +1283,13 @@ capture_preexisting() {
   pkg_installed apache2   && PRE_APACHE=1 || PRE_APACHE=0
   pkg_installed php8.4-fpm && PRE_PHPFPM=1 || PRE_PHPFPM=0
   APACHE_OWNED=1; PHPFPM_OWNED=1
-  # Not ours = installed before us AND running now. A package that is merely present
-  # but stopped (e.g. apache2 pulled in as a dependency of php8.3 while nginx holds
-  # :80) serves nothing: there is nothing live to protect, configure it as before.
-  if [ "$PRE_APACHE" = 1 ] && ! _unit_is_prior apache2.service && svc_active apache2; then APACHE_OWNED=0; fi
-  if [ "$PRE_PHPFPM" = 1 ] && ! _unit_is_prior php8.4-fpm.service && svc_active php8.4-fpm; then PHPFPM_OWNED=0; fi
+  # Ownership = the package was installed by this installer (absent before this run,
+  # or recorded managed:true by an earlier run). A package that was already there is
+  # the operator's, running or not: a stopped one may be a standby, a maintenance
+  # switch-off or an on-demand service, and enabling/starting/reconfiguring it would
+  # change what boots and what listens.
+  if [ "$PRE_APACHE" = 1 ] && ! _unit_is_prior apache2.service; then APACHE_OWNED=0; fi
+  if [ "$PRE_PHPFPM" = 1 ] && ! _unit_is_prior php8.4-fpm.service; then PHPFPM_OWNED=0; fi
   PRE_UNITS=""
   have_cmd systemctl || return 0
   local pat
@@ -1205,6 +1299,38 @@ capture_preexisting() {
                    | awk '$1 ~ /\.service$/ {print $1}')$'\n'
   done
   PRE_UNITS=$(printf '%s' "$PRE_UNITS" | sed '/^$/d' | sort -u)
+}
+
+# _apache_listen_conflicts — "PORT HOLDER" for every port in apache2's own ports.conf
+# that another process already holds. Listen lines inside the ssl/gnutls IfModule
+# blocks are skipped (they only apply when mod_ssl is enabled).
+_apache_listen_conflicts() {
+  local pc p
+  pc="$(_apache_dir)/ports.conf"
+  [ -f "$pc" ] || return 0
+  for p in $(awk '/<IfModule[ \t]+[^>]*(ssl|gnutls)/ {skip=1} skip && /<\/IfModule>/ {skip=0; next}
+                  !skip && /^[ \t]*Listen[ \t]/ {n=split($2, a, ":"); print a[n]}' "$pc" | sort -un); do
+    if port_in_use "$p"; then echo "${p} $(_port_holder "$p")"; fi
+  done
+}
+
+# _refuse_stopped_preexisting — a pre-existing apache2 / php8.4-fpm that is installed
+# but NOT running can only be brought up by starting it, which this installer never
+# does to someone else's service unless told to. Runs in preflight, before any change.
+_refuse_stopped_preexisting() {
+  local stopped=""
+  if [ "$APACHE_OWNED" = 0 ] && ! svc_active apache2; then stopped+=" apache2"; fi
+  if [ "$PHPFPM_OWNED" = 0 ] && ! svc_active php8.4-fpm; then stopped+=" php8.4-fpm"; fi
+  [ -n "$stopped" ] || return 0
+  # Starting a stopped apache2 whose own Listen port another service holds would fail
+  # AFTER packages and the database were installed: say so now, whatever the opt-in.
+  if [ "$APACHE_OWNED" = 0 ] && ! svc_active apache2; then
+    local conflicts
+    conflicts=$(_apache_listen_conflicts)
+    [ -z "$conflicts" ] || die "apache2 is installed but stopped, and its own ports.conf Listen port(s) are held by other services: $(echo "$conflicts" | awk '{printf "%s (%s) ", $1, $2}'). It could not be started, and this installer does not edit someone else's Apache listeners. Free that port or change apache2's Listen yourself, then re-run. Nothing was changed."
+  fi
+  [ "${LARANODE_START_STOPPED:-0}" = 1 ] && return 0
+  die "Installed but not running (present before this installer):${stopped}. The panel needs it running; this installer does not start, enable or reconfigure someone else's stopped service on its own. Start it yourself and re-run, or re-run with LARANODE_START_STOPPED=1 to let the installer start it (it is NOT enabled at boot, so it and the panel stay down after a reboot, and its own configuration is left as it is). Nothing was changed."
 }
 
 # write_service_manifest — call after all services are installed and started.
@@ -1246,13 +1372,22 @@ write_service_manifest() {
     _mf_add "$u" false preexisting "present-before-install"
   done <<< "$PRE_UNITS"
 
+  # Apache modules this installer switched on (kept across re-runs, so an uninstall or
+  # an audit still knows which ones are ours).
+  local mods_prior="" mods_all m mods_json=""
+  if [ -f "$mf" ]; then
+    mods_prior=$(grep -o '"apache_modules_enabled":\[[^]]*\]' "$mf" | sed 's/^[^[]*\[//; s/\]$//' | tr -d '"' | tr ',' ' ' || true)
+  fi
+  mods_all=$(printf '%s\n' $mods_prior ${APACHE_MODS_ENABLED:-} | sed '/^$/d' | sort -u)
+  for m in $mods_all; do mods_json+="${mods_json:+,}\"${m}\""; done
+
   mkdir -p "$(dirname "$mf")"
   {
     printf '{"version":1,"generated":"%s","host":{"os":"%s %s","proxmox":%s,"cloudpanel":%s},' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$OS_ID" "$OS_VERSION" \
       "$([ "$IS_PROXMOX" = 1 ] && echo true || echo false)" \
       "$([ "$IS_CLOUDPANEL" = 1 ] && echo true || echo false)"
-    printf '"db":{"engine":"%s","unit":"%s"},\n"services":[\n' "${DB_ENGINE:-}" "$PANEL_DB_UNIT"
+    printf '"db":{"engine":"%s","unit":"%s"},"apache_modules_enabled":[%s],\n"services":[\n' "${DB_ENGINE:-}" "$PANEL_DB_UNIT" "$mods_json"
     local i
     for i in "${!lines[@]}"; do
       printf '%s%s\n' "${lines[$i]}" "$([ "$i" -lt $((${#lines[@]} - 1)) ] && echo ,)"

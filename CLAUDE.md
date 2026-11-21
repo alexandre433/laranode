@@ -83,6 +83,7 @@ back to `:8080` when `:80` is occupied.
 | `LARANODE_OS` | auto-detect | `ubuntu` or `debian`: force the package path for a derivative distro (VERSION_ID must still be 24.04 / 13) |
 | `LARANODE_BIND` | `local` on Proxmox/CloudPanel, else `all` | `all`, `local` (127.0.0.1) or an IPv4. Panel Apache vhost and Reverb listen only there; reach a local-bound panel over an SSH tunnel |
 | `LARANODE_DATA_DIR` | — | Fresh PostgreSQL install only: put cluster data under `<dir>/postgresql/<ver>/<cluster>` (e.g. a bigger disk) |
+| `LARANODE_START_STOPPED` | `0` | `1` = allow the installer to START a pre-existing apache2 / php8.4-fpm that is installed but stopped. Without it such a host is refused in preflight. The unit is started, never enabled at boot, and its configuration is left as it is |
 | `LARANODE_UNATTENDED` | `0` | `1` = take all defaults, suppress all prompts and `confirm` gates. Without a TTY and without `1` the install stops at the confirmation (no silent proceed) |
 
 ### Supported hosts
@@ -105,6 +106,8 @@ Pre-existing Apache / php-fpm (manifest `managed:false`) are never restarted: a 
 |------------------------|---------------------|
 | nginx on :80 | Panel vhost written to `laranode.conf` on :8080; existing server fully untouched |
 | Apache on :80 (live sites) | Its `Listen`/`000-default`/sites/mod_ssl are never changed; panel gets its own vhost + `Listen 8080` (PHP-FPM handler inline in that vhost, no global `a2enconf`); Apache is **gracefully reloaded** (same PID, no dropped connections), never restarted or `a2dissite`d. `LARANODE_BIND` + :80 is refused (cannot narrow its wildcard `Listen 80`) |
+| Apache/php-fpm installed but STOPPED | Not ours: ownership means *the package was absent before this run* (or a previous run recorded it `managed:true`), not *it is running*. Refused in preflight (nothing changed) unless `LARANODE_START_STOPPED=1`; with it the unit is only started, never enabled, `ports.conf`/`000-default`/modules of the owner are untouched. Refused regardless of the opt-in when its own `Listen` port is held by another service (it could not start) |
+| Panel port already in use | `HTTP_PORT` (default 80, fallback 8080/8090, or `LARANODE_HTTP_PORT`) must be free before Apache config is touched; a graceful reload that cannot bind a new `Listen` can take a running Apache down and `apachectl configtest` does not bind. Refused with the holder named. Only the panel's own Apache vhost from a previous run is accepted |
 | MySQL with a root password | Authenticates with `LARANODE_MYSQL_ROOT_PASSWORD`; root password **never changed** |
 | Multiple Postgres clusters | `LARANODE_PG_PORT` required; only that cluster's socket is touched |
 | System `php` not 8.4 | `php8.4` packages installed additively; system default left unchanged; panel calls/units use `/usr/bin/php8.4` |
@@ -117,8 +120,9 @@ Pre-existing Apache / php-fpm (manifest `managed:false`) are never restarted: a 
 Re-running the installer on an already-provisioned panel is **idempotent**: `APP_KEY` is
 not regenerated if already set to a `base64:` value, `APP_URL` is not overwritten if
 already a non-placeholder value, and `db:seed` is skipped when the `users` table is
-non-empty. (Note: a re-run that does not pass `LARANODE_HTTP_PORT` will see the panel's
-own Apache holding `:80` and select `:8080`; pass the original port to keep it in place.)
+non-empty. (Note: a re-run that does not pass `LARANODE_HTTP_PORT` sees the panel's own Apache
+holding `:80` and falls back to `:8080`, where its own Reverb already listens: it is now
+refused with the holder named. Pass the original port to keep it in place.)
 
 ### Service manifest (what the installer owns)
 
@@ -126,7 +130,7 @@ The installer writes `/etc/laranode/service-manifest.json` (override: `LARANODE_
 world-readable, one service per line so shell and PHP can both parse it:
 
 ```json
-{"version":1,"generated":"2026-11-21T01:00:00Z","host":{"os":"debian 13","proxmox":true,"cloudpanel":false},"db":{"engine":"pgsql","unit":"postgresql@17-main.service"},
+{"version":1,"generated":"2026-11-21T01:00:00Z","host":{"os":"debian 13","proxmox":true,"cloudpanel":false},"db":{"engine":"pgsql","unit":"postgresql@17-main.service"},"apache_modules_enabled":["proxy","rewrite"],
 "services":[
 {"unit":"laranode-reverb.service","managed":true,"role":"reverb","reason":"installed-by-laranode"},
 {"unit":"postgresql@16-main.service","managed":false,"role":"preexisting","reason":"present-before-install"}
@@ -136,11 +140,15 @@ world-readable, one service per line so shell and PHP can both parse it:
 - `"managed":true` = created/installed by the installer (kept across re-runs). Safe to stop/start (sleep/wake).
 - `"managed":false` = present before the installer ran (e.g. a CloudPanel host's PostgreSQL, Redis, Percona, nginx/php-fpm, any
   pre-existing Apache/PHP-FPM/MySQL). **Never stop, start, restart or reconfigure these.**
+  The one exception: with `LARANODE_START_STOPPED=1` the installer starts (never enables) a stopped pre-existing apache2 / php8.4-fpm that the panel needs; it stays `managed:false`.
 - Roles: `reverb`, `queue`, `web` (apache2), `php` (php8.4-fpm), `database` (the panel's DB unit), `preexisting`.
+- `apache_modules_enabled` (additive, still `version:1`): Apache modules this installer switched on (kept across re-runs). On a pre-existing Apache only `proxy proxy_fcgi rewrite` are ever enabled, and only if not already on; no `ssl`, `headers`, `setenvif` or `proxy_http`.
 - Always managed: `laranode-reverb.service`, `laranode-queue-worker.service`. A consumer must treat a unit that is
   missing from the file as not managed.
 
 ### Install-test matrix
+
+CI (`.github/workflows/installer-tests.yml`) runs the unit tests, `local-dev/install-test/mutation-smoke.sh` (reverts each reviewed guard in a copy of the installer; every mutation must turn the unit tests red) and the `port-busy`, `apache-stopped`, `apache80` and `nginx80` scenarios on every PR and on pushes to `development`.
 
 Clean-room integration tests in `local-dev/install-test/` boot one vanilla
 `jrei/systemd-ubuntu:24.04` container per scenario, inject the repo, run the real
@@ -149,9 +157,9 @@ installer, and assert services active + HTTP 200 + admin login. Run from the rep
     make -f local-dev/Makefile install-test-unit       # host helper + host-detection unit tests (no container, ~2 s)
     make -f local-dev/Makefile install-test-templates  # host template-content tests (no container)
     make -f local-dev/Makefile install-test            # baseline scenario only
-    make -f local-dev/Makefile install-test-matrix     # all 9 scenarios (~1-2 hr)
+    make -f local-dev/Makefile install-test-matrix     # all 11 scenarios (~1-2 hr)
 
-Scenarios: `baseline` | `nginx80` | `mysql-rootpw` | `pgsql` | `rerun` | `debian13` | `pve` | `cloudpanel` | `apache80`.
+Scenarios: `baseline` | `nginx80` | `mysql-rootpw` | `pgsql` | `rerun` | `debian13` | `pve` | `cloudpanel` | `apache80` | `port-busy` | `apache-stopped`.
 Run or debug a single scenario:
 
     bash local-dev/install-test/run.sh pgsql

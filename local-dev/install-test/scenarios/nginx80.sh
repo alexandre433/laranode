@@ -19,7 +19,7 @@ export SCENARIO="nginx80"
 # nginx has bound :80 before the installer's preflight port-check runs.
 export PRESETUP='
     apt-get update -q >/dev/null 2>&1
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --quiet nginx php8.3 >/dev/null 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --quiet nginx php8.3-cli >/dev/null 2>&1
     systemctl start nginx
     for _ in $(seq 1 15); do
         ss -tlnH "( sport = :80 )" | grep -q . && break

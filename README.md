@@ -73,6 +73,8 @@ The installer is safe to run on a host that already has services:
 
 - **nginx on :80** - the panel vhost goes on :8080, the existing server is untouched.
 - **Apache on :80 (live sites)** - kept exactly as is: its `Listen` lines, `000-default` and sites stay, mod_ssl is not enabled, the PHP-FPM handler is set in the panel vhost only, and Apache is gracefully reloaded (same process, no dropped connections), never restarted. `LARANODE_BIND` cannot narrow :80 beside it: pick another `LARANODE_HTTP_PORT`.
+- **Apache or PHP-FPM installed but stopped** - treated as the owner's, not ours: refused up front (nothing changed) unless `LARANODE_START_STOPPED=1`, which only starts it. It is never enabled at boot, so it and the panel stay down after a reboot unless you enable it. Refused regardless when its own `Listen` port is held by another service.
+- **Panel port already in use** - refused with the holder named before any change (a graceful Apache reload that cannot bind a new port can take live sites down). Pick a free `LARANODE_HTTP_PORT`.
 - **Existing MySQL / Percona / MariaDB** - reused as is; `mysql-server` is never installed over it.
 - **Existing PostgreSQL clusters** - client only; set `LARANODE_PG_PORT` to the cluster the panel may use.
 - **Proxmox VE** - ufw is never installed or enabled, ports 22/85/111/443/3128/8006 are refused, the panel binds 127.0.0.1.

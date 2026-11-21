@@ -7,7 +7,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALLER="${SCRIPT_DIR}/../../../laranode-scripts/bin/laranode-installer.sh"
+INSTALLER="${LARANODE_INSTALLER:-${SCRIPT_DIR}/../../../laranode-scripts/bin/laranode-installer.sh}"
 FIX="${SCRIPT_DIR}/fixtures"
 
 PASS=0; FAIL=0
@@ -397,8 +397,6 @@ pf_pre_apache_default() { pre_env; preflight; expect HTTP_PORT "$HTTP_PORT" 8080
 pf_own_apache_bind_80() {  # re-run of our own bound install: manifest says apache2 is ours
   pre_env; mf=$(mktemp); echo '{"unit":"apache2.service","managed":true,"role":"web"}' > "$mf"; export LARANODE_MANIFEST_FILE="$mf"
   export LARANODE_HTTP_PORT=80 LARANODE_BIND=local; preflight; expect APACHE_OWNED "$APACHE_OWNED" 1; }
-pf_pre_apache_inactive() { pre_env; svc_active() { return 1; }; preflight; expect APACHE_OWNED "$APACHE_OWNED" 1; }
-t  "apache2 installed but STOPPED (dependency of another pkg): owned, configured as before" pf_pre_apache_inactive
 tf "pre-existing Apache on :80 + LARANODE_BIND=local + :80 refused (cannot narrow its Listen)" pf_pre_apache_bind_80
 t  "pre-existing Apache on :80, explicit :80, all interfaces: shares :80 (vhost only)"          pf_pre_apache_open_80
 t  "pre-existing Apache on :80: panel defaults to 8080, Apache marked not owned"                pf_pre_apache_default
@@ -525,6 +523,206 @@ t "MySQL root and panel passwords never appear in mysql's argv (env + stdin)" my
 reverb_not_root() { grep -qx 'User=laranode_ln' "${SCRIPT_DIR}/../../../laranode-scripts/templates/laranode-reverb.service"; }
 t "laranode-reverb.service runs as laranode_ln, not root" reverb_not_root
 
+
+# ==============================================================================
+# Round 2 (re-review of 9217bb5)
+# ==============================================================================
+
+# ---- finding 1: the panel's own Listen port must be free BEFORE Apache is touched ----
+echo "=== busy panel port is refused before any Apache change ==="
+# A running, pre-existing Apache holds :80. Something else holds $BUSY. A graceful
+# reload with a 'Listen $BUSY' it cannot bind can take the live sites down, and
+# apachectl configtest does not bind - so preflight must refuse.
+busy_env() {  # busy_env <port> <holder-process>
+  BUSY=$1; HOLDER=$2
+  base; export LARANODE_MANIFEST_FILE=/nonexistent-manifest
+  pkg_installed() { [ "$1" = apache2 ]; }; svc_active() { [ "$1" = apache2 ]; }
+  port_in_use() { [ "$1" = 80 ] || [ "$1" = "$BUSY" ]; }
+  ss() {
+    case "$*" in
+      *":${BUSY} )"*) echo "LISTEN 0 5 0.0.0.0:${BUSY} 0.0.0.0:* users:((\"${HOLDER}\",pid=7,fd=3))" ;;
+      *":80 )"*)      echo 'LISTEN 0 511 *:80 *:* users:(("apache2",pid=1,fd=4))' ;;
+    esac
+  }
+  _panel_vhost_enabled() { return 1; }
+}
+pf_busy_fallback()   { busy_env 8080 python3; preflight; }
+pf_busy_explicit()   { busy_env 9000 tomcat; export LARANODE_HTTP_PORT=9000; preflight; }
+pf_busy_msg()        { busy_env 8080 python3; out=$( (preflight) 2>&1 ); [ $? -ne 0 ] && printf '%s' "$out" | grep -q '8080' && printf '%s' "$out" | grep -q 'python3' && printf '%s' "$out" | grep -q 'LARANODE_HTTP_PORT'; }
+pf_busy_other_apache(){ busy_env 8080 apache2; preflight; }
+pf_busy_own_rerun()  { busy_env 8080 apache2; _panel_vhost_enabled() { return 0; }; preflight; expect HTTP_PORT "$HTTP_PORT" 8080; }
+pf_free_8080()       { busy_env 9999 x; preflight; expect HTTP_PORT "$HTTP_PORT" 8080; }
+pf_busy_clp()        { busy_env 8090 varnishd; IS_CLOUDPANEL=1; detect_cloudpanel() { IS_CLOUDPANEL=1; }; preflight; }
+tf "nginx/Apache on :80 + another service on :8080: refused before Apache is touched"   pf_busy_fallback
+tf "explicit LARANODE_HTTP_PORT held by another service: refused"                       pf_busy_explicit
+t  "the refusal names the port, the holder and LARANODE_HTTP_PORT"                      pf_busy_msg
+tf "port held by the owner's own Apache (no panel vhost yet): refused"                  pf_busy_other_apache
+t  "re-run: port held by the panel's own Apache vhost is accepted"                      pf_busy_own_rerun
+t  "free fallback port still works"                                                     pf_free_8080
+tf "CloudPanel fallback :8090 busy: refused"                                            pf_busy_clp
+
+# ---- finding 2: ownership = the package was absent before this run -------------------
+echo "=== a pre-existing STOPPED apache2 / php8.4-fpm is not ours ==="
+# w2_env APACHE(run|stop|none) FPM(run|stop|none)
+w2_env() {
+  base; export LARANODE_MANIFEST_FILE=/nonexistent-manifest
+  _A=$1; _F=$2
+  pkg_installed() { { [ "$1" = apache2 ] && [ "$_A" != none ]; } || { [ "$1" = php8.4-fpm ] && [ "$_F" != none ]; }; }
+  svc_active()    { { [ "$1" = apache2 ] && [ "$_A" = run ]; }  || { [ "$1" = php8.4-fpm ] && [ "$_F" = run ]; }; }
+  port_in_use()   { [ "$1" = 80 ] && [ "$_A" = run ]; }
+  ss() { echo 'LISTEN 0 511 *:80 *:* users:(("apache2",pid=1,fd=4))'; }
+}
+pf_stop_apache()        { w2_env stop none; preflight; }
+pf_stop_apache_msg()    { w2_env stop none; out=$( (preflight) 2>&1 ); [ $? -ne 0 ] && printf '%s' "$out" | grep -q 'LARANODE_START_STOPPED' && printf '%s' "$out" | grep -qi 'apache2'; }
+pf_stop_apache_optin()  { w2_env stop none; export LARANODE_START_STOPPED=1; preflight; expect APACHE_OWNED "$APACHE_OWNED" 0 && expect PRE_APACHE "$PRE_APACHE" 1; }
+pf_stop_fpm()           { w2_env none stop; preflight; }
+pf_stop_fpm_optin()     { w2_env none stop; export LARANODE_START_STOPPED=1; preflight; expect PHPFPM_OWNED "$PHPFPM_OWNED" 0; }
+pf_stop_prior_managed() { w2_env stop stop; mf=$(mktemp); printf '%s\n' '{"unit":"apache2.service","managed":true,"role":"web"}' '{"unit":"php8.4-fpm.service","managed":true,"role":"php"}' > "$mf"; export LARANODE_MANIFEST_FILE="$mf"; preflight; expect APACHE_OWNED "$APACHE_OWNED" 1 && expect PHPFPM_OWNED "$PHPFPM_OWNED" 1; }
+pf_absent_owned()       { w2_env none none; preflight; expect APACHE_OWNED "$APACHE_OWNED" 1 && expect PHPFPM_OWNED "$PHPFPM_OWNED" 1; }
+pf_run_not_owned()      { w2_env run run; preflight; expect APACHE_OWNED "$APACHE_OWNED" 0 && expect PHPFPM_OWNED "$PHPFPM_OWNED" 0; }
+tf "pre-existing STOPPED apache2: refused unless LARANODE_START_STOPPED=1"           pf_stop_apache
+t  "the refusal names LARANODE_START_STOPPED and apache2"                            pf_stop_apache_msg
+t  "LARANODE_START_STOPPED=1: stopped apache2 is allowed and stays NOT owned"        pf_stop_apache_optin
+tf "pre-existing STOPPED php8.4-fpm: refused unless LARANODE_START_STOPPED=1"        pf_stop_fpm
+t  "LARANODE_START_STOPPED=1: stopped php8.4-fpm is allowed and stays NOT owned"     pf_stop_fpm_optin
+t  "a re-run (manifest managed:true) keeps owning stopped units, no flag needed"     pf_stop_prior_managed
+t  "package absent before the run: owned (installed by this run)"                    pf_absent_owned
+t  "pre-existing running units: not owned"                                           pf_run_not_owned
+
+fpm_up_owned()   { base; SVC_LOG=$(mktemp); systemctl() { echo "$*" >> "$SVC_LOG"; }; PHPFPM_OWNED=1; _php_fpm_up; grep -qx 'enable php8.4-fpm' "$SVC_LOG" && grep -qx 'start php8.4-fpm' "$SVC_LOG"; }
+fpm_up_pre()     { base; SVC_LOG=$(mktemp); systemctl() { echo "$*" >> "$SVC_LOG"; }; PHPFPM_OWNED=0; _php_fpm_up; ! grep -q . "$SVC_LOG"; }
+fpm_wired()      { base; declare -f phase_php_node | grep -q '_php_fpm_up' && ! declare -f phase_php_node | grep -qE 'systemctl (enable|start) php8.4-fpm'; }
+t "php8.4-fpm we installed: enabled + started"                                       fpm_up_owned
+t "pre-existing php8.4-fpm: no enable, no start (boot state untouched)"              fpm_up_pre
+t "phase_php_node goes through _php_fpm_up (no bare enable/start)"                   fpm_wired
+
+# ---- nit: apache2 is a protected package ---------------------------------------------
+apt_apache2_refused()  { base; apt_run 'Inst apache2 [2.4.58-1] (2.4.58-2 Ubuntu)'; apt_refused; }
+apt_apache2bin_refused(){ base; apt_run 'Inst apache2-bin [2.4.58-1] (2.4.58-2 Ubuntu)'; apt_refused; }
+apt_apache2_new_ok()   { base; apt_run $'Inst apache2 (2.4.58-1 Ubuntu)\nInst apache2-bin (2.4.58-1 Ubuntu)'; apt_passed; }
+t "apt would UPGRADE an installed apache2: refused"                                  apt_apache2_refused
+t "apt would UPGRADE apache2-bin: refused"                                           apt_apache2bin_refused
+t "a fresh apache2 install (no upgrade) still passes"                                apt_apache2_new_ok
+
+# ---- nit: the phases are tested by behaviour (systemctl/a2* call lists), not by grep ----
+echo "=== phase behaviour with stubs ==="
+svc_stub() {  # records every systemctl call in SVC_LOG; svc_active follows $ACTIVE_UNITS
+  SVC_LOG=$(mktemp)
+  systemctl() { echo "$*" >> "$SVC_LOG"; }
+  svc_active() { case " $ACTIVE_UNITS " in *" $1 "*) return 0;; esac; grep -qxE "(re)?start $1" "$SVC_LOG"; }
+}
+ps_run() {  # phase_services with the filesystem stubbed
+  svc_stub; log() { :; }
+  cp() { :; }; mkdir() { :; }; chown() { :; }; find() { :; }; chmod() { :; }
+  _install_scheduler_cron() { :; }; write_service_manifest() { :; }
+  PANEL_PATH=/nonexistent; phase_services
+}
+ps_pre_running() { base; ACTIVE_UNITS="apache2 php8.4-fpm"; APACHE_OWNED=0; PHPFPM_OWNED=0; ps_run
+  grep -qx 'reload apache2' "$SVC_LOG" && grep -qx 'reload php8.4-fpm' "$SVC_LOG" && ! grep -qE '^(restart|stop) |^start (apache2|php8.4-fpm)|^enable (--now )?(apache2|php8.4-fpm)' "$SVC_LOG"; }
+ps_owned()       { base; ACTIVE_UNITS="apache2 php8.4-fpm"; APACHE_OWNED=1; PHPFPM_OWNED=1; ps_run
+  grep -qx 'restart apache2' "$SVC_LOG" && grep -qx 'restart php8.4-fpm' "$SVC_LOG" && ! grep -q '^reload ' "$SVC_LOG"; }
+ps_mixed()       { base; ACTIVE_UNITS="apache2 php8.4-fpm"; APACHE_OWNED=0; PHPFPM_OWNED=1; ps_run
+  grep -qx 'reload apache2' "$SVC_LOG" && grep -qx 'restart php8.4-fpm' "$SVC_LOG"; }
+ps_pre_stopped() { base; ACTIVE_UNITS=""; APACHE_OWNED=0; PHPFPM_OWNED=0; ps_run
+  grep -qx 'start apache2' "$SVC_LOG" && grep -qx 'start php8.4-fpm' "$SVC_LOG" && ! grep -qE '^enable (--now )?(apache2|php8.4-fpm)' "$SVC_LOG"; }
+t "phase_services, pre-existing running apache2+fpm: reload both, nothing else"   ps_pre_running
+t "phase_services, we installed both: restart both, no reload"                    ps_owned
+t "phase_services passes each unit's OWN flag (apache pre-existing, fpm ours)"    ps_mixed
+t "phase_services, opted-in stopped pre-existing units: start only, never enable" ps_pre_stopped
+
+# phase_webserver against a scratch /etc/apache2
+wb_setup() {  # wb_setup <owned 0|1> <running 0|1> <port>
+  base; svc_stub; log() { :; }
+  AD=$(mktemp -d); mkdir -p "$AD/sites-available" "$AD/sites-enabled"
+  cp "${FIX}/ports.conf" "$AD/ports.conf"; cp "$AD/ports.conf" "$AD/ports.conf.orig"
+  export LARANODE_APACHE_DIR="$AD" LARANODE_POLICY_RC_D="$AD/policy-rc.d"
+  PANEL_PATH=$(mktemp -d); mkdir -p "$PANEL_PATH/laranode-scripts/templates"
+  printf '<VirtualHost *:__PORT__>\n    DocumentRoot __DOCROOT__\n</VirtualHost>\n' > "$PANEL_PATH/laranode-scripts/templates/apache-panel.template"
+  APACHE_OWNED=$1; HTTP_PORT=$3; BIND_ADDR=""; IS_PROXMOX=0; IS_CLOUDPANEL=0
+  [ "$2" = 1 ] && ACTIVE_UNITS="apache2" || ACTIVE_UNITS=""
+  WLOG=$(mktemp); ENABLED_MODS=" "
+  apt_install()  { :; }
+  a2query()      { case "$ENABLED_MODS" in *" $2 "*) return 0;; *) return 1;; esac; }
+  a2enmod()      { echo "a2enmod $*" >> "$WLOG"; }
+  a2ensite()     { echo "a2ensite $*" >> "$WLOG"; : > "$AD/sites-enabled/$1.conf"; }
+  a2dissite()    { echo "a2dissite $*" >> "$WLOG"; rm -f "$AD/sites-enabled/$1.conf"; }
+  apachectl()    { [ "${CONFTEST_FAIL:-0}" != 1 ]; }
+  ss()           { echo "LISTEN 0 511 *:${HTTP_PORT} *:* users:((\"apache2\",pid=1,fd=4))"; }
+  sleep()        { :; }; chmod() { :; }; _configure_firewall() { :; }
+  port_in_use()  { return 1; }
+}
+wb_pre_running() { wb_setup 0 1 8080; ( phase_webserver ) >/dev/null 2>&1 || return 1
+  grep -qx 'reload apache2' "$SVC_LOG" && ! grep -qE '^(restart|start|enable)' "$SVC_LOG" \
+  && ! grep -q 'a2dissite' "$WLOG" && ! grep -qw ssl "$WLOG" \
+  && grep -qxE 'Listen 80' "$AD/ports.conf" && grep -qxE 'Listen 8080' "$AD/ports.conf"; }
+wb_owned()       { wb_setup 1 0 80; ( phase_webserver ) >/dev/null 2>&1 || return 1
+  grep -qx 'enable apache2' "$SVC_LOG" && grep -qx 'restart apache2' "$SVC_LOG" && grep -q 'a2dissite 000-default' "$WLOG" && grep -qw ssl "$WLOG"; }
+wb_pre_stopped() { wb_setup 0 0 80; ( phase_webserver ) >/dev/null 2>&1 || return 1
+  grep -qx 'start apache2' "$SVC_LOG" && ! grep -qE '^(restart|reload|enable)' "$SVC_LOG" && ! grep -q 'a2dissite' "$WLOG" \
+  && cmp -s "$AD/ports.conf" "$AD/ports.conf.orig"; }
+wb_conftest_rollback() { wb_setup 0 1 8080; CONFTEST_FAIL=1; ( phase_webserver ) >/dev/null 2>&1 && return 1
+  cmp -s "$AD/ports.conf" "$AD/ports.conf.orig" && [ ! -e "$AD/sites-enabled/laranode.conf" ] && [ ! -e "$AD/sites-available/laranode.conf" ] && ! grep -q '^reload' "$SVC_LOG"; }
+wb_reload_rollback()   { wb_setup 0 1 8080; systemctl() { echo "$*" >> "$SVC_LOG"; [ "$1" != reload ]; }; ( phase_webserver ) >/dev/null 2>&1 && return 1
+  cmp -s "$AD/ports.conf" "$AD/ports.conf.orig" && [ ! -e "$AD/sites-enabled/laranode.conf" ]; }
+wb_pre_modules()  { wb_setup 0 1 8080; phase_webserver >/dev/null 2>&1 || return 1
+  for m in proxy proxy_fcgi rewrite; do grep -qx "a2enmod $m" "$WLOG" || { echo "missing $m"; return 1; }; done
+  ! grep -qE 'a2enmod (headers|setenvif|proxy_http|ssl)' "$WLOG" && [ "$APACHE_MODS_ENABLED" = "proxy proxy_fcgi rewrite" ]; }
+wb_pre_modules_skip_enabled() { wb_setup 0 1 8080; ENABLED_MODS=" proxy proxy_fcgi "; ( phase_webserver ) >/dev/null 2>&1 || return 1
+  grep -qx 'a2enmod rewrite' "$WLOG" && ! grep -qE 'a2enmod (proxy|proxy_fcgi)$' "$WLOG"; }
+wb_owned_modules() { wb_setup 1 0 80; ( phase_webserver ) >/dev/null 2>&1 || return 1
+  for m in proxy_fcgi rewrite setenvif headers proxy proxy_http ssl; do grep -qw "$m" "$WLOG" || { echo "missing $m"; return 1; }; done; }
+t  "phase_webserver, pre-existing running Apache: reload only, Listen 80 kept, no a2dissite, no ssl" wb_pre_running
+t  "phase_webserver, Apache we installed: enable + restart, 000-default off, ssl on"                 wb_owned
+t  "phase_webserver, opted-in stopped pre-existing Apache: start only (never enable), ports.conf untouched" wb_pre_stopped
+t  "failed configtest on a pre-existing Apache: ports.conf, vhost and site link rolled back"         wb_conftest_rollback
+t  "failed reload on a pre-existing Apache: ports.conf and site link rolled back"                    wb_reload_rollback
+t  "pre-existing Apache: only the modules the panel vhost needs are enabled and recorded"           wb_pre_modules
+t  "pre-existing Apache: modules that are already on are not touched"                               wb_pre_modules_skip_enabled
+t  "Apache we installed keeps the full module set (panel features need it)"                          wb_owned_modules
+
+mf_records_mods() { mf_setup; APACHE_MODS_ENABLED="proxy rewrite"; write_service_manifest; mf_valid_json && grep -q '"apache_modules_enabled":\["proxy","rewrite"\]' "$LARANODE_MANIFEST_FILE"; }
+mf_no_mods()      { mf_setup; APACHE_MODS_ENABLED=""; write_service_manifest; mf_valid_json && grep -q '"apache_modules_enabled":\[\]' "$LARANODE_MANIFEST_FILE"; }
+mf_mods_rerun()   { mf_setup; APACHE_MODS_ENABLED="proxy rewrite"; write_service_manifest; APACHE_MODS_ENABLED=""; write_service_manifest; grep -q '"apache_modules_enabled":\["proxy","rewrite"\]' "$LARANODE_MANIFEST_FILE"; }
+t "manifest records the Apache modules this installer enabled"                      mf_records_mods
+t "manifest: no modules enabled -> empty list"                                      mf_no_mods
+t "manifest: a re-run that enables nothing keeps the earlier record"                mf_mods_rerun
+
+# ---- nit: warn about the shared-:80 default-vhost ordering ---------------------------
+plan_warn() {  # plan_warn <HTTP_PORT env value> -> $OUT is everything preflight said
+  pre_env; export LARANODE_HTTP_PORT=$1; log() { echo "$*"; }; warn() { echo "WARN: $*"; }
+  OUT=$(preflight 2>&1)
+}
+warn_shared_80()      { plan_warn 80;   printf '%s' "$OUT" | grep -qi 'default vhost' && printf '%s' "$OUT" | grep -q 'laranode.conf'; }
+no_warn_8080()        { plan_warn 8080; ! printf '%s' "$OUT" | grep -qi 'default vhost'; }
+t "explicit :80 beside a pre-existing Apache: plan warns about default-vhost ordering"  warn_shared_80
+t "panel on its own port: no shared-:80 warning"                                         no_warn_8080
+warn_both_ways()      { plan_warn 80; printf '%s' "$OUT" | grep -q 'NOT reachable' && printf '%s' "$OUT" | grep -qi 'hijacks'; }
+t "the shared-:80 warning covers BOTH orderings (panel unreachable / panel hijacks)"    warn_both_ways
+
+# ---- a stopped pre-existing Apache whose own Listen port another service holds ------------
+echo "=== stopped Apache that could not start is refused before any change ==="
+stop_conflict_env() {  # $1 = busy port, $2 = holder; nginx-style host with a stopped apache2
+  w2_env stop none
+  AD=$(mktemp -d); cp "${FIX}/ports.conf" "$AD/ports.conf"; export LARANODE_APACHE_DIR="$AD"
+  CONF_PORT=$1; CONF_HOLDER=$2
+  port_in_use() { [ "$1" = "$CONF_PORT" ]; }
+  ss() { echo "LISTEN 0 511 0.0.0.0:${CONF_PORT} 0.0.0.0:* users:((\"${CONF_HOLDER}\",pid=3,fd=6))"; }
+}
+pf_stop_listen_busy_optin() { stop_conflict_env 80 nginx; export LARANODE_START_STOPPED=1; preflight; }
+pf_stop_listen_busy_noflag(){ stop_conflict_env 80 nginx; preflight; }
+pf_stop_listen_msg()        { stop_conflict_env 80 nginx; export LARANODE_START_STOPPED=1; out=$( (preflight) 2>&1 ); [ $? -ne 0 ] && printf '%s' "$out" | grep -q 'nginx' && printf '%s' "$out" | grep -q '80' && ! printf '%s' "$out" | grep -q 'LARANODE_START_STOPPED'; }
+pf_stop_ssl_block_ignored() { stop_conflict_env 443 nginx; export LARANODE_START_STOPPED=1; preflight; }
+pf_stop_listen_free()       { stop_conflict_env 9 x; export LARANODE_START_STOPPED=1; preflight; expect APACHE_OWNED "$APACHE_OWNED" 0; }
+tf "stopped apache2 + its Listen 80 held by nginx: refused even with LARANODE_START_STOPPED=1" pf_stop_listen_busy_optin
+tf "same, without the opt-in: still refused"                                                   pf_stop_listen_busy_noflag
+t  "the refusal names the real conflict (port + holder), not the opt-in"                       pf_stop_listen_msg
+t  "Listen 443 inside the ssl IfModule is not a conflict"                                      pf_stop_ssl_block_ignored
+t  "stopped apache2 whose ports are free + opt-in: accepted"                                   pf_stop_listen_free
+
+wb_rerun_rollback() { wb_setup 0 1 8080; echo OLDVHOST > "$AD/sites-available/laranode.conf"; : > "$AD/sites-enabled/laranode.conf"; CONFTEST_FAIL=1
+  ( phase_webserver ) >/dev/null 2>&1 && return 1
+  grep -qx OLDVHOST "$AD/sites-available/laranode.conf" && [ -e "$AD/sites-enabled/laranode.conf" ] && cmp -s "$AD/ports.conf" "$AD/ports.conf.orig"; }
+t "failed re-run on a pre-existing Apache restores the previous working panel vhost" wb_rerun_rollback
 echo ""
 echo "Results: passed=$PASS  failed=$FAIL"
 [ "$FAIL" -eq 0 ] && echo "ALL PASS" && exit 0
