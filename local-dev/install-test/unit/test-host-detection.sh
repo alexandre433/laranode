@@ -390,13 +390,15 @@ t "pre-existing Apache + bound panel: 'Listen 80' kept, scoped panel Listen adde
 t "pre-existing Apache: its own 'Listen 443' is never rewritten"                    ports_pre_443_untouched
 t "pre-existing Apache: re-run does not duplicate the panel Listen"                 ports_pre_idem
 
-pre_env() { base; export LARANODE_MANIFEST_FILE=/nonexistent-manifest; pkg_installed() { [ "$1" = apache2 ]; }; port_in_use() { [ "$1" = 80 ]; }; ss() { echo 'LISTEN 0 511 *:80 *:* users:(("apache2",pid=1,fd=4))'; }; }
+pre_env() { base; export LARANODE_MANIFEST_FILE=/nonexistent-manifest; svc_active() { [ "$1" = apache2 ]; }; pkg_installed() { [ "$1" = apache2 ]; }; port_in_use() { [ "$1" = 80 ]; }; ss() { echo 'LISTEN 0 511 *:80 *:* users:(("apache2",pid=1,fd=4))'; }; }
 pf_pre_apache_bind_80() { pre_env; export LARANODE_HTTP_PORT=80 LARANODE_BIND=local; preflight; }
 pf_pre_apache_open_80() { pre_env; export LARANODE_HTTP_PORT=80; preflight; expect HTTP_PORT "$HTTP_PORT" 80; }
 pf_pre_apache_default() { pre_env; preflight; expect HTTP_PORT "$HTTP_PORT" 8080 && expect APACHE_OWNED "$APACHE_OWNED" 0; }
 pf_own_apache_bind_80() {  # re-run of our own bound install: manifest says apache2 is ours
   pre_env; mf=$(mktemp); echo '{"unit":"apache2.service","managed":true,"role":"web"}' > "$mf"; export LARANODE_MANIFEST_FILE="$mf"
   export LARANODE_HTTP_PORT=80 LARANODE_BIND=local; preflight; expect APACHE_OWNED "$APACHE_OWNED" 1; }
+pf_pre_apache_inactive() { pre_env; svc_active() { return 1; }; preflight; expect APACHE_OWNED "$APACHE_OWNED" 1; }
+t  "apache2 installed but STOPPED (dependency of another pkg): owned, configured as before" pf_pre_apache_inactive
 tf "pre-existing Apache on :80 + LARANODE_BIND=local + :80 refused (cannot narrow its Listen)" pf_pre_apache_bind_80
 t  "pre-existing Apache on :80, explicit :80, all interfaces: shares :80 (vhost only)"          pf_pre_apache_open_80
 t  "pre-existing Apache on :80: panel defaults to 8080, Apache marked not owned"                pf_pre_apache_default

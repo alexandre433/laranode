@@ -18,7 +18,7 @@ export SCENARIO="apache80"
 export PRESETUP='
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -q >/dev/null 2>&1
-    apt-get install -y --quiet apache2 >/dev/null 2>&1
+    apt-get install -y --quiet apache2 curl >/dev/null 2>&1
     echo "LIVE_SITE_80" > /var/www/html/index.html
     rm -f /var/www/html/index.html.bak
     systemctl enable --now apache2

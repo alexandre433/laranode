@@ -41,6 +41,8 @@ NGX
     md5sum /etc/postgresql/*/main/pg_hba.conf > /root/hba.before
     pg_lsclusters --no-header > /root/pg.before
     dpkg -s mariadb-server | sed -n "s/^Version: //p" > /root/db.version.before
+    systemctl start php8.4-fpm  # apt skipped the start (policy-rc.d); CloudPanel runs it live
+    [ "$(systemctl show -p MainPID --value php8.4-fpm)" != 0 ] || { echo "PRESETUP: php8.4-fpm not running" >&2; exit 1; }
     systemctl show -p MainPID --value php8.4-fpm > /root/phpfpm.pid.before
     for _ in $(seq 1 15); do ss -tlnH "( sport = :80 )" | grep -q . && break; sleep 1; done
     echo "PRESETUP: clp-like host ready (nginx 80/443/8080, mariadb, pg, ufw, php8.4)"

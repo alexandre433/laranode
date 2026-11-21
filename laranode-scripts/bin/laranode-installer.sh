@@ -1185,8 +1185,11 @@ capture_preexisting() {
   pkg_installed apache2   && PRE_APACHE=1 || PRE_APACHE=0
   pkg_installed php8.4-fpm && PRE_PHPFPM=1 || PRE_PHPFPM=0
   APACHE_OWNED=1; PHPFPM_OWNED=1
-  if [ "$PRE_APACHE" = 1 ] && ! _unit_is_prior apache2.service; then APACHE_OWNED=0; fi
-  if [ "$PRE_PHPFPM" = 1 ] && ! _unit_is_prior php8.4-fpm.service; then PHPFPM_OWNED=0; fi
+  # Not ours = installed before us AND running now. A package that is merely present
+  # but stopped (e.g. apache2 pulled in as a dependency of php8.3 while nginx holds
+  # :80) serves nothing: there is nothing live to protect, configure it as before.
+  if [ "$PRE_APACHE" = 1 ] && ! _unit_is_prior apache2.service && svc_active apache2; then APACHE_OWNED=0; fi
+  if [ "$PRE_PHPFPM" = 1 ] && ! _unit_is_prior php8.4-fpm.service && svc_active php8.4-fpm; then PHPFPM_OWNED=0; fi
   PRE_UNITS=""
   have_cmd systemctl || return 0
   local pat
