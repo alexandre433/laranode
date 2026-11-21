@@ -27,7 +27,7 @@ MUTATIONS=(
   'stale-guard cleanup ignores a still-running installer|s#kill -0 "\$pid" 2>/dev/null#false#'
   'guard removes a policy-rc.d that is not ours|s#if _policy_guard_is_ours; then rm -f#if true; then rm -f#'
   'Listen/vhost rollback never runs|s#\[ "\$_WB_ARMED" = 1 \] || return 0#return 0#'
-  'modules enabled by a failed run not disabled again|s#a2dismod "\$m" >/dev/null 2>\&1 || warn#true || warn#'
+  'modules enabled by a failed run not disabled again|s#if a2dismod "\$m" >/dev/null 2>\&1; then :; else#if true; then :; else#'
   'live pre-existing php8.4-fpm restarted by the extension postinst (no guard)|s#if \[ "\${PHPFPM_OWNED:-1}" = 0 \]; then _policy_guard_on; fi#:#'
   'ss-less host proceeds without any listener probe|s#_probe_available || die "Cannot#true || die "Cannot#'
   # round 4: the reviewer's two reproduced bugs
