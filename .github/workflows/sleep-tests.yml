@@ -30,6 +30,12 @@ jobs:
           COMPOSER_AUTH: '{"github-oauth":{"github.com":"${{ secrets.GITHUB_TOKEN }}"}}'
       - run: composer install --no-interaction --prefer-dist --no-progress
       - run: cp .env.example .env && php artisan key:generate
+      # the Inertia page tests render the Blade layout, which needs public/build/manifest.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --legacy-peer-deps --no-audit --no-fund
+      - run: npm run build
       - run: ./vendor/bin/pest
 
   vitest:

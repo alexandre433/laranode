@@ -40,6 +40,20 @@ run() { "$@" >/tmp/ln-last.out 2>&1; echo $?; }
 
 echo "=== host: $(. /etc/os-release; echo "$PRETTY_NAME")"
 
+# The container shares the HOST kernel. A CI runner kernel has AppArmor ON, but its profile list
+# (securityfs) is not visible inside a container, so the real hostdb gate correctly fails CLOSED
+# ("cannot prove it safe") and every functional hostdb check below would be refused (seen on the
+# GitHub runner). Present a host WITHOUT AppArmor for the functional checks; section 6c proves
+# the gate itself, per mode, against injected kernel files.
+AA_KERNEL=$(tr -d '[:space:]' < /sys/module/apparmor/parameters/enabled 2>/dev/null || echo n/a)
+echo "INFO  kernel apparmor enabled=${AA_KERNEL:-n/a} (shared with the container)"
+if [ "$AA_KERNEL" = Y ]; then
+    echo N > /tmp/ln-aa-kernel-off
+    mount --bind /tmp/ln-aa-kernel-off /sys/module/apparmor/parameters/enabled \
+        && echo "INFO  bind-mounted apparmor enabled=N over the kernel file (functional checks run as a no-AppArmor host)" \
+        || echo "WARN  could not mask the kernel apparmor flag; hostdb checks may be refused by the (correct) fail-closed gate"
+fi
+
 # ─── fixtures (stand-ins for what the Laranode installer lays down) ───────────────
 [ -x /usr/bin/php8.4 ] || {
     cat > /usr/bin/php8.4 <<'PHP'
