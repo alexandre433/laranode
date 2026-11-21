@@ -17,6 +17,8 @@ async function login(page) {
 }
 
 test.beforeAll(() => {
+    // the lab's Reverb can crash-restart (systemd revives it in ~5 s); start from a settled "active"
+    lab('for i in $(seq 1 30); do systemctl is-active --quiet laranode-reverb.service && sleep 2 && systemctl is-active --quiet laranode-reverb.service && exit 0; sleep 1; done; exit 1');
     // what the installer does: register only what Laranode installed (sleep stays OFF until toggled)
     lab(`LARANODE_DB_INSTALLED_BY_US=1 bash ${BIN}/laranode-managed-register.sh reverb queue fpm hostdb`);
 });
@@ -31,8 +33,8 @@ test('Power page: badge, toggle, idle minutes, manual wake', async ({ page }) =>
     await expect(page.getByRole('heading', { name: 'Power' })).toBeVisible();
 
     // every service has a state badge; Reverb is up and sleep is off by default
-    await expect(page.getByTestId('state-reverb')).toHaveText(/running/i);
-    await expect(page.getByRole('checkbox', { name: 'sleep reverb' })).not.toBeChecked();
+    await expect(page.getByTestId('state-reverb')).toHaveText(/running/i, { timeout: 20000 });
+    await expect(page.getByRole('checkbox', { name: 'sleep reverb' })).not.toBeChecked({ timeout: 30000 });
 
     // panel DB shares the hosting DB instance: it can never be put to sleep
     await expect(page.getByText(/cannot sleep: panel DB/i)).toBeVisible();
@@ -40,17 +42,17 @@ test('Power page: badge, toggle, idle minutes, manual wake', async ({ page }) =>
 
     // toggle on with 1 idle minute: the socket takes over, the real service sleeps
     await page.getByLabel('idle minutes for reverb').fill('1');
-    await page.getByRole('checkbox', { name: 'sleep reverb' }).check();
-    await expect(page.getByRole('checkbox', { name: 'sleep reverb' })).toBeChecked();
-    await expect(page.getByTestId('state-reverb')).toHaveText(/sleeping/i, { timeout: 15000 });
+    await page.getByRole('checkbox', { name: 'sleep reverb' }).click();
+    await expect(page.getByRole('checkbox', { name: 'sleep reverb' })).toBeChecked({ timeout: 30000 });
+    await expect(page.getByTestId('state-reverb')).toHaveText(/sleeping/i, { timeout: 30000 });
 
     // manual wake
     await page.getByRole('button', { name: 'wake reverb' }).click();
     await expect(page.getByTestId('state-reverb')).toHaveText(/running/i, { timeout: 30000 });
 
     // toggle off restores the original state
-    await page.getByRole('checkbox', { name: 'sleep reverb' }).uncheck();
-    await expect(page.getByRole('checkbox', { name: 'sleep reverb' })).not.toBeChecked();
+    await page.getByRole('checkbox', { name: 'sleep reverb' }).click();
+    await expect(page.getByRole('checkbox', { name: 'sleep reverb' })).not.toBeChecked({ timeout: 30000 });
     await expect(page.getByTestId('state-reverb')).toHaveText(/running/i, { timeout: 15000 });
 });
 

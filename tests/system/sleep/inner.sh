@@ -41,8 +41,8 @@ run() { "$@" >/tmp/ln-last.out 2>&1; echo $?; }
 echo "=== host: $(. /etc/os-release; echo "$PRETTY_NAME")"
 
 # ─── fixtures (stand-ins for what the Laranode installer lays down) ───────────────
-[ -x /usr/bin/php ] || {
-    cat > /usr/bin/php <<'PHP'
+[ -x /usr/bin/php8.4 ] || {
+    cat > /usr/bin/php8.4 <<'PHP'
 #!/bin/bash
 # stand-in for `php artisan ...`
 shift
@@ -55,7 +55,7 @@ case "$1" in
   queue:work) echo "run $(date +%s)" >> /tmp/ln-queue-runs; exit 0 ;;
 esac
 PHP
-    chmod 755 /usr/bin/php; CREATED+=(/usr/bin/php)
+    chmod 755 /usr/bin/php8.4; CREATED+=(/usr/bin/php8.4)
 }
 id laranode_ln >/dev/null 2>&1 || { useradd -m laranode_ln; CREATED+=(user:laranode_ln); }
 mkdir -p "$PANEL" && printf 'DB_CONNECTION=sqlite\nREVERB_SERVER_PORT=8080\n' > "$PANEL/.env"
@@ -206,6 +206,17 @@ sleep 1
 check "full cycle leaves units/pools/enablement byte-identical" test "$(snapshot)" = "$BASE"
 check "db awake and usable after disable" test "$($CLI -h127.0.0.1 -uspk -ppw -N -e 'select count(*) from spikedb.t' 2>/dev/null)" = 1
 check "decoy external service still untouched" systemctl is-active --quiet ln-decoy-external.service
+
+# ─── 7. php-fpm sandbox: the panel runs us under ProtectSystem=full (/etc read-only) ───
+# systemd-run -p ProtectSystem=full reproduces what a sudo child of php-fpm inherits.
+SANDBOX="systemd-run --quiet --wait --pipe --collect -p ProtectSystem=full --"
+check "sandbox really is read-only (precondition)" bash -c "! $SANDBOX /bin/touch /etc/systemd/system/ln-probe"
+check "fpm sandbox: reverb enable works (self re-exec escapes the read-only /etc)" bash -c "$SANDBOX $SLEEP reverb enable 1 >/tmp/ln-sbx.out 2>&1"
+check "fpm sandbox: socket owns :8080 afterwards" bash -c "sleep 1; ss -ltnp 'sport = :8080' | grep -q systemd"
+check "fpm sandbox: refusal exit code is preserved through the re-exec (unknown action => 2)" bash -c "$SANDBOX $SLEEP reverb restart 1 >/dev/null 2>&1; [ \$? = 2 ]"
+check "fpm sandbox: reverb disable works" bash -c "$SANDBOX $SLEEP reverb disable >/tmp/ln-sbx.out 2>&1"
+sleep 1
+check "fpm sandbox: full cycle leaves units/pools/enablement byte-identical" test "$(snapshot)" = "$BASE"
 
 # ─── cleanup ─────────────────────────────────────────────────────────────────────
 systemctl stop ln-decoy-external.service; rm -f "$UNITS/ln-decoy-external.service"

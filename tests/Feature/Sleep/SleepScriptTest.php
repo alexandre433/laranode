@@ -330,3 +330,19 @@ test('laranode-db-service.sh refuses start/stop while hostdb sleep is enabled', 
     $code = proc_close($proc);
     expect($code)->toBe(3)->and($err)->toContain('sleep')->and(@file_get_contents("{$this->sbx['root']}/calls.log") ?: '')->toBe('');
 });
+
+// Regression: the allowlist must accept the units the installer REALLY ships (php8.4, not bare php).
+test('enable works against the shipped unit templates verbatim', function () {
+    $this->sbx = sleepSandbox();
+    foreach (['reverb' => 'laranode-reverb.service', 'queue' => 'laranode-queue-worker.service'] as $key => $unit) {
+        $tpl = file_get_contents(__DIR__."/../../../laranode-scripts/templates/{$unit}");
+        preg_match('/^ExecStart=(.+)$/m', $tpl, $m);
+        sleepUnit($this->sbx, $unit, $m[1]);
+        sleepRegister($this->sbx, $key, $key === 'reverb'
+            ? ['kind' => 'reverb', 'unit' => $unit, 'public_port' => '8080']
+            : ['kind' => 'queue', 'unit' => $unit]);
+        $args = $key === 'reverb' ? [$key, 'enable', '10'] : [$key, 'enable'];
+        $r = runSleep($this->sbx, $args);
+        expect($r['code'])->toBe(0, "{$key}: {$m[1]} => ".$r['all']);
+    }
+});

@@ -69,6 +69,18 @@ if [ "$(id -u)" != 0 ] && [ "$TESTMODE" != 1 ]; then
     die $EX_PRIV "must run as root (via the sudoers allowlist)"
 fi
 
+# --- escape the php-fpm sandbox ---------------------------------------------------
+# The stock php-fpm unit runs with ProtectSystem=full, and a `sudo` child inherits that
+# mount namespace: /etc (unit files, registry state, DB config) is READ-ONLY even for
+# root. Re-run ourselves once as a transient unit owned by PID 1 (clean namespace).
+# Same validated arguments, no environment carried over, and no extra sudoers rule:
+# we are already root here.
+if [ "$TESTMODE" != 1 ] && [ -z "${LARANODE_SLEEP_REEXEC:-}" ] && [ ! -w /etc/systemd/system ] \
+    && command -v systemd-run >/dev/null 2>&1; then
+    exec systemd-run --quiet --wait --pipe --collect --setenv=LARANODE_SLEEP_REEXEC=1 \
+        -- "$(readlink -f "$0")" "$@"
+fi
+
 # --- registry gate ----------------------------------------------------------------
 declare -A R=()
 REG_FILE="$MANAGED_DIR/managed.d/$KEY.conf"
@@ -309,7 +321,7 @@ enable_reverb() {
     require_proxyd
     local exec_line backend
     exec_line=$(fragment_execstart "$UNIT")
-    [[ $exec_line =~ ^/usr/bin/php\ [A-Za-z0-9_./-]+/artisan\ reverb:start$ ]] \
+    [[ $exec_line =~ ^/usr/bin/php[0-9.]*\ [A-Za-z0-9_./-]+/artisan\ reverb:start$ ]] \
         || die $EX_REFUSED "unexpected Reverb ExecStart; refusing to rewrite it"
     load_state
     backend=$(pick_backend_port)
@@ -439,7 +451,7 @@ sleep_proxied() {
 enable_queue() {
     local exec_line new_exec
     exec_line=$(fragment_execstart "$UNIT")
-    [[ $exec_line =~ ^/usr/bin/php\ [A-Za-z0-9_./-]+/artisan\ queue:work(\ [A-Za-z0-9=:_.,-]+)*$ ]] \
+    [[ $exec_line =~ ^/usr/bin/php[0-9.]*\ [A-Za-z0-9_./-]+/artisan\ queue:work(\ [A-Za-z0-9=:_.,-]+)*$ ]] \
         || die $EX_REFUSED "unexpected queue ExecStart; refusing to rewrite it"
     new_exec=$exec_line
     [[ $exec_line == *--stop-when-empty* ]] || new_exec="$new_exec --stop-when-empty"

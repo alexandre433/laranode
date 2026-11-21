@@ -207,3 +207,9 @@ Inertia + React (JSX, **not** TypeScript). Pages in `resources/js/Pages/<Domain>
 
 ### Production runtime
 Apache2 (vhost per site) + per-site PHP-FPM pools + MySQL + certbot (Let's Encrypt, 90-day certs) + UFW. Two systemd services from `laranode-scripts/templates/`: `laranode-reverb.service` (websockets) and `laranode-queue-worker.service` (queue, `QUEUE_CONNECTION=database`). Full provisioning is in `laranode-scripts/bin/laranode-installer.sh`.
+
+### Service sleep/wake (optional, OFF by default)
+Admin **Power** page (`/admin/power`). Frees RAM by stopping idle Reverb / queue worker / PHP-FPM pools / hosting DB and waking them on first use (systemd socket activation, `systemd-socket-proxyd`). Full design, safety model and trade-offs: `docs/sleep-wake.md`.
+- ONE privileged script: `laranode-scripts/bin/laranode-sleep.sh <reverb|queue|hostdb|fpm> <enable|disable|wake|sleep> [idle]` (sudoers drop-in `laranode-scripts/etc/sudoers.d/laranode-sleep`). Never add unit names or free-form args to it.
+- Only services in the root-owned registry `/etc/laranode/managed.d/` (written by `laranode-managed-register.sh` from the installer manifest, `managed:true` only) can be touched. Pre-existing services are external and refused (exit 3). The panel's own DB never sleeps.
+- Tests: `tests/Feature/Sleep/*` (Pest, stub systemctl), `tests/system/sleep/matrix.sh [ubuntu|debian|all]` (real systemd, Docker, SKYTOP only), `tests/e2e/power.spec.js`.
