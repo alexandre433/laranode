@@ -332,7 +332,7 @@ preflight() {
     if [ "$_busy_holder" = apache2 ] && _panel_vhost_enabled; then
       log "Port ${HTTP_PORT} is the panel's own Apache vhost from a previous run - reusing it"
     else
-      die "Port ${HTTP_PORT} is already in use by ${_busy_holder}. Nothing was changed. Set LARANODE_HTTP_PORT to a free port and re-run."
+      warn "Port ${HTTP_PORT} is already in use by ${_busy_holder}. Nothing was changed. Set LARANODE_HTTP_PORT to a free port and re-run."
     fi
   fi
   # An explicit :80 is honoured when Apache already holds it (re-run / shared Apache:
