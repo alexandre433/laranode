@@ -162,3 +162,19 @@ test('hostdb sleep is refused (nothing runs) when the registry records an AppArm
         ->assertStatus(409)->assertJsonPath('reason', 'apparmor')->assertJsonPath('message', fn ($m) => str_contains($m, 'AppArmor'));
     Process::assertNothingRan();
 });
+
+test('a stale entry: enable/wake/sleep answer 409 reason stale and run nothing; disable still reaches the script', function () {
+    SleepFixtures::cleanup($this->dir);
+    $e = SleepFixtures::fullInstall();
+    $e['reverb']['stale'] = '1';
+    $this->dir = SleepFixtures::registry($e, ['reverb' => ['enabled' => '1']]);
+    config(['laranode.managed_dir' => $this->dir, 'database.default' => 'sqlite']);
+    foreach (['enable', 'wake', 'sleep'] as $action) {
+        $this->actingAs(powerAdmin())->postJson('/admin/power/action', ['key' => 'reverb', 'action' => $action, 'idle_minutes' => 10])
+            ->assertStatus(409)->assertJsonPath('reason', 'stale')->assertJsonPath('message', fn ($m) => str_contains($m, 'stale') || str_contains($m, 'no longer'));
+    }
+    Process::assertNothingRan();
+
+    $this->actingAs(powerAdmin())->postJson('/admin/power/action', ['key' => 'reverb', 'action' => 'disable'])->assertOk();
+    Process::assertRan(fn ($p) => array_slice($p->command, -2) === ['reverb', 'disable']);
+});

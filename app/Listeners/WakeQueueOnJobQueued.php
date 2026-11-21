@@ -17,7 +17,8 @@ class WakeQueueOnJobQueued
     {
         try {
             $registry = ManagedRegistry::fromConfig();
-            if (! $registry->isManaged('queue') || ! $registry->isEnabled('queue')) {
+            // a stale entry is refused by the script (exit 3) on every wake: do not even try
+            if (! $registry->isManaged('queue') || $registry->isStale('queue') || ! $registry->isEnabled('queue')) {
                 return;
             }
 

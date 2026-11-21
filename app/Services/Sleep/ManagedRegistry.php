@@ -47,6 +47,12 @@ class ManagedRegistry
         return $this->entry($key) !== null;
     }
 
+    /** Kept only so `disable` can restore a service that is still asleep (see laranode-managed-register.sh). */
+    public function isStale(string $key): bool
+    {
+        return ($this->entry($key)['stale'] ?? '') === '1';
+    }
+
     public function isEnabled(string $key): bool
     {
         return ($this->state($key)['enabled'] ?? '') === '1';

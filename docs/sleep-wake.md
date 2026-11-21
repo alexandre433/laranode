@@ -66,7 +66,10 @@ did not install.
    longer backs it, Reverb bound to an address it cannot mirror), so a stale `bind_host` is never trusted.
    If sleep is still ON for that key the entry is NOT deleted (that would trap the service asleep: `disable`
    needs it): it is kept and marked `stale=1`, and `laranode-sleep.sh` then allows `disable` only
-   (enable/wake/sleep exit 3). A later successful register overwrites it with a fresh entry.
+   (enable/wake/sleep exit 3). A successful `disable` then deletes the stale entry (nothing needs it any
+   more); until then the Power page reports reason `stale` (cannot sleep, toggle stays usable so Disable can
+   restore the service, no Wake/Sleep-now) and the panel answers 409 `stale` to enable/wake/sleep. The queue
+   wake listener skips a stale entry. A later successful register overwrites it with a fresh entry.
 4. **Reversible**: `disable` restores boot enablement and running state byte-for-byte (pool files, units,
    `systemctl enable` state).
 5. Test-only path overrides (`LARANODE_SLEEP_TEST=1`) are ignored whenever `SUDO_UID` is set.
@@ -137,7 +140,8 @@ Reverb clients are unaffected.
   (Debian 13) in throw-away containers. Measures wake time and idle RSS. Needs Docker; runs in CI (`.github/workflows/sleep-tests.yml`) and locally.
   On the GitHub ubuntu runner the host kernel enforces the stock mysqld AppArmor profile: pass 1 asserts the
   real gate refuses `hostdb enable` there and skips the hostdb functional checks (only once it refused); pass 2
-  unloads that profile on the runner (`apparmor_parser -R`, `LN_AA_PROFILE_UNLOADED=1`) and runs every hostdb
+  unloads that profile on the runner (`apparmor_parser -R` on its file, or by the loaded name through
+  `/sys/kernel/security/apparmor/.remove` when the file is absent; fails only if it stays loaded; `LN_AA_PROFILE_UNLOADED=1`) and runs every hostdb
   check LIVE.
 * `tests/e2e/power.spec.js`: Playwright against the lab container.
 * `local-dev/install-test/scenarios/rerun-sleep.sh`: installer re-run with sleep ON.

@@ -254,3 +254,60 @@ test('a stale registry entry (stale=1) only allows disable', function () {
     expect(runSleep($this->sbx, ['reverb', 'disable'])['code'])->toBe(0)
         ->and(glob("{$this->sbx['root']}/systemd/*"))->toBe([]);
 });
+
+test('disabling a stale entry drops it: nothing is left to show as managed or to 409 on Enable', function () {
+    $this->sbx = sleepSandbox();
+    registerReverbFixture($this->sbx);
+    expect(runSleep($this->sbx, ['reverb', 'enable', '10'])['code'])->toBe(0);
+    $reg = "{$this->sbx['root']}/managed/managed.d/reverb.conf";
+    file_put_contents($reg, "stale=1\n", FILE_APPEND);
+
+    expect(runSleep($this->sbx, ['reverb', 'disable'])['code'])->toBe(0)
+        ->and(file_exists($reg))->toBeFalse('stale entry must go once the service is restored')
+        ->and(file_exists("{$this->sbx['root']}/managed/sleep/reverb.state"))->toBeFalse();
+});
+
+test('a NON-stale entry survives disable (only stale ones are dropped)', function () {
+    $this->sbx = sleepSandbox();
+    registerReverbFixture($this->sbx);
+    expect(runSleep($this->sbx, ['reverb', 'enable', '10'])['code'])->toBe(0);
+    expect(runSleep($this->sbx, ['reverb', 'disable'])['code'])->toBe(0)
+        ->and(file_exists("{$this->sbx['root']}/managed/managed.d/reverb.conf"))->toBeTrue();
+});
+
+test('a failed disable keeps the stale entry (it is still the only way back)', function () {
+    $this->sbx = sleepSandbox();
+    registerReverbFixture($this->sbx);
+    expect(runSleep($this->sbx, ['reverb', 'enable', '10'])['code'])->toBe(0);
+    $reg = "{$this->sbx['root']}/managed/managed.d/reverb.conf";
+    file_put_contents($reg, "stale=1\n", FILE_APPEND);
+    // break the restore: the registry unit is no longer valid
+    file_put_contents($reg, preg_replace('/^unit=.*$/m', 'unit=not a unit', file_get_contents($reg)));
+
+    expect(runSleep($this->sbx, ['reverb', 'disable'])['code'])->not->toBe(0)
+        ->and(file_exists($reg))->toBeTrue();
+});
+
+test('stale entry whose units are already gone: disable still exits 0 and drops the entry', function () {
+    $this->sbx = sleepSandbox();
+    registerReverbFixture($this->sbx);
+    expect(runSleep($this->sbx, ['reverb', 'enable', '10'])['code'])->toBe(0);
+    $root = $this->sbx['root'];
+    $reg = "{$root}/managed/managed.d/reverb.conf";
+    file_put_contents($reg, "stale=1\n", FILE_APPEND);
+    // the original unit, its drop-in and every sleep unit vanished (uninstalled by hand)
+    foreach (array_merge(glob("{$root}/systemd/*"), glob("{$root}/units/*") ?: []) as $f) {
+        is_dir($f) ? exec('rm -rf '.escapeshellarg($f)) : unlink($f);
+    }
+    foreach (glob("{$root}/enabled/*") as $f) {
+        unlink($f);
+    }
+    foreach (glob("{$root}/active/*") as $f) {
+        unlink($f);
+    }
+
+    $r = runSleep($this->sbx, ['reverb', 'disable']);
+    expect($r['code'])->toBe(0, $r['all'])
+        ->and(file_exists($reg))->toBeFalse()
+        ->and(file_exists("{$root}/managed/sleep/reverb.state"))->toBeFalse();
+});

@@ -98,3 +98,13 @@ test('AppArmor on but unverifiable at register time is blocked too; "none" is fr
         SleepFixtures::cleanup($this->dir);
     }
 });
+
+test('a stale entry (sleep still on, service no longer registered): reason stale, cannot sleep, disable stays possible', function () {
+    $e = SleepFixtures::fullInstall();
+    $e['reverb']['stale'] = '1';
+    $this->dir = SleepFixtures::registry($e, ['reverb' => ['enabled' => '1']]);
+    config(['laranode.managed_dir' => $this->dir, 'database.default' => 'sqlite']);
+    Process::fake(['*is-active*laranode-reverb.service*' => Process::result(output: "inactive\n", exitCode: 3), '*' => Process::result(output: "active\n")]);
+
+    expect(statusRows($this)['reverb'])->toMatchArray(['managed' => true, 'enabled' => true, 'state' => 'sleeping', 'can_sleep' => false, 'reason' => 'stale']);
+});

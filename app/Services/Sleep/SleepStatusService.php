@@ -39,6 +39,9 @@ class SleepStatusService
         if ($entry === null) {
             return 'external';
         }
+        if (($entry['stale'] ?? '') === '1') {
+            return 'stale';
+        }
         if ($key === 'hostdb') {
             if (($entry['engine'] ?? '') === 'postgres' || ! in_array($entry['engine'] ?? '', ['mysql', 'mariadb'], true)) {
                 return 'unsupported_engine';

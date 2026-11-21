@@ -70,11 +70,22 @@ jobs:
         if: matrix.os == 'ubuntu'
         run: |
           docker rm -f laranode-sleep-ubuntu >/dev/null 2>&1 || true
-          if sudo cat /sys/kernel/security/apparmor/profiles | grep -qE '(^|/)mysqld '; then
-            sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.mysqld
-          fi
-          if sudo cat /sys/kernel/security/apparmor/profiles | grep -E '(^|/)mysqld '; then
-            echo "::error::mysqld AppArmor profile still loaded after apparmor_parser -R"; exit 1
+          # Unload by the LOADED profile name (the kernel's own list), not by a guessed file path:
+          # the profile can be loaded while /etc/apparmor.d/usr.sbin.mysqld is absent.
+          loaded() { sudo cat /sys/kernel/security/apparmor/profiles | grep -E '(^|/)mysqld ' || true; }
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            name=${line% (*}
+            file=/etc/apparmor.d/$(echo "${name#/}" | tr / .)
+            if [ -f "$file" ]; then
+              sudo apparmor_parser -R "$file"
+            else
+              echo "profile '$name' is loaded but $file is absent: removing it by name"
+              printf '%s' "$name" | sudo tee /sys/kernel/security/apparmor/.remove >/dev/null
+            fi
+          done < <(loaded)
+          if [ -n "$(loaded)" ]; then
+            echo "::error::mysqld AppArmor profile still loaded after unloading: $(loaded)"; exit 1
           fi
           echo "host mysqld profile is not loaded"
           LN_AA_PROFILE_UNLOADED=1 bash tests/system/sleep/matrix.sh ubuntu
