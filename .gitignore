@@ -27,3 +27,9 @@ package-lock.json
 *.php-cs-fixer.cache*
 /test-results
 /playwright-report
+/.playwright-mcp
+/dark-*.jpeg
+/graphs-dark.jpeg
+/notif-dark-fixed.jpeg
+/pie-fixed.jpeg
+.env.local-backup

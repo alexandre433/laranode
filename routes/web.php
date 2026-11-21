@@ -27,6 +27,7 @@ Route::get('/dashboard', [DashboardController::class, 'index'])->middleware(['au
 Route::get('/dashboard/admin', [DashboardController::class, 'admin'])->middleware(['auth', AdminMiddleware::class])->name('dashboard.admin');
 Route::get('/dashboard/admin/get/top-sort', [DashboardController::class, 'getTopSort'])->middleware(['auth', AdminMiddleware::class])->name('dashboard.admin.getTopSort');
 Route::patch('/dashboard/admin/set/top-sort', [DashboardController::class, 'setTopSort'])->middleware(['auth', AdminMiddleware::class])->name('dashboard.admin.setTopSort');
+Route::post('/dashboard/admin/gpu/rescan', [DashboardController::class, 'rescanGpu'])->middleware(['auth', AdminMiddleware::class])->name('dashboard.admin.gpuRescan');
 Route::get('/dashboard/user', [DashboardController::class, 'user'])->middleware(['auth'])->name('dashboard.user');
 
 // Accounts [Admin]
@@ -71,6 +72,7 @@ Route::middleware(['auth'])->group(function () {
 Route::middleware(['auth', AdminMiddleware::class])->group(function () {
     Route::get('/admin/firewall', [FirewallController::class, 'index'])->name('firewall.index');
     Route::post('/admin/firewall/toggle', [FirewallController::class, 'toggle'])->name('firewall.toggle');
+    Route::post('/admin/firewall/safe-setup', [FirewallController::class, 'safeSetup'])->name('firewall.safe-setup');
     Route::post('/admin/firewall/rules', [FirewallController::class, 'store'])->name('firewall.store');
     Route::delete('/admin/firewall/rules/{id}', [FirewallController::class, 'destroy'])->name('firewall.destroy');
 });

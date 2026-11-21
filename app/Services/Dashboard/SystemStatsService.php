@@ -306,6 +306,7 @@ class SystemStatsService
             ],
             'diskStats' => $this->getDiskUsage(),
             'memoryStats' => $this->getMemoryUsage(),
+            'gpu' => (new GpuStatsService)->stats(),
             /* 'nginxStatus'      => $this->getNginxStatus(), */
             'phpFpm' => $this->getPhpFpmStatus(),
             /* 'sslStatus'        => $this->getSslStatus(), */

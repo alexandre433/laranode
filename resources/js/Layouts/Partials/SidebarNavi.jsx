@@ -18,7 +18,7 @@ const SidebarNavi = ({ isCollapsed, setIsCollapsed }) => {
             <ul className="flex flex-col py-4 space-y-2">
                 <li>
                     <div className="flex flex-row items-center h-8">
-                        <div className="text-sm font-light tracking-wide text-gray-400 uppercase ml-4 hidden md:block">
+                        <div className={`text-sm font-light tracking-wide text-gray-400 uppercase ml-4 ${isCollapsed ? 'hidden' : 'hidden md:block'}`}>
                             Menu
                         </div>
                         <div>
@@ -186,7 +186,7 @@ const SidebarNavi = ({ isCollapsed, setIsCollapsed }) => {
                 </li>
             </ul>
 
-            <p className="mb-14 px-5 py-3 hidden md:block text-center text-xs border-t border-gray-800">
+            <p className={`mb-14 px-5 py-3 text-center text-xs border-t border-gray-800 ${isCollapsed ? 'hidden' : 'hidden md:block'}`}>
                 <span className="font-semibold text-white block">LaraNode</span>
                 <span className="text-gray-300">Hosting Control Panel</span>
             </p>

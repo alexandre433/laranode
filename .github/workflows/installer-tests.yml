@@ -1,0 +1,64 @@
+name: installer-tests
+
+# Guards the one-file installer (laranode-scripts/bin/laranode-installer.sh) on a real
+# Linux runner: host-only unit tests, a mutation smoke (every guard must go red when
+# its fix is reverted), and the clean-room container scenarios that matter most for
+# "never break a host that already has services".
+on:
+  pull_request:
+    paths:
+      - 'laranode-scripts/**'
+      - 'local-dev/install-test/**'
+      - '.github/workflows/installer-tests.yml'
+  push:
+    branches: [development]
+    paths:
+      - 'laranode-scripts/**'
+      - 'local-dev/install-test/**'
+      - '.github/workflows/installer-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: helper tests
+        run: bash local-dev/install-test/unit/test-helpers.sh
+      - name: host-detection tests (OS, Proxmox, CloudPanel, ownership, ports, phases)
+        run: bash local-dev/install-test/unit/test-host-detection.sh
+      - name: template tests
+        run: bash local-dev/install-test/unit/test-templates.sh
+
+  mutation-smoke:
+    name: mutation smoke (each guard must go red)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash local-dev/install-test/mutation-smoke.sh
+
+  scenario:
+    name: scenario ${{ matrix.scenario }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        # port-busy: refuses before touching a running Apache when the panel port is
+        # taken. apache-stopped / apache80 / nginx80: the pre-existing-service paths.
+        scenario: [port-busy, apache-stopped, apache80, nginx80]
+    steps:
+      - uses: actions/checkout@v4
+      - name: run scenario
+        env:
+          LARANODE_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash local-dev/install-test/run.sh "${{ matrix.scenario }}"

@@ -1,0 +1,5 @@
+PRETTY_NAME="Pop!_OS 24.04 LTS"
+NAME="Pop!_OS"
+VERSION_ID="24.04"
+ID=pop
+ID_LIKE="ubuntu debian"
