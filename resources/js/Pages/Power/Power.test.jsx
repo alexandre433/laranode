@@ -64,6 +64,19 @@ describe('Power page', () => {
         await waitFor(() => expect(axios.post).toHaveBeenCalledWith('/admin/power/action', { key: 'reverb', action: 'disable' }));
     });
 
+    it('a stale sleeping service: shows why, keeps the toggle usable so Disable can restore it, offers no Wake', async () => {
+        axios.get = vi.fn().mockResolvedValue(payload([svc({ key: 'reverb', enabled: true, state: 'sleeping', can_sleep: false, reason: 'stale' })]));
+        axios.post = vi.fn().mockResolvedValue({ data: { ok: true } });
+        render(<Index />);
+        await screen.findByText('Reverb websockets');
+        expect(screen.getByText(/stale: no longer registered/i)).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /wake reverb/i })).not.toBeInTheDocument();
+        const toggle = screen.getByRole('checkbox', { name: /sleep reverb/i });
+        expect(toggle).toBeEnabled();
+        await userEvent.click(toggle);
+        await waitFor(() => expect(axios.post).toHaveBeenCalledWith('/admin/power/action', { key: 'reverb', action: 'disable' }));
+    });
+
     it('manual wake is offered for a sleeping service and posts wake', async () => {
         axios.get = vi.fn().mockResolvedValue(payload([svc({ key: 'reverb', enabled: true, state: 'sleeping' })]));
         axios.post = vi.fn().mockResolvedValue({ data: { ok: true } });

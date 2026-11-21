@@ -678,3 +678,11 @@ case "$KEY:$ACTION" in
     fpm:disable)    disable_fpm ;;
     *) die $EX_USAGE "unsupported combination $KEY $ACTION" ;;
 esac
+
+# A stale entry only exists so `disable` can restore the originals. Reaching this line means the
+# restore succeeded (every failure above dies first), so nothing needs it any more: drop it, or the
+# Power page keeps a managed row for a service the installer no longer registers.
+if [ "$ACTION" = disable ] && [ "${R[stale]-}" = 1 ]; then
+    rm -f "$REG_FILE"
+    echo "dropped stale registry entry: $KEY"
+fi

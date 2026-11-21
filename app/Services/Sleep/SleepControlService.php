@@ -77,6 +77,7 @@ class SleepControlService
         return match ($reason) {
             'panel_db' => 'Cannot sleep: the panel database lives on this database instance and must stay up.',
             'apparmor' => 'Cannot sleep: an enforced AppArmor profile for the database would deny the moved socket and the database would not start on wake.',
+            'stale' => 'Cannot sleep: this service is no longer registered by the installer (stale entry). Wake it with Disable, then re-run the installer to manage it again.',
             'unsupported_engine' => 'Cannot sleep: only MySQL/MariaDB hosting databases can sleep.',
             default => 'Cannot sleep this service.',
         };

@@ -14,6 +14,7 @@ const STATE_BADGE = {
 const REASON_TEXT = {
     panel_db: 'cannot sleep: panel DB',
     apparmor: 'cannot sleep: AppArmor profile blocks the moved DB socket',
+    stale: 'stale: no longer registered by the installer, only Disable is possible',
     unsupported_engine: 'cannot sleep: only MySQL/MariaDB can sleep',
     external: 'external service, never managed by Laranode',
 };
@@ -114,6 +115,7 @@ export default function Index() {
                         <tbody>
                             {services.map((s) => {
                                 const locked = !s.managed || !s.can_sleep;
+                                const stale = s.reason === 'stale';
                                 return (
                                     <tr key={s.key} className="border-b align-top dark:border-gray-700 dark:text-gray-200">
                                         <td className="py-2">
@@ -132,7 +134,7 @@ export default function Index() {
                                                 type="checkbox"
                                                 aria-label={`sleep ${s.key}`}
                                                 checked={!!s.enabled}
-                                                disabled={locked || busy === s.key}
+                                                disabled={(locked && !s.enabled) || busy === s.key}
                                                 onChange={() => toggle(s)}
                                             />
                                         </td>
@@ -154,7 +156,7 @@ export default function Index() {
                                             )}
                                         </td>
                                         <td>
-                                            {s.enabled && s.supports_manual && s.state === 'sleeping' && (
+                                            {s.enabled && !stale && s.supports_manual && s.state === 'sleeping' && (
                                                 <button
                                                     type="button"
                                                     aria-label={`wake ${s.key}`}
@@ -165,7 +167,7 @@ export default function Index() {
                                                     Wake
                                                 </button>
                                             )}
-                                            {s.enabled && s.supports_manual && s.state === 'running' && (
+                                            {s.enabled && !stale && s.supports_manual && s.state === 'running' && (
                                                 <button
                                                     type="button"
                                                     aria-label={`sleep ${s.key} now`}

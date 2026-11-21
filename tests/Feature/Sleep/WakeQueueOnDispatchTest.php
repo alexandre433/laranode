@@ -68,3 +68,12 @@ test('wake failure never breaks dispatch', function () {
     fireJobQueued();
     expect(true)->toBeTrue();
 });
+
+test('a stale queue entry never calls sudo (the script would always refuse with exit 3)', function () {
+    $e = SleepFixtures::fullInstall();
+    $e['queue']['stale'] = '1';
+    $this->dir = SleepFixtures::registry($e, ['queue' => ['enabled' => '1']]);
+    config(['laranode.managed_dir' => $this->dir]);
+    fireJobQueued();
+    Process::assertNothingRan();
+});
