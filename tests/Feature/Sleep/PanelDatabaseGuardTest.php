@@ -7,6 +7,15 @@
 
 use App\Services\Sleep\PanelDatabaseGuard;
 
+// These tests re-point the panel DB connection; restore it so RefreshDatabase can roll back.
+beforeEach(function () {
+    $this->origDbDefault = config('database.default');
+    $this->origDbConnections = config('database.connections');
+});
+afterEach(function () {
+    config(['database.default' => $this->origDbDefault, 'database.connections' => $this->origDbConnections]);
+});
+
 function guardFor(array $conn, string $default = 'mysql'): PanelDatabaseGuard
 {
     config(['database.default' => $default, "database.connections.{$default}" => $conn]);

@@ -379,7 +379,7 @@ test('failed enable rolls back: no half-installed units left', function () {
     hostdbSetup($this->sbx);
     // make `systemctl enable --now <socket>` fail
     $stub = file_get_contents("{$this->sbx['root']}/bin/systemctl");
-    file_put_contents("{$this->sbx['root']}/bin/systemctl", str_replace("  enable)", "  enable) case \"\$*\" in *laranode-sleep-*) exit 1;; esac;;\n  enable_orig)", $stub));
+    file_put_contents("{$this->sbx['root']}/bin/systemctl", str_replace('  enable)', "  enable) case \"\$*\" in *laranode-sleep-*) exit 1;; esac;;\n  enable_orig)", $stub));
     $r = runSleep($this->sbx, ['hostdb', 'enable', '15']);
     expect($r['code'])->not->toBe(0)->and(glob("{$this->sbx['root']}/systemd/*"))->toBe([])
         ->and(glob("{$this->sbx['root']}/mysqlconf/*"))->toBe([])

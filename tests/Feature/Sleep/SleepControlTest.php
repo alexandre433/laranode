@@ -10,6 +10,15 @@ use App\Models\User;
 use Illuminate\Support\Facades\Process;
 use Tests\Support\SleepFixtures;
 
+// These tests re-point the panel DB connection; restore it so RefreshDatabase can roll back.
+beforeEach(function () {
+    $this->origDbDefault = config('database.default');
+    $this->origDbConnections = config('database.connections');
+});
+afterEach(function () {
+    config(['database.default' => $this->origDbDefault, 'database.connections' => $this->origDbConnections]);
+});
+
 beforeEach(function () {
     Process::fake(['*' => Process::result(output: 'ok')]);
     $this->dir = SleepFixtures::registry(SleepFixtures::fullInstall());
@@ -118,8 +127,9 @@ test('missing registry refuses every key (DS before Laranode registers anything)
 });
 
 test('hostdb sleep is refused when the panel DB is the same instance', function () {
+    $admin = powerAdmin();
     config(['database.default' => 'mysql', 'database.connections.mysql' => ['driver' => 'mysql', 'host' => '127.0.0.1', 'port' => '3306']]);
-    $this->actingAs(powerAdmin())->postJson('/admin/power/action', ['key' => 'hostdb', 'action' => 'enable', 'idle_minutes' => 10])
+    $this->actingAs($admin)->postJson('/admin/power/action', ['key' => 'hostdb', 'action' => 'enable', 'idle_minutes' => 10])
         ->assertStatus(409)->assertJsonPath('reason', 'panel_db');
     Process::assertNothingRan();
 });
