@@ -54,8 +54,10 @@ HOST_AA_DB=0
 # `apparmor="DENIED" operation="mknod" profile="/usr/sbin/mysqld" name="/run/laranode-hostdb/..."`)
 # really denies the moved socket. Do NOT mask that: the real gate must refuse, and the functional
 # hostdb checks are skipped (the profile belongs to the host, not to this container).
-if [ "$AA_KERNEL" = Y ] && { [ -e /etc/apparmor.d/usr.sbin.mysqld ] || [ -e /etc/apparmor.d/usr.sbin.mariadbd ]; } \
-    && dmesg 2>/dev/null | grep -q 'profile_load.*name="\(/usr/sbin/\)\?\(mysqld\|mariadbd\)"'; then
+if [ "$AA_KERNEL" = Y ] && { [ -e /etc/apparmor.d/usr.sbin.mysqld ] || [ -e /etc/apparmor.d/usr.sbin.mariadbd ]; }; then
+    # (the loaded-profile list is not visible from a container, so the shipped profile file on a
+    # kernel with AppArmor on is the signal; the kernel's own dmesg lines are echoed as evidence)
+    dmesg 2>/dev/null | grep -i 'apparmor.*\(mysqld\|mariadbd\)' | tail -n 5 | sed 's/^/INFO  dmesg: /'
     HOST_AA_DB=1
     echo "INFO  host kernel has a mysqld/mariadbd AppArmor profile loaded: NOT masking; hostdb functional checks are skipped, the real gate is asserted instead"
 elif [ "$AA_KERNEL" = Y ]; then
