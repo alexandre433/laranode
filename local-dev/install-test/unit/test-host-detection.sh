@@ -5,6 +5,8 @@
 # the installer's own helpers or the LARANODE_*_DIR / LARANODE_OS_RELEASE_FILE
 # overrides, so the tests run the same on Git Bash, WSL and Linux.
 set -uo pipefail
+# The installer drops its test seams from the inherited environment unless this is set.
+export LARANODE_INSTALLER_TEST=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALLER="${LARANODE_INSTALLER:-${SCRIPT_DIR}/../../../laranode-scripts/bin/laranode-installer.sh}"
@@ -1134,6 +1136,141 @@ pgf_flag_apt() { pg_stubs; apt_install() { echo "${APT_ALLOW_SERVICE_START:-0} $
 t "phase_packages: cron and sysstat may start (new services), base tools may not"                pk_flags
 t "mysql-server (new service on a host with other services) may start"                           my_flag
 t "a fresh PostgreSQL cluster may start; an existing cluster's server is never installed"        pgf_flag_apt
+
+
+# ==== round 5 ====================================================================
+# ---- 1. the journal knows whether THIS run started Apache ----
+echo "=== journal: started_by_run (an Apache the owner started is never stopped) ==="
+# stopped before; the owner (or a boot) starts their Apache while we are mid-run, then we die
+sb_owner_started_inprocess() { wb_setup 0 0 8080
+  apachectl() { ACTIVE_UNITS="apache2"; return 1; }      # configtest fails; meanwhile the owner's Apache came up
+  ( phase_webserver ) >/dev/null 2>&1 && return 1
+  rb_ok && no_stop && no_systemctl; }
+# SIGKILL before our start; the owner's Apache is up by the time the next installer starts
+sb_owner_started_recovery() { wb_killed 0 || return 1
+  ACTIVE_UNITS="apache2"; : > "$SVC_LOG"
+  ( _apache_journal_recover ) >/dev/null 2>&1 || { echo "recovery failed"; return 1; }
+  rb_ok && no_stop && no_systemctl && [ ! -e "$LARANODE_ROLLBACK_DIR" ]; }
+# SIGKILL AFTER we started the stopped Apache (marker written): recovery stops what we started
+sb_we_started_recovery() { wb_setup 0 0 8080
+  ( export LARANODE_INSTALLER_PID=$BASHPID; _configure_firewall() { kill -9 "$BASHPID"; }; phase_webserver ) >/dev/null 2>&1
+  [ $? -eq 137 ] || { echo "the subshell was not SIGKILLed"; return 1; }
+  [ -f "$LARANODE_ROLLBACK_DIR/started_by_run" ] || { echo "no started_by_run marker after the start"; return 1; }
+  grep -qx 'start apache2' "$SVC_LOG" || { echo "premise: we never started apache2"; return 1; }
+  ( _apache_journal_recover ) >/dev/null 2>&1 || { echo "recovery failed"; return 1; }
+  grep -qx 'stop apache2' "$SVC_LOG" && [ "$(grep -c '^stop' "$SVC_LOG")" = 1 ] && [ ! -e "$LARANODE_ROLLBACK_DIR" ]; }
+# a run that only reloads a running Apache never writes the marker
+sb_marker_absent_when_running() { wb_setup 0 1 8080; JOUT=$(mktemp)
+  _configure_firewall() { [ -f "$LARANODE_ROLLBACK_DIR/started_by_run" ] && echo bad > "$JOUT"; return 0; }
+  ( phase_webserver ) >/dev/null 2>&1 || return 1
+  [ ! -s "$JOUT" ] && [ ! -e "$LARANODE_ROLLBACK_DIR" ]; }
+t "stopped Apache, the owner starts it mid-run, then we die: it is NOT stopped"                     sb_owner_started_inprocess
+t "SIGKILL before our start, the owner's Apache is up at the next start: recovery does not stop it" sb_owner_started_recovery
+t "SIGKILL after we started the stopped Apache: recovery stops exactly that one (marker present)"   sb_we_started_recovery
+t "a running Apache we only reload never gets a started_by_run marker"                              sb_marker_absent_when_running
+
+# ---- 2. the modules record of an earlier run survives a later run's rollback ----
+echo "=== journal: modules enabled by an EARLIER run are not disabled by this run's rollback ==="
+mo_run1_survive() { wb_setup 0 1 8080; ENABLED_MODS=" proxy proxy_fcgi rewrite "
+  printf 'proxy\nproxy_fcgi\nrewrite\n' > "$LARANODE_APACHE_MODS_STATE"
+  CONFTEST_FAIL=1; ( phase_webserver ) >/dev/null 2>&1 && return 1
+  ! grep -q '^a2dismod' "$WLOG" || { echo "an earlier run's modules were disabled:"; cat "$WLOG"; return 1; }
+  [ "$(tr '\n' ' ' < "$LARANODE_APACHE_MODS_STATE")" = "proxy proxy_fcgi rewrite " ]; }
+mo_only_new_disabled() { wb_setup 0 1 8080; ENABLED_MODS=" proxy "
+  printf 'proxy\n' > "$LARANODE_APACHE_MODS_STATE"
+  CONFTEST_FAIL=1; ( phase_webserver ) >/dev/null 2>&1 && return 1
+  mods_dismodded rewrite proxy_fcgi && ! grep -qx 'a2dismod proxy' "$WLOG" \
+  && [ "$(tr '\n' ' ' < "$LARANODE_APACHE_MODS_STATE")" = "proxy " ]; }
+mo_recover_keeps_run1() { wb_setup 0 1 8080; ENABLED_MODS=" proxy proxy_fcgi rewrite "
+  printf 'proxy\nproxy_fcgi\nrewrite\n' > "$LARANODE_APACHE_MODS_STATE"
+  ( export LARANODE_INSTALLER_PID=$BASHPID; apachectl() { kill -9 "$BASHPID"; }; phase_webserver ) >/dev/null 2>&1
+  : > "$WLOG"; ( _apache_journal_recover ) >/dev/null 2>&1 || return 1
+  ! grep -q '^a2dismod' "$WLOG" && [ "$(wc -l < "$LARANODE_APACHE_MODS_STATE")" = 3 ]; }
+mo_failed_dismod_still_kept() { wb_setup 0 1 8080; ENABLED_MODS=" "
+  CONFTEST_FAIL=1; a2dismod() { return 1; }; ( phase_webserver ) >/dev/null 2>&1 && return 1
+  [ -f "$LARANODE_APACHE_MODS_STATE" ] && [ "$(wc -l < "$LARANODE_APACHE_MODS_STATE")" = 3 ]; }
+t "run 2 fails after run 1 enabled modules: run 1's modules stay enabled and recorded"    mo_run1_survive
+t "only the modules enabled since the journal opened are disabled, the rest stay recorded" mo_only_new_disabled
+t "a killed run 2 is recovered without disabling run 1's modules"                         mo_recover_keeps_run1
+t "a module that cannot be disabled stays recorded (as before)"                           mo_failed_dismod_still_kept
+
+# ---- 3. pid reuse: a pid alone does not identify an installer ----
+echo "=== pid + start time identify an installer (a reused pid is not it) ==="
+pr_start_stable() { base; command sleep 30 & local p1=$!; command sleep 0.2; command sleep 30 & local p2=$!
+  local a b c; a=$(_pid_start "$p1"); b=$(_pid_start "$p1"); c=$(_pid_start "$p2"); kill "$p1" "$p2" 2>/dev/null
+  [ -n "$a" ] && [ "$a" = "$b" ] && [ -n "$c" ] && [ "$a" != "$c" ]; }
+pr_start_dead_empty() { base; [ -z "$(_pid_start "$(dead_pid)")" ]; }
+pr_alive_match() { base; command sleep 30 & local lp=$!; local s; s=$(_pid_start "$lp"); _pid_alive "$lp" "$s"; local rc=$?; kill "$lp" 2>/dev/null; [ $rc -eq 0 ]; }
+pr_alive_mismatch() { base; command sleep 30 & local lp=$!; _pid_alive "$lp" "boot.123"; local rc=$?; kill "$lp" 2>/dev/null; [ $rc -ne 0 ]; }
+pr_alive_nostart() { base; command sleep 30 & local lp=$!; _pid_alive "$lp" ""; local rc=$?; kill "$lp" 2>/dev/null; [ $rc -eq 0 ]; }
+pr_alive_dead() { base; ! _pid_alive "$(dead_pid)" ""; }
+t "_pid_start is stable for one process and differs between processes"                    pr_start_stable
+t "_pid_start of a dead pid is empty"                                                     pr_start_dead_empty
+t "_pid_alive: live pid + its own start token is alive"                                   pr_alive_match
+t "_pid_alive: live pid + another start token is NOT alive (pid reused)"                  pr_alive_mismatch
+t "_pid_alive: a record without a start token falls back to kill -0 (old guards/journals)" pr_alive_nostart
+t "_pid_alive: dead pid is not alive"                                                     pr_alive_dead
+# the guard
+pg_reuse_answers_0() { pg_setup; command sleep 30 & local lp=$!
+  export LARANODE_INSTALLER_PID=$lp LARANODE_INSTALLER_START="boot.reused"; _policy_guard_on; [ -e "$PRC" ] || return 1
+  sh "$PRC" start apache2; local rc=$?; kill "$lp" 2>/dev/null; [ $rc -eq 0 ]; }
+pg_real_still_101() { pg_setup; command sleep 30 & local lp=$!
+  export LARANODE_INSTALLER_PID=$lp; unset LARANODE_INSTALLER_START; _policy_guard_on
+  sh "$PRC" start apache2; local rc=$?; kill "$lp" 2>/dev/null; [ $rc -eq 101 ]; }
+pg_reuse_cleaned() { pg_setup; command sleep 30 & local lp=$!
+  export LARANODE_INSTALLER_PID=$lp LARANODE_INSTALLER_START="boot.reused"; _policy_guard_on; _PRC_ADDED=0
+  ( unset LARANODE_INSTALLER_PID LARANODE_INSTALLER_START; _policy_guard_clean_stale 2>/dev/null ); kill "$lp" 2>/dev/null
+  [ ! -e "$PRC" ]; }
+pg_live_not_cleaned() { pg_setup; command sleep 30 & local lp=$!
+  export LARANODE_INSTALLER_PID=$lp; unset LARANODE_INSTALLER_START; _policy_guard_on; _PRC_ADDED=0
+  ( unset LARANODE_INSTALLER_PID LARANODE_INSTALLER_START; _policy_guard_clean_stale 2>/dev/null ); kill "$lp" 2>/dev/null
+  [ -e "$PRC" ]; }
+pg_old_format_live_kept() { pg_setup; command sleep 30 & local lp=$!   # a guard written by an older installer: pid only
+  printf '#!/bin/sh\n# %s pid=%s\nkill -0 %s 2>/dev/null && exit 101\nexit 0\n' "$_PG_MARK" "$lp" "$lp" > "$PRC"
+  ( _policy_guard_clean_stale 2>/dev/null ); kill "$lp" 2>/dev/null; [ -e "$PRC" ]; }
+t "guard whose pid was REUSED by another process answers 0 (starts allowed)"              pg_reuse_answers_0
+t "guard of the real live installer still answers 101"                                    pg_real_still_101
+t "start cleanup removes a guard whose pid was reused"                                    pg_reuse_cleaned
+t "start cleanup keeps the guard of a really running installer"                           pg_live_not_cleaned
+t "start cleanup keeps an old-format (pid only) guard of a live pid"                      pg_old_format_live_kept
+# the journal
+jr_reuse_recovers() { wb_setup 0 1 8080; command sleep 30 & local lp=$!
+  ( export LARANODE_INSTALLER_PID=$lp LARANODE_INSTALLER_START="boot.reused"; _apache_journal_open "$AD" "$AD/sites-available/laranode.conf" )
+  echo "Listen 9999" >> "$AD/ports.conf"
+  ( _apache_journal_recover ) >/dev/null 2>&1; local rc=$?; kill "$lp" 2>/dev/null
+  [ $rc -eq 0 ] && rb_ok && [ ! -e "$LARANODE_ROLLBACK_DIR" ]; }
+jr_old_journal_live_refused() { wb_setup 0 1 8080; command sleep 30 & local lp=$!
+  ( export LARANODE_INSTALLER_PID=$lp; _apache_journal_open "$AD" "$AD/sites-available/laranode.conf" )
+  rm -f "$LARANODE_ROLLBACK_DIR/start"            # a journal from an older installer: pid only
+  ( _apache_journal_recover ) >/dev/null 2>&1; local rc=$?; kill "$lp" 2>/dev/null
+  [ $rc -ne 0 ] && [ -d "$LARANODE_ROLLBACK_DIR" ]; }
+t "a journal whose pid was reused by another process is recovered, not refused"           jr_reuse_recovers
+t "a journal without a start token and a live pid is still refused (old journals)"        jr_old_journal_live_refused
+
+# ---- 4. the safety seams are not read from the inherited environment ----
+echo "=== env sanitising: test seams only with LARANODE_INSTALLER_TEST=1 ==="
+SEAMS="APT_ALLOW_SERVICE_START LARANODE_ROLLBACK_DIR LARANODE_INSTALLER_PID LARANODE_INSTALLER_START LARANODE_POLICY_RC_D LARANODE_APACHE_DIR LARANODE_APACHE_MODS_STATE LARANODE_OS_RELEASE_FILE LARANODE_PVE_DIR LARANODE_CLP_DIR LARANODE_CRON_DIR LARANODE_PROC_NET_DIR LARANODE_PROC_DIR"
+seam_env() { local v; for v in $SEAMS; do echo "$v=/tmp/inherited-$v"; done; }
+env_unset_without_flag() { local out
+  out=$(env -u LARANODE_INSTALLER_TEST $(seam_env) bash -c "source '$INSTALLER'; for v in $SEAMS; do [ -z \"\${!v+x}\" ] || echo \"STILL SET: \$v\"; done" 2>&1)
+  [ -z "$out" ] || { echo "$out"; return 1; }; }
+env_kept_with_flag() { local out
+  out=$(env LARANODE_INSTALLER_TEST=1 $(seam_env) bash -c "source '$INSTALLER'; for v in $SEAMS; do [ -n \"\${!v+x}\" ] || echo \"LOST: \$v\"; done" 2>&1)
+  [ -z "$out" ] || { echo "$out"; return 1; }; }
+env_journal_dir_default() { local d
+  d=$(env -u LARANODE_INSTALLER_TEST LARANODE_ROLLBACK_DIR=/tmp/evil-rollback bash -c "source '$INSTALLER'; _journal_dir")
+  [ "$d" = /etc/laranode/apache-rollback ]; }
+env_apt_flag_ignored() { local o
+  o=$(env -u LARANODE_INSTALLER_TEST APT_ALLOW_SERVICE_START=1 bash -c "source '$INSTALLER'; echo \"flag=\${APT_ALLOW_SERVICE_START:-0}\"")
+  [ "$o" = "flag=0" ]; }
+env_documented_overrides_kept() { local o
+  o=$(env -u LARANODE_INSTALLER_TEST LARANODE_MANIFEST_FILE=/x/m.json LARANODE_PROBE_PROC=1 LARANODE_OS=debian bash -c "source '$INSTALLER'; echo \"\${LARANODE_MANIFEST_FILE:-} \${LARANODE_PROBE_PROC:-} \${LARANODE_OS:-}\"")
+  [ "$o" = "/x/m.json 1 debian" ]; }
+t "every test seam is dropped from the inherited environment (no LARANODE_INSTALLER_TEST)"  env_unset_without_flag
+t "LARANODE_INSTALLER_TEST=1 keeps the seams (the unit tests need them)"                    env_kept_with_flag
+t "an inherited LARANODE_ROLLBACK_DIR cannot point the rollback's rm -rf elsewhere"         env_journal_dir_default
+t "an inherited APT_ALLOW_SERVICE_START=1 cannot unguard the base apt installs"             env_apt_flag_ignored
+t "the documented overrides (MANIFEST_FILE, PROBE_PROC, LARANODE_OS) are still honoured"    env_documented_overrides_kept
 
 echo ""
 echo "Results: passed=$PASS  failed=$FAIL"

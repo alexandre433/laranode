@@ -1,6 +1,19 @@
 #!/bin/bash
 set -euo pipefail
 
+# ---- Test seams are not part of the operator interface ----------------------------------------
+# These variables redirect or weaken safety machinery (the rollback journal dir feeds an rm -rf,
+# APT_ALLOW_SERVICE_START unguards apt, the pid/start seams fake an installer identity, the
+# *_DIR / *_FILE seams fake host detection). They exist for the unit tests only, so an inherited
+# value (`APT_ALLOW_SERVICE_START=1 ./laranode-installer.sh`, a stray export in a profile) is
+# dropped here unless the test harness says so. The documented overrides (LARANODE_OS,
+# LARANODE_MANIFEST_FILE, LARANODE_PROBE_PROC, ...) are not touched.
+if [ "${LARANODE_INSTALLER_TEST:-0}" != 1 ]; then
+  unset APT_ALLOW_SERVICE_START LARANODE_ROLLBACK_DIR LARANODE_INSTALLER_PID LARANODE_INSTALLER_START \
+        LARANODE_POLICY_RC_D LARANODE_APACHE_DIR LARANODE_APACHE_MODS_STATE LARANODE_OS_RELEASE_FILE \
+        LARANODE_PVE_DIR LARANODE_CLP_DIR LARANODE_CRON_DIR LARANODE_PROC_NET_DIR LARANODE_PROC_DIR
+fi
+
 export DEBIAN_FRONTEND=noninteractive
 # needrestart (default on Ubuntu 22.04+/24.04 images) restarts services after apt
 # installs. List-only mode (l) and suspend stop it from restarting host services
@@ -120,17 +133,46 @@ _PRC_ADDED=0
 _PG_DEPTH=0
 # The installer's own pid (a test seam: unit tests run phases in subshells).
 _installer_pid() { echo "${LARANODE_INSTALLER_PID:-$$}"; }
+# A pid alone does not identify a process: after a reboot (or enough churn) another process can
+# hold the pid a dead installer had. The identity is pid + start time: "<boot id>.<starttime>" from
+# /proc/<pid>/stat (field 22, in clock ticks since boot; the boot id tells two boots apart). Empty
+# when it cannot be read; a record without it falls back to the plain pid check.
+_pid_start() {
+  local st boot
+  st=$(sed 's/.*) //' "/proc/${1}/stat" 2>/dev/null | cut -d' ' -f20) || return 0
+  [ -n "$st" ] || return 0
+  boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
+  echo "${boot}.${st}"
+}
+_installer_start() { echo "${LARANODE_INSTALLER_START:-$(_pid_start "$(_installer_pid)")}"; }
+# _pid_alive PID [START] — PID is running AND (when START is given) it is the same process.
+_pid_alive() {
+  kill -0 "$1" 2>/dev/null || return 1
+  [ -z "${2:-}" ] || [ "$(_pid_start "$1")" = "$2" ]
+}
 _policy_guard_is_ours() { [ -f "$(_policy_rc_d)" ] && grep -q "$_PG_MARK" "$(_policy_rc_d)" 2>/dev/null; }
 # The guard file answers 101 ("do not start") only while the installer that wrote it is alive.
 # After a SIGKILL / OOM / power loss the pid is dead and the file answers 0 ("allowed"): it is
 # inert at once and cannot block the owner's service starts, even before the next run removes it.
+# "Alive" means the same pid AND the same start time: a pid reused by another process after a
+# reboot answers 0 like a dead installer (see _pid_start). Without a readable start time the
+# script falls back to the pid check alone.
+_policy_guard_script() {  # _policy_guard_script PID START
+  local pid="$1" start="$2"
+  if [ -n "$start" ]; then
+    printf '#!/bin/sh\n# %s pid=%s start=%s\nkill -0 %s 2>/dev/null && [ "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null).$(sed '"'"'s/.*) //'"'"' /proc/%s/stat 2>/dev/null | cut -d'"'"' '"'"' -f20)" = "%s" ] && exit 101\nexit 0\n' \
+      "$_PG_MARK" "$pid" "$start" "$pid" "$pid" "$start"
+  else
+    printf '#!/bin/sh\n# %s pid=%s\nkill -0 %s 2>/dev/null && exit 101\nexit 0\n' "$_PG_MARK" "$pid" "$pid"
+  fi
+}
 _policy_guard_on() {
-  local prc pid; prc=$(_policy_rc_d); pid=$(_installer_pid)
+  local prc pid start; prc=$(_policy_rc_d); pid=$(_installer_pid); start=$(_installer_start)
   # already held by this installer (an apt_install inside a guarded phase): count it
   if [ "$_PRC_ADDED" = 1 ]; then _PG_DEPTH=$((_PG_DEPTH + 1)); return 0; fi
   [ ! -e "$prc" ] || return 0                       # the owner's own policy-rc.d: leave it
   # noclobber: never overwrite a policy-rc.d that appeared since the check above
-  if ( set -C; printf '#!/bin/sh\n# %s pid=%s\nkill -0 %s 2>/dev/null && exit 101\nexit 0\n' "$_PG_MARK" "$pid" "$pid" > "$prc" ) 2>/dev/null; then
+  if ( set -C; _policy_guard_script "$pid" "$start" > "$prc" ) 2>/dev/null; then
     chmod +x "$prc"
     _PRC_ADDED=1
     _PG_DEPTH=1
@@ -154,10 +196,11 @@ _policy_guard_release() {
 # _policy_guard_clean_stale — run at installer start: remove a marked guard whose installer
 # is gone. Anything without the marker is not ours and stays.
 _policy_guard_clean_stale() {
-  local prc pid; prc=$(_policy_rc_d)
+  local prc pid start; prc=$(_policy_rc_d)
   _policy_guard_is_ours || return 0
   pid=$(sed -n "s/^# ${_PG_MARK} pid=\([0-9][0-9]*\).*/\1/p" "$prc" | head -1)
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then return 0; fi   # another installer is running
+  start=$(sed -n "s/^# ${_PG_MARK} pid=[0-9][0-9]* start=\([^ ]*\).*/\1/p" "$prc" | head -1)
+  if [ -n "$pid" ] && _pid_alive "$pid" "$start"; then return 0; fi   # another installer is running
   warn "removing a stale ${prc} left by an interrupted Laranode install (it would silently stop every later package install from starting services)"
   rm -f "$prc"
 }
@@ -1033,14 +1076,19 @@ _apache_enable_modules() {
 # written BEFORE the first change and removed on success. A SIGKILL / OOM / power loss cannot
 # run the exit hook, so the next installer start finds the journal of a dead installer and rolls
 # its changes back first (_apache_journal_recover); if that is not possible it refuses and says
-# where the journal is. Files: pid, apache_dir, vhost_dest, ports.conf (the original),
-# vhost.orig (a previous panel vhost), vhost_enabled, was_active, reloaded, complete.
+# where the journal is. Files: pid, start (pid identity), apache_dir, vhost_dest, ports.conf (the original),
+# vhost.orig (a previous panel vhost), vhost_enabled, mods.before (modules recorded before this run),
+# was_active, reloaded, started_by_run (this run started a stopped Apache), complete.
 _journal_dir() { echo "${LARANODE_ROLLBACK_DIR:-/etc/laranode/apache-rollback}"; }
 _WB_ARMED=0
 _apache_journal_open() {  # _apache_journal_open APACHE_DIR VHOST_DEST
   local j ad="$1" dest="$2"; j=$(_journal_dir)
   rm -rf "$j"; mkdir -p "$j"
   _installer_pid > "$j/pid"
+  _installer_start > "$j/start"      # pid + start time: a reused pid is not this installer
+  # The modules recorded BEFORE this run (an earlier run's, kept in the state file): a rollback
+  # disables only what was enabled since this point, never an earlier run's modules.
+  if [ -f "$(_apache_mods_state)" ]; then cp "$(_apache_mods_state)" "$j/mods.before"; else : > "$j/mods.before"; fi
   echo "$ad" > "$j/apache_dir"; echo "$dest" > "$j/vhost_dest"
   cp -p "${ad}/ports.conf" "$j/ports.conf"
   if [ -e "$dest" ]; then cp -p "$dest" "$j/vhost.orig"; fi
@@ -1066,11 +1114,13 @@ _apache_rollback_journal() {
     a2dissite laranode >/dev/null 2>&1 || true
     rm -f "$dest"
   fi
-  # modules THIS run switched on (recorded one by one in the state file), newest first
-  # (proxy_fcgi depends on proxy)
+  # modules THIS run switched on (recorded one by one in the state file, and not in the snapshot
+  # taken when the journal opened), newest first (proxy_fcgi depends on proxy). An earlier run's
+  # modules stay enabled and stay recorded: its vhost, restored just above, needs them.
   if [ -f "$st" ]; then
     mods=$(sed '/^$/d' "$st" | tac)
     for m in $mods; do
+      if [ -f "$j/mods.before" ] && grep -qxF "$m" "$j/mods.before"; then keep+="${m}"$'\n'; continue; fi
       if a2dismod "$m" >/dev/null 2>&1; then :; else warn "could not disable module ${m}"; keep+="${m}"$'\n'; fi
     done
     if [ -n "$keep" ]; then printf '%s' "$keep" | tac > "$st"; else rm -f "$st"; fi
@@ -1078,12 +1128,15 @@ _apache_rollback_journal() {
   APACHE_MODS_ENABLED=""
   # Put the running Apache back on the restored configuration, but only if it may have loaded
   # ours (the reload was reached). An Apache that was running before this run is NEVER stopped;
-  # only one this run started is stopped again. The owner's stopped Apache is never started.
+  # only one this run started is stopped again, and only when the journal says THIS run started
+  # it (started_by_run): an Apache that is active now but was not started by this run (the owner,
+  # or a boot, started it after a SIGKILL) is the owner's and is left running. The owner's stopped
+  # Apache is never started.
   if [ -f "$j/was_active" ]; then
     if [ -f "$j/reloaded" ]; then
       systemctl reload apache2 || warn "apache2 reload after the rollback failed: check it before its next restart"
     fi
-  elif svc_active apache2; then
+  elif [ -f "$j/started_by_run" ] && svc_active apache2; then
     systemctl stop apache2 || warn "could not stop the apache2 this run started"
   fi
   [ "$rc" = 0 ] || return 1
@@ -1098,10 +1151,11 @@ _apache_rollback() {            # the exit hook of the running installer
 # _apache_journal_recover — run at start: a previous installer was killed (SIGKILL / OOM / power
 # loss) between its first change to a pre-existing Apache and its end. Undo that first.
 _apache_journal_recover() {
-  local j pid; j=$(_journal_dir)
+  local j pid start; j=$(_journal_dir)
   [ -d "$j" ] || return 0
   pid=$(cat "$j/pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && [ "$pid" != "$(_installer_pid)" ] && kill -0 "$pid" 2>/dev/null; then
+  start=$(cat "$j/start" 2>/dev/null || true)
+  if [ -n "$pid" ] && [ "$pid" != "$(_installer_pid)" ] && _pid_alive "$pid" "$start"; then
     die "Another Laranode installer (pid ${pid}) is changing this host's Apache right now. Wait for it to finish, then re-run."
   fi
   warn "a previous Laranode install was killed while it was changing apache2: undoing its changes first (restoring ports.conf and the panel vhost from ${j}, disabling the modules it enabled)"
@@ -1158,6 +1212,9 @@ phase_webserver() {
   [ "$_WB_ARMED" = 0 ] || : > "$(_journal_dir)/reloaded"
   ( _refresh_service apache2 "$APACHE_OWNED" ) \
     || die "apache2 reload/start failed — the panel's changes to ${ad} were rolled back"
+  # THIS run started a stopped pre-existing Apache (opt-in): record it, so a rollback or the next
+  # start's recovery stops only an Apache that this run started, never one the owner started since.
+  if [ "$_WB_ARMED" = 1 ] && [ ! -f "$(_journal_dir)/was_active" ]; then : > "$(_journal_dir)/started_by_run"; fi
   svc_active apache2 || die "apache2 is not active after (re)load — the panel's changes to ${ad} were rolled back (the running Apache keeps its previous configuration)"
 
   # Confirm the socket is open (full HTTP 200 check is phase_services, after the
