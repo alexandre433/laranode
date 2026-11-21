@@ -319,7 +319,7 @@ preflight() {
 phase_packages() {
   log "Installing base tools"
   apt-get update -q
-  apt_install git curl ca-certificates sudo openssl iproute2 gnupg
+  apt_install git curl ca-certificates sudo openssl iproute2 gnupg cron
   # add-apt-repository (ppa:ondrej/php) exists only on Ubuntu, and only the PPA
   # path needs it. Debian 13 ships php8.4 itself.
   if [ "$OS_ID" = ubuntu ] && [ "$IS_CLOUDPANEL" = 0 ]; then
@@ -1001,6 +1001,23 @@ phase_app() {
 # Phase 7 — Services, firewall, permissions
 # ==============================================================================
 
+# _install_scheduler_cron — the panel defines scheduled work in bootstrap/app.php
+# (backups every minute, SSL-expiry notices, pruning) but nothing ever ran
+# `schedule:run`. Render the cron.d template (user/path/php are the installer's own).
+# LARANODE_CRON_DIR is a test seam; default /etc/cron.d.
+_install_scheduler_cron() {
+  local dir="${LARANODE_CRON_DIR:-/etc/cron.d}"
+  local tpl="${PANEL_PATH}/laranode-scripts/templates/laranode-schedule.cron"
+  [ -f "$tpl" ] || die "scheduler cron template missing: $tpl"
+  mkdir -p "$dir"
+  sed -e "s#__PANEL_USER__#laranode_ln#g" \
+      -e "s#__PHP__#/usr/bin/php8.4#g" \
+      -e "s#__PANEL_PATH__#${PANEL_PATH}#g" \
+      "$tpl" > "${dir}/laranode-schedule"
+  chmod 644 "${dir}/laranode-schedule"
+  log "Scheduler cron installed: ${dir}/laranode-schedule"
+}
+
 phase_services() {
   log "Installing systemd service units"
   cp "${PANEL_PATH}/laranode-scripts/templates/laranode-queue-worker.service" \
@@ -1020,6 +1037,8 @@ phase_services() {
 
   log "Enabling and starting services"
   systemctl daemon-reload
+  _install_scheduler_cron
+  systemctl enable --now cron
   systemctl enable laranode-queue-worker.service
   systemctl enable laranode-reverb.service
   systemctl start laranode-queue-worker.service
@@ -1059,7 +1078,19 @@ phase_summary() {
 # Entrypoint
 # ==============================================================================
 
+# ensure_probe_tools — preflight reads listeners with `ss`. A minimal image (e.g. a
+# bare Debian 13) may not ship iproute2; without it every port would read as free.
+# Installing iproute2 is the only change made before the plan is shown.
+ensure_probe_tools() {
+  command -v ss >/dev/null 2>&1 && return 0
+  log "Installing iproute2 (provides ss, needed to detect busy ports)"
+  apt-get update -q
+  DEBIAN_FRONTEND=noninteractive apt-get install -y iproute2
+  command -v ss >/dev/null 2>&1 || die "ss (iproute2) is required for port detection"
+}
+
 main() {
+  ensure_probe_tools
   preflight
   phase_packages
   phase_fetch_panel

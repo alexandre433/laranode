@@ -11,6 +11,8 @@
 #   EXPECT_PORT     HTTP port to assert /login on (default: 80)
 #   EXPECT_ENGINE   mysql | pgsql — controls which DB service is asserted
 #                   (default: mysql)
+#   IMAGE           systemd base image (default: jrei/systemd-ubuntu:24.04;
+#                   Debian scenarios use jrei/systemd-debian:13)
 #   KEEP            1 = leave container after run for manual inspection (default: 0)
 
 set -uo pipefail
@@ -49,7 +51,7 @@ run_scenario() {
     # Remove any leftover container from a previous interrupted run
     docker rm -f "$cname" >/dev/null 2>&1 || true
 
-    echo "[$scenario][1/6] Booting $_LIB_IMAGE with systemd..."
+    echo "[$scenario][1/6] Booting ${IMAGE:-$_LIB_IMAGE} with systemd..."
     # Preserve all flags from the original run.sh exactly:
     docker run -d --name "$cname" --privileged --cgroupns=host \
         --cap-add NET_ADMIN --cap-add NET_RAW --stop-signal SIGRTMIN+3 \
@@ -57,7 +59,7 @@ run_scenario() {
         -v "$_LIB_REPO":/src:ro \
         -v "$_LIB_COMPOSER_CACHE":/composer-cache \
         --tmpfs /run --tmpfs /run/lock --tmpfs /tmp \
-        "$_LIB_IMAGE" >/dev/null || _fail "container did not start"
+        "${IMAGE:-$_LIB_IMAGE}" >/dev/null || _fail "container did not start"
 
     # Wait for systemd to reach a stable state (running/degraded/starting)
     for _ in $(seq 1 30); do
@@ -128,16 +130,33 @@ run_scenario() {
         [ "$st" = active ] || ok=0
     done
 
+
+    # --- Scheduler: cron daemon up + cron.d entry present and runnable ---
+    st=$(docker exec "$cname" systemctl is-active cron 2>/dev/null || echo inactive)
+    printf "   %-32s %s\n" "cron" "$st"
+    [ "$st" = active ] || ok=0
+    if docker exec "$cname" bash -c \
+        'grep -qE "^\* \* \* \* \* laranode_ln /usr/bin/php8.4 /home/laranode_ln/panel/artisan schedule:run" /etc/cron.d/laranode-schedule \
+         && sudo -u laranode_ln /usr/bin/php8.4 /home/laranode_ln/panel/artisan schedule:list >/dev/null 2>&1'; then
+        printf "   %-32s %s\n" "scheduler cron.d + schedule:list" "ok"
+    else
+        printf "   %-32s %s\n" "scheduler cron.d + schedule:list" "MISSING"; ok=0
+    fi
     # --- Engine-specific DB service ---
     if [ "$expect_engine" = pgsql ]; then
-        pg=$(docker exec "$cname" bash -c \
-            'systemctl is-active postgresql@16-main 2>/dev/null \
-             || systemctl is-active postgresql 2>/dev/null \
-             || echo inactive')
-        printf "   %-32s %s\n" "postgresql" "$pg"
+        # Any version/cluster name (16/main on Ubuntu 24.04, 17/main on Debian 13):
+        # count clusters pg_lsclusters reports online.
+        n=$(docker exec "$cname" bash -c \
+            'pg_lsclusters --no-header 2>/dev/null | awk "\$4==\"online\"{n++} END{print n+0}"' \
+            2>/dev/null || echo 0)
+        pg=inactive; [ "${n:-0}" -ge 1 ] && pg=active
+        printf "   %-32s %s (%s online)\n" "postgresql" "$pg" "${n:-0}"
         [ "$pg" = active ] || ok=0
     else
-        st=$(docker exec "$cname" systemctl is-active mysql 2>/dev/null || echo inactive)
+        # MySQL or a MariaDB stand-in: both answer to the `mysql` unit alias or `mariadb`.
+        st=$(docker exec "$cname" bash -c \
+            'systemctl is-active mysql 2>/dev/null || systemctl is-active mariadb 2>/dev/null || echo inactive' \
+            2>/dev/null | head -1)
         printf "   %-32s %s\n" "mysql" "$st"
         [ "$st" = active ] || ok=0
     fi

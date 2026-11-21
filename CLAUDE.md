@@ -74,13 +74,24 @@ back to `:8080` when `:80` is occupied.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `LARANODE_DB_ENGINE` | `mysql` | `mysql` or `pgsql` — only that engine's server package is installed |
+| `LARANODE_DB_ENGINE` | `mysql` (Ubuntu) / `pgsql` (Debian) | `mysql` or `pgsql` — only that engine's server package is installed. Debian has no `mysql-server`: `mysql` there needs an existing MySQL/Percona/MariaDB server |
 | `LARANODE_HTTP_PORT` | auto (80 free → 80, else 8080) | Apache port the panel listens on |
 | `LARANODE_MYSQL_ROOT_PASSWORD` | — | Required when existing MySQL root uses password auth (not `auth_socket`) |
 | `LARANODE_PG_PORT` | auto (single cluster) | Disambiguate when multiple Postgres clusters exist on the same host |
 | `LARANODE_APP_URL` | public IP via `icanhazip.com` | Sets `APP_URL`, `REVERB_HOST`, `VITE_REVERB_HOST` in `.env` |
 | `LARANODE_REPO` | GitHub fork URL | Clone source; the install-test harness overrides this to the injected tree path |
+| `LARANODE_BIND` | `local` on Proxmox/CloudPanel, else `all` | `all`, `local` (127.0.0.1) or an IPv4. Panel Apache vhost and Reverb listen only there; reach a local-bound panel over an SSH tunnel |
+| `LARANODE_PG_DATADIR` | — | Fresh PostgreSQL install only: put cluster data under this dir (`<dir>/<ver>/<cluster>`), e.g. a bigger disk |
 | `LARANODE_UNATTENDED` | `0` | `1` = take all defaults, suppress all prompts and `confirm` gates |
+
+### Supported hosts
+
+Ubuntu 24.04 and Debian 13 (trixie); anything else is refused with a clear message.
+Debian uses its own `php8.4` and PostgreSQL 17 (no ondrej/sury repo). Ubuntu keeps the ondrej PPA.
+Every `apt-get install` is simulated first (`apt_install`): the installer dies if apt would
+**remove** any package, and on Proxmox/CloudPanel hosts also if it would **upgrade** a host-stack
+package (pve-*, percona-*, nginx, php*, postgresql*, ...).
+
 
 ### Safe on hosts with existing services
 
@@ -91,6 +102,10 @@ back to `:8080` when `:80` is occupied.
 | Multiple Postgres clusters | `LARANODE_PG_PORT` required; only that cluster's socket is touched |
 | System `php` not 8.4 | `php8.4` packages installed additively; system default left unchanged; panel calls/units use `/usr/bin/php8.4` |
 | Node ≥ 20 already present | Warns and skips nodesource; existing Node binary used as-is |
+| Proxmox VE host (`pveversion` or `/etc/pve`) | Never installs/enables ufw (pve-firewall owns the host), refuses panel ports 22/85/111/443/3128/8006, binds `127.0.0.1` |
+| CloudPanel host (`/home/clp`, `clpctl`, package `cloudpanel`) | No PPA, never installs over its php/nginx/Percona, panel on `:8090` (8080 is Varnish's backend), Reverb `:8081`, no ufw rules, binds `127.0.0.1` |
+| Percona / MySQL / MariaDB server present | Reused as-is; `mysql-server` is never installed over it |
+| PostgreSQL cluster present | Server package untouched (client only); `LARANODE_PG_PORT` must name the cluster the panel may use |
 
 Re-running the installer on an already-provisioned panel is **idempotent**: `APP_KEY` is
 not regenerated if already set to a `base64:` value, `APP_URL` is not overwritten if
@@ -104,12 +119,12 @@ Clean-room integration tests in `local-dev/install-test/` boot one vanilla
 `jrei/systemd-ubuntu:24.04` container per scenario, inject the repo, run the real
 installer, and assert services active + HTTP 200 + admin login. Run from the repo root:
 
-    make -f local-dev/Makefile install-test-unit       # host helper unit tests (no container, ~1 s)
+    make -f local-dev/Makefile install-test-unit       # host helper + host-detection unit tests (no container, ~2 s)
     make -f local-dev/Makefile install-test-templates  # host template-content tests (no container)
     make -f local-dev/Makefile install-test            # baseline scenario only
-    make -f local-dev/Makefile install-test-matrix     # all 5 scenarios (~30-90 min)
+    make -f local-dev/Makefile install-test-matrix     # all 8 scenarios (~1-2 hr)
 
-Scenarios: `baseline` | `nginx80` | `mysql-rootpw` | `pgsql` | `rerun`.
+Scenarios: `baseline` | `nginx80` | `mysql-rootpw` | `pgsql` | `rerun` | `debian13` | `pve` | `cloudpanel`.
 Run or debug a single scenario:
 
     bash local-dev/install-test/run.sh pgsql

@@ -256,6 +256,28 @@ t "bound panel: no ufw rule is added"                  fw_bound
 t "plain public host: ufw allow panel/reverb/443/22"   fw_plain
 t "ufw absent: nothing runs (warning only)"            fw_no_ufw
 
+# ---- scheduler cron ----------------------------------------------------------
+echo "=== scheduler cron ==="
+TPL_SRC="${SCRIPT_DIR}/../../../laranode-scripts/templates/laranode-schedule.cron"
+cron_setup() { base; PANEL_PATH=$(mktemp -d); mkdir -p "$PANEL_PATH/laranode-scripts/templates"; cp "$TPL_SRC" "$PANEL_PATH/laranode-scripts/templates/"; export LARANODE_CRON_DIR=$(mktemp -d); }
+cron_renders() {
+  cron_setup; _install_scheduler_cron
+  line=$(grep -v '^#' "$LARANODE_CRON_DIR/laranode-schedule")
+  [ "$line" = "* * * * * laranode_ln /usr/bin/php8.4 ${PANEL_PATH}/artisan schedule:run >> /dev/null 2>&1" ] \
+    || { echo "got: $line"; return 1; }
+  ! grep -q '__' "$LARANODE_CRON_DIR/laranode-schedule"
+}
+cron_missing_tpl() { cron_setup; rm "$PANEL_PATH/laranode-scripts/templates/laranode-schedule.cron"; _install_scheduler_cron; }
+cron_filename_ok() { cron_setup; _install_scheduler_cron; case "$(ls "$LARANODE_CRON_DIR")" in *.*) return 1;; esac; }   # cron ignores names with dots
+cron_wired() { base; # phase_services must call it, and phase_packages must install the cron daemon
+  body=$(declare -f phase_services); case "$body" in *_install_scheduler_cron*) ;; *) echo "phase_services does not install scheduler"; return 1;; esac
+  declare -f phase_packages | grep -qE 'apt_install .*\bcron\b'
+}
+t  "cron.d line uses installer user, php8.4 and panel path"        cron_renders
+tf "missing cron template aborts the install"                       cron_missing_tpl
+t  "cron.d file name has no dot (cron would ignore it)"             cron_filename_ok
+t  "phase_services wires the scheduler; phase_packages installs cron" cron_wired
+
 echo ""
 echo "Results: passed=$PASS  failed=$FAIL"
 [ "$FAIL" -eq 0 ] && echo "ALL PASS" && exit 0
