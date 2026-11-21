@@ -65,5 +65,18 @@ if [ -f "$ENVF" ]; then
     if [ $(( 0$m & 0137 )) -ne 0 ]; then bad ".env mode is $m (must be <= 640: no group write, no world access)"; else ok ".env mode $m"; fi
 fi
 
+# The panel checkout: the web user reads it, it must not WRITE it (only storage, bootstrap/cache
+# and the logs dir are the web process's scratch space). Group/other-writable anything else
+# lets a compromised www-data plant code that the panel user (queue worker, cron) then runs.
+H=/home/laranode_ln
+if [ -d "$H/panel" ]; then
+    loose=$(find "$H" -xdev ! -type l \( -perm -g+w -o -perm -o+w \) \
+        ! -path "$H/panel/storage" ! -path "$H/panel/storage/*" \
+        ! -path "$H/panel/bootstrap/cache" ! -path "$H/panel/bootstrap/cache/*" \
+        ! -path "$H/logs" ! -path "$H/logs/*" 2>/dev/null | head -5)
+    if [ -n "$loose" ]; then bad "group/other-writable under $H outside storage, bootstrap/cache, logs: $(echo $loose)"
+    else ok "nothing under $H is group/other-writable except storage, bootstrap/cache, logs"; fi
+fi
+
 if [ "$fail" = 0 ]; then echo "PERMS: PASS"; else echo "PERMS: FAIL" >&2; fi
 exit "$fail"

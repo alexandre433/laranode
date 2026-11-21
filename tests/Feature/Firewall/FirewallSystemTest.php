@@ -18,7 +18,7 @@ use Illuminate\Support\Facades\Process;
 
 function ufw(array $args): \Illuminate\Contracts\Process\ProcessResult
 {
-    return Process::run(array_merge(['sudo', 'ufw'], $args));
+    return \App\Actions\Firewall\UfwCommand::run($args);
 }
 
 beforeEach(function () {
@@ -31,7 +31,7 @@ beforeEach(function () {
     }
 
     // Never touch an already-active firewall.
-    $status = Process::run(['sudo', 'ufw', 'status'])->output();
+    $status = ufw(['status'])->output();
     if (str_contains(strtolower($status), 'status: active')) {
         $this->markTestSkipped('UFW is active — refusing to mutate rules in a system test.');
     }

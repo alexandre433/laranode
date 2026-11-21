@@ -104,7 +104,7 @@ V_docroot=/public
 H_docroot=( '/../../..' '/a b' "/a${NL}b" '/a;id' '/a&b' '/a|b' '/a"b' '/$(id)' '~' '/a#b' '/a\\b' '/../etc' )
 V_port=9100;    H_port=( 0 99 9099 9500 99999 '9100;id' -1 '9100 ' '' 0x2000 "9100${NL}9101" )
 V_email=ops@example.com; H_email=( '-x@a.com' 'a b@x.com' "a@b.com${NL}x" 'a@b.com;id' '' no-at-sign 'a@b.com --agree' )
-V_pw='S3cret pass!#&*$x'; H_pw=( "p${NL}root:Pwned" $'p\rx' '' )
+V_pw='S3cret pass!#&*$x'; H_pw=( "p${NL}root:Pwned" $'p\rx' '' "$(head -c 300 /dev/zero | tr '\0' a)" )
 V_yesno=yes;    H_yesno=( bogus -x "yes${NL}x" 'yes x' 'yes;id' '' )
 V_dbname=alice_db; H_dbname=( 'a;b' 'a b' '-x' "a${NL}b" '../x' '' "a'b" 'a.b' )
 V_dbuser=alice_dbu; H_dbuser=( root debian-sys-maint mysql 'a;b' 'a b' '-x' "a${NL}b" '' 'root ' )
@@ -124,7 +124,7 @@ H_destdir=( /etc /etc/cron.d '/home/alice_ln/domains/../../../etc' /home/bob_ln/
 V_dirpath=/home/alice_ln/domains/new.com/public
 H_dirpath=( /etc/cron.d/x '/home/alice_ln/domains/../../../etc/x' /home/bob_ln/domains/x /tmp/x "/home/alice_ln/domains/x${NL}y" relative -x '' /home/alice_ln/domains/linketc/x /etc )
 V_relpath=domains/example.com/public/index.php
-H_relpath=( '../../etc/passwd' '../../../etc/hostname' 'domains/../../../etc/hostname' domains/linketc "a${NL}b" '' '-x' '../bob_ln/domains/example.org/public' '../../../../etc/hostname' )
+H_relpath=( domains/linketc/hostname domains/linketc/passwd '../../etc/passwd' '../../../etc/hostname' 'domains/../../../etc/hostname' domains/linketc "a${NL}b" '' '-x' '../bob_ln/domains/example.org/public' '../../../../etc/hostname' )
 V_tpl_pool="$TPL/php-fpm-pool.template"
 H_tpl_pool=( /tmp/evil.template /etc/passwd "$TPL/../../../../tmp/evil.template" "$TPL/php-fpm-pool.template${NL}" '' relative.template -x /tmp/evildir/php-fpm-pool.template "$TPL/apache-vhost.template" )
 V_tpl_vhost="$TPL/apache-vhost.template"
@@ -150,6 +150,16 @@ V_delete=delete; H_delete=( bogus -x "delete${NL}x" '' )
 V_sslroot=/home/alice_ln/domains/example.com/public
 H_sslroot=( /etc '/home/alice_ln/domains/example.com/../../../../etc' /home/bob_ln/domains/example.org/public /home/alice_ln/domains/other.com/public relative "/home/alice_ln/domains/example.com/a${NL}b" '/home/alice_ln/domains/example.com/a b' -x '/home/alice_ln/domains/linketc' )
 V_crontmp=/tmp/laranode_cron_pos; H_crontmp=( /etc/passwd /nonexistent '' -x )
+V_ufwrule=22/tcp
+H_ufwrule=( '22;id' -x --force '$(id)' "22/tcp${NL}x" 'a b' 99999999 22/tcp/x '' 'x y z' '*' '22/tcp;id' '/etc/passwd' )
+V_ufwallow=allow; H_ufwallow=( bogus -x '' 'allow;id' "allow${NL}x" --force )
+V_ufwdeny=deny;   H_ufwdeny=( bogus -x '' 'deny;id' )
+V_ufwdel=delete;  H_ufwdel=( bogus -x '' 'delete;id' )
+V_ufwst=status;           H_ufwst=( bogus -x '' 'status;id' )
+V_ufwstn=status-numbered; H_ufwstn=( bogus -x '' 'status-numbered;id' )
+V_ufwsa=show-added;       H_ufwsa=( bogus -x '' 'show-added;id' )
+V_ufwen=enable;           H_ufwen=( bogus -x '' 'enable;id' )
+V_ufwdis=disable;         H_ufwdis=( bogus -x '' 'disable;id' )
 
 # ── spec table: NAME|script|runas|kinds…|positive-oracle (bash, run as root) ────────
 SPECS=(
@@ -183,6 +193,14 @@ SPECS=(
  'ssl-remove|laranode-ssl-manager.sh|root|remove domain|true'
  'ssl-generate|laranode-ssl-manager.sh|root|generate domain email sslroot|grep -q "certbot certonly" /var/log/laranode-stub.log'
  'remove-vhost|laranode-remove-vhost.sh|root|domain|[ ! -e /etc/apache2/sites-available/example.com.conf ]'
+ 'ufw-status|laranode-ufw.sh|root|ufwst|grep -q "^ufw status" /var/log/laranode-stub.log'
+ 'ufw-status-numbered|laranode-ufw.sh|root|ufwstn|grep -q "^ufw status numbered" /var/log/laranode-stub.log'
+ 'ufw-show-added|laranode-ufw.sh|root|ufwsa|grep -q "^ufw show added" /var/log/laranode-stub.log'
+ 'ufw-enable|laranode-ufw.sh|root|ufwen|grep -q "^ufw --force enable" /var/log/laranode-stub.log'
+ 'ufw-disable|laranode-ufw.sh|root|ufwdis|grep -q "^ufw --force disable" /var/log/laranode-stub.log'
+ 'ufw-allow|laranode-ufw.sh|root|ufwallow ufwrule|grep -q "^ufw allow 22/tcp" /var/log/laranode-stub.log'
+ 'ufw-deny|laranode-ufw.sh|root|ufwdeny ufwrule|grep -q "^ufw deny 22/tcp" /var/log/laranode-stub.log'
+ 'ufw-delete-rule|laranode-ufw.sh|root|ufwdel ufwallow ufwrule|grep -q "^ufw --force delete allow 22/tcp" /var/log/laranode-stub.log'
 )
 # Positive case skipped where it cannot run against stubs (set to the reason).
 declare -A NOPOS=( [runtime-install]=downloads [sleep]=systemd )
@@ -225,6 +243,28 @@ VECTORS=(
  "laranode-postgres.sh${SEP}grant${SEP}postgres${SEP}ok_db"
  "laranode-postgres.sh${SEP}grant${SEP}ok_user${SEP}a;b"
  "laranode-postgres.sh${SEP}revoke${SEP}a b${SEP}ok_db"
+ "laranode-ufw.sh${SEP}"
+ "laranode-ufw.sh${SEP}status${SEP}extra"
+ "laranode-ufw.sh${SEP}status-numbered${SEP}extra"
+ "laranode-ufw.sh${SEP}show-added${SEP}extra"
+ "laranode-ufw.sh${SEP}enable${SEP}extra"
+ "laranode-ufw.sh${SEP}disable${SEP}extra"
+ "laranode-ufw.sh${SEP}--force${SEP}reset"
+ "laranode-ufw.sh${SEP}reset"
+ "laranode-ufw.sh${SEP}allow"
+ "laranode-ufw.sh${SEP}allow${SEP}--force${SEP}22"
+ "laranode-ufw.sh${SEP}allow${SEP}22/tcp${SEP}--dry-run"
+ "laranode-ufw.sh${SEP}allow${SEP}in${SEP}on${SEP}eth0${SEP}to${SEP}any"
+ "laranode-ufw.sh${SEP}allow${SEP}from${SEP}1.2.3.4${SEP}to${SEP}any${SEP}port${SEP}22${SEP}comment${SEP}x"
+ "laranode-ufw.sh${SEP}allow${SEP}OpenSSH${SEP}extra"
+ "laranode-ufw.sh${SEP}allow${SEP}1${SEP}2${SEP}3${SEP}4${SEP}5${SEP}6${SEP}7${SEP}8${SEP}9${SEP}10${SEP}11${SEP}12${SEP}13${SEP}14${SEP}15${SEP}16${SEP}17"
+ "laranode-ufw.sh${SEP}delete"
+ "laranode-ufw.sh${SEP}delete${SEP}1${SEP}2"
+ "laranode-ufw.sh${SEP}delete${SEP}99999"
+ "laranode-ufw.sh${SEP}delete${SEP}bogus${SEP}22/tcp"
+ "laranode-ufw.sh${SEP}delete${SEP}--force${SEP}allow${SEP}22"
+ "laranode-ufw.sh${SEP}delete${SEP}allow${SEP}--force"
+ "laranode-ufw.sh${SEP}delete${SEP}allow${SEP}22;id"
 )
 
 selected() { [ "${#ONLY[@]}" -eq 0 ] && return 0; local s; for s in "${ONLY[@]}"; do [ "$s" = "$1" ] && return 0; done; return 1; }

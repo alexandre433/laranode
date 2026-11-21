@@ -2,7 +2,6 @@
 
 namespace App\Actions\Firewall;
 
-use Illuminate\Support\Facades\Process;
 use RuntimeException;
 
 class AddUfwRuleAction
@@ -16,7 +15,7 @@ class AddUfwRuleAction
 
         $parts = preg_split('/\s+/', trim($ruleSpec));
         $parts = array_filter($parts, fn($v) => $v !== '');
-        $proc = Process::run(array_merge(['sudo', 'ufw', 'allow'], $parts));
+        $proc = UfwCommand::run(array_merge(['allow'], $parts));
 
         if ($proc->failed()) {
             throw new RuntimeException('UFW allow failed: ' . $proc->errorOutput());

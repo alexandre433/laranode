@@ -45,7 +45,9 @@ ln_snap() {
         ls -la /etc/php/*/fpm/pool.d 2>/dev/null
         ls -la /etc/systemd/system 2>/dev/null | grep -i laranode
         ls -la /home 2>/dev/null
-        find /home -maxdepth 4 -newer /etc/laranode-canary 2>/dev/null | grep -v '/\.' | sort
+        # (the live panel on a real install writes its own storage/logs while the checks run)
+        find /home -maxdepth 4 -newer /etc/laranode-canary 2>/dev/null | grep -v '/\.' \
+            | grep -vE '^/home/laranode_ln/(panel/(storage|bootstrap)|logs)' | sort
         ls /tmp 2>/dev/null | grep -E '^pwned' 
         getent passwd | wc -l
     } 2>&1

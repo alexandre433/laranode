@@ -74,7 +74,7 @@ for f in "$SRC"/etc/sudoers.d/*; do
     [ -f "$f" ] || continue
     visudo -c -f "$f" >/dev/null || die "sudoers drop-in ${f##*/} failed syntax check"
     # every granted path must point into the root-owned copy, nowhere else
-    if grep -E '^[^#]*NOPASSWD' "$f" | grep -Ev "NOPASSWD: ($DEST/bin/|/usr/sbin/ufw|ALL$)" | grep -q .; then
+    if grep -E '^[^#]*NOPASSWD' "$f" | grep -Ev "NOPASSWD: ($DEST/bin/|ALL$)" | grep -q .; then
         die "sudoers drop-in ${f##*/} grants a path outside $DEST/bin"
     fi
     install -o root -g root -m 644 -- "$f" "$STAGE/etc/sudoers.d/${f##*/}"

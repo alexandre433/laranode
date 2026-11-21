@@ -2,13 +2,12 @@
 
 namespace App\Actions\Firewall;
 
-use Illuminate\Support\Facades\Process;
 
 class GetUfwRulesAction
 {
     public function execute(): array
     {
-        $proc = Process::run(['sudo', 'ufw', 'status', 'numbered']);
+        $proc = UfwCommand::run(['status-numbered']);
         if ($proc->failed()) {
             return [];
         }
