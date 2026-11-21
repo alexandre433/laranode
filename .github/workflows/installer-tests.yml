@@ -41,7 +41,7 @@ jobs:
   mutation-smoke:
     name: mutation smoke (each guard must go red)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - run: bash local-dev/install-test/mutation-smoke.sh
@@ -71,6 +71,8 @@ jobs:
           - port-busy
           - apache-stopped
           - phpfpm-live
+          - nginx-dualstack
+          - apache-badconf
     steps:
       - uses: actions/checkout@v4
       - name: run scenario

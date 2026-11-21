@@ -30,6 +30,30 @@ MUTATIONS=(
   'modules enabled by a failed run not disabled again|s#a2dismod "\$m" >/dev/null 2>\&1 || warn#true || warn#'
   'live pre-existing php8.4-fpm restarted by the extension postinst (no guard)|s#if \[ "\${PHPFPM_OWNED:-1}" = 0 \]; then _policy_guard_on; fi#:#'
   'ss-less host proceeds without any listener probe|s#_probe_available || die "Cannot#true || die "Cannot#'
+  # round 4: the reviewer's two reproduced bugs
+  'rollback stops a pre-existing Apache that was running (reload never reached)|s#^  if \[ -f "\$j/was_active" \]; then#  if false; then#'
+  'dual-stack listener reads FREE (grep -q early exit under pipefail)|s#\[ -n "\$(_proc_listen_inodes "\$1")" \]#_proc_listen_inodes "$1" | grep -q .#'
+  # round 4: signals and hooks
+  'SIGINT no longer turned into an exit (hooks skipped)|s#^  trap .exit 130. INT#  :#'
+  'SIGTERM no longer turned into an exit (hooks skipped)|s#^  trap .exit 143. TERM#  :#'
+  'SIGHUP no longer turned into an exit (hooks skipped)|s#^  trap .exit 129. HUP#  :#'
+  'a second signal can abort the cleanups|s#^  trap .. INT TERM HUP#  :#'
+  'the same exit hook registered twice runs twice|s#\[ "\$seen" = 1 \] || _EXIT_HOOKS+=#_EXIT_HOOKS+=#'
+  # round 4: policy-rc.d guard
+  'guard created with plain redirection (writes through a planted link)|s#( set -C; printf#( printf#'
+  'guard never expires with its installer (always answers 101)|s#kill -0 %s 2>/dev/null \&\& exit 101\\nexit 0\\n#\# %s\\nexit 101\\n#'
+  'apt_install never guards on a host with pre-existing services|s#\[ -n "\${PRE_UNITS:-}" \]; then#false; then#'
+  'cron installed under the guard (could never start)|s#APT_ALLOW_SERVICE_START=1 apt_install cron#apt_install cron#'
+  'sysstat installed under the guard (could never start)|s#APT_ALLOW_SERVICE_START=1 apt_install sysstat#apt_install sysstat#'
+  'mysql-server installed under the guard (could never start)|s#APT_ALLOW_SERVICE_START=1 apt_install mysql-server#apt_install mysql-server#'
+  'fresh postgresql installed under the guard (could never start)|s#APT_ALLOW_SERVICE_START=1 apt_install postgresql postgresql-client#apt_install postgresql postgresql-client#'
+  # round 4: the rollback journal (SIGKILL)
+  'journal never written before the first change|s#^    _apache_journal_open "\$ad" "\$dest"#    :#'
+  'reload marker never written (rollback cannot tell the reload was reached)|s#\[ "\$_WB_ARMED" = 0 \] || : > "\$(_journal_dir)/reloaded"#:#'
+  'a killed install is never recovered at the next start|s#^  _apache_journal_recover$#  :#'
+  'recovery ignores a journal whose installer is still alive|s#\[ "\$pid" != "\$(_installer_pid)" \] \&\& kill -0#[ "$pid" != "$(_installer_pid)" ] \&\& false \&\& kill -0#'
+  'recovery carries on when it could not undo the changes|s#\[ ! -d "\$j" \] || die "Could not undo#true || die "Could not undo#'
+  'an incomplete journal is replayed instead of discarded|s#\[ -f "\$j/complete" \] || { rm -rf "\$j"; return 0; }#:#'
 )
 
 fail=0

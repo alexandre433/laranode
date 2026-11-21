@@ -42,6 +42,8 @@ _EXIT_HOOKS=()
 _run_exit_hooks() {
   local rc=$? h
   trap - EXIT
+  # A second Ctrl-C / TERM / HUP while the cleanups run must not abort them half-way.
+  trap '' INT TERM HUP
   for h in "${_EXIT_HOOKS[@]}"; do "$h" || true; done
   return "$rc"
 }
@@ -61,7 +63,8 @@ _add_exit_hook() {
 # the busy-port checks must work on a host without iproute2: no `ss` means reading
 # /proc/net/tcp{,6} instead of apt-installing a package first. LARANODE_PROC_NET_DIR and
 # LARANODE_PROC_DIR are test seams.
-_have_ss() { command -v ss >/dev/null 2>&1; }
+# LARANODE_PROBE_PROC=1 forces the /proc/net/tcp fallback (test seam: a host without iproute2).
+_have_ss() { [ "${LARANODE_PROBE_PROC:-0}" != 1 ] && command -v ss >/dev/null 2>&1; }
 _proc_net() { echo "${LARANODE_PROC_NET_DIR:-/proc/net}"; }
 _proc_dir() { echo "${LARANODE_PROC_DIR:-/proc}"; }
 # _probe_available — listeners can be read (ss, or /proc/net/tcp).
@@ -76,7 +79,11 @@ _proc_listen_inodes() {
 }
 port_in_use() {
   if _have_ss; then ss -tlnH "( sport = :$1 )" | grep -q .
-  else _proc_listen_inodes "$1" | grep -q .; fi
+  else
+    # NOT `... | grep -q .`: grep exits at the first inode, the second awk (tcp6) then writes
+    # to a closed pipe and, under pipefail, the SIGPIPE makes a dual-stack listener read FREE.
+    [ -n "$(_proc_listen_inodes "$1")" ]
+  fi
 }
 
 # Apache config root and the policy-rc.d guard path are overridable so the unit tests can run the
@@ -110,22 +117,39 @@ _port_holder() {
 # a killed installer (SIGKILL, OOM, power loss) is recognised as stale at the next start.
 _PG_MARK='laranode-installer policy-rc.d guard'
 _PRC_ADDED=0
+_PG_DEPTH=0
+# The installer's own pid (a test seam: unit tests run phases in subshells).
+_installer_pid() { echo "${LARANODE_INSTALLER_PID:-$$}"; }
 _policy_guard_is_ours() { [ -f "$(_policy_rc_d)" ] && grep -q "$_PG_MARK" "$(_policy_rc_d)" 2>/dev/null; }
+# The guard file answers 101 ("do not start") only while the installer that wrote it is alive.
+# After a SIGKILL / OOM / power loss the pid is dead and the file answers 0 ("allowed"): it is
+# inert at once and cannot block the owner's service starts, even before the next run removes it.
 _policy_guard_on() {
-  local prc; prc=$(_policy_rc_d)
-  _PRC_ADDED=0
+  local prc pid; prc=$(_policy_rc_d); pid=$(_installer_pid)
+  # already held by this installer (an apt_install inside a guarded phase): count it
+  if [ "$_PRC_ADDED" = 1 ]; then _PG_DEPTH=$((_PG_DEPTH + 1)); return 0; fi
   [ ! -e "$prc" ] || return 0                       # the owner's own policy-rc.d: leave it
   # noclobber: never overwrite a policy-rc.d that appeared since the check above
-  if ( set -C; printf '#!/bin/sh\n# %s pid=%s\nexit 101\n' "$_PG_MARK" "$$" > "$prc" ) 2>/dev/null; then
+  if ( set -C; printf '#!/bin/sh\n# %s pid=%s\nkill -0 %s 2>/dev/null && exit 101\nexit 0\n' "$_PG_MARK" "$pid" "$pid" > "$prc" ) 2>/dev/null; then
     chmod +x "$prc"
     _PRC_ADDED=1
-    _add_exit_hook _policy_guard_off
+    _PG_DEPTH=1
+    _add_exit_hook _policy_guard_release
   fi
 }
+# _policy_guard_off — balances one _policy_guard_on; the file goes with the outermost one.
 _policy_guard_off() {
+  [ "$_PRC_ADDED" = 1 ] || return 0
+  _PG_DEPTH=$((_PG_DEPTH - 1))
+  [ "$_PG_DEPTH" -le 0 ] || return 0
+  _policy_guard_release
+}
+# _policy_guard_release — the exit hook: remove OUR guard whatever the nesting depth.
+_policy_guard_release() {
   [ "$_PRC_ADDED" = 1 ] || return 0
   if _policy_guard_is_ours; then rm -f "$(_policy_rc_d)"; fi
   _PRC_ADDED=0
+  _PG_DEPTH=0
 }
 # _policy_guard_clean_stale — run at installer start: remove a marked guard whose installer
 # is gone. Anything without the marker is not ours and stays.
@@ -287,7 +311,17 @@ apt_install() {
     | awk '{print $2}' | grep -E "$_PROTECTED_PKG_RE" || true)
   [ -z "$upgrades" ] \
     || die "Refusing to install: $* — apt would UPGRADE host-managed packages:"$'\n'"${upgrades}"
-  apt-get install --no-upgrade -y "$@"
+  # On a host that already runs services, any package's postinst (a library the install
+  # pulls in, not only the named package) can try-restart them. The marked policy-rc.d guard
+  # holds service starts back for the whole install, unless the caller installs a NEW service
+  # that has to start (APT_ALLOW_SERVICE_START=1 apt_install ...). Nests with the guarded phases.
+  local guarded=0 rc=0
+  if [ "${APT_ALLOW_SERVICE_START:-0}" != 1 ] && [ -n "${PRE_UNITS:-}" ]; then
+    _policy_guard_on; guarded=1
+  fi
+  apt-get install --no-upgrade -y "$@" || rc=$?
+  [ "$guarded" = 0 ] || _policy_guard_off
+  return "$rc"
 }
 
 # ------------------------------------------------------------------------------
@@ -514,7 +548,9 @@ preflight() {
 phase_packages() {
   log "Installing base tools"
   apt-get update -q
-  apt_install git curl ca-certificates sudo openssl iproute2 gnupg cron
+  apt_install git curl ca-certificates sudo openssl iproute2 gnupg
+  # cron is a NEW service that has to run (the panel's scheduler); sysstat likewise below.
+  APT_ALLOW_SERVICE_START=1 apt_install cron
   # add-apt-repository (ppa:ondrej/php) exists only on Ubuntu, and only the PPA
   # path needs it. Debian 13 ships php8.4 itself.
   if [ "$OS_ID" = ubuntu ] && [ "$IS_CLOUDPANEL" = 0 ]; then
@@ -522,7 +558,7 @@ phase_packages() {
   fi
 
   log "Installing sysstat"
-  apt_install sysstat
+  APT_ALLOW_SERVICE_START=1 apt_install sysstat
   systemctl enable sysstat
 }
 
@@ -571,7 +607,7 @@ _mysql_branch() {
     warn "Panel will create the 'laranode' account with ALL PRIVILEGES on this existing server."
   else
     log "Database — MySQL: installing mysql-server"
-    apt_install mysql-server
+    APT_ALLOW_SERVICE_START=1 apt_install mysql-server   # a NEW service: it has to start
     PANEL_DB_MANAGED=1
   fi
   # enable+start is idempotent whether mysql was just installed or pre-existed.
@@ -675,7 +711,7 @@ _pgsql_branch() {
         >> "$pgcc_conf"
       log "PostgreSQL data directory base: ${LARANODE_DATA_DIR%/}/postgresql/<ver>/<cluster>"
     fi
-    apt_install postgresql postgresql-client
+    APT_ALLOW_SERVICE_START=1 apt_install postgresql postgresql-client   # a NEW cluster: it has to start
     PANEL_DB_MANAGED=1
   fi
 
@@ -992,40 +1028,85 @@ _apache_enable_modules() {
 # "not active", "not listening", a2ensite, ...), so the owner's next reload/restart never trips
 # over a Listen line, vhost or module we added. An Apache this installer installed is ours and
 # is never rolled back.
-_WB_ARMED=0 _WB_PORTS_BAK="" _WB_VHOST_BAK="" _WB_VHOST_ON=0 _WB_DEST="" _WB_WAS_ACTIVE=0 _WB_RELOADED=0
+#
+# The snapshot is a JOURNAL on disk (LARANODE_ROLLBACK_DIR, default /etc/laranode/apache-rollback),
+# written BEFORE the first change and removed on success. A SIGKILL / OOM / power loss cannot
+# run the exit hook, so the next installer start finds the journal of a dead installer and rolls
+# its changes back first (_apache_journal_recover); if that is not possible it refuses and says
+# where the journal is. Files: pid, apache_dir, vhost_dest, ports.conf (the original),
+# vhost.orig (a previous panel vhost), vhost_enabled, was_active, reloaded, complete.
+_journal_dir() { echo "${LARANODE_ROLLBACK_DIR:-/etc/laranode/apache-rollback}"; }
+_WB_ARMED=0
+_apache_journal_open() {  # _apache_journal_open APACHE_DIR VHOST_DEST
+  local j ad="$1" dest="$2"; j=$(_journal_dir)
+  rm -rf "$j"; mkdir -p "$j"
+  _installer_pid > "$j/pid"
+  echo "$ad" > "$j/apache_dir"; echo "$dest" > "$j/vhost_dest"
+  cp -p "${ad}/ports.conf" "$j/ports.conf"
+  if [ -e "$dest" ]; then cp -p "$dest" "$j/vhost.orig"; fi
+  if [ -e "${ad}/sites-enabled/laranode.conf" ]; then : > "$j/vhost_enabled"; fi
+  if svc_active apache2; then : > "$j/was_active"; fi
+  : > "$j/complete"      # a journal without this was cut short before any change: nothing to undo
+}
 _apache_commit() {
   _WB_ARMED=0
-  rm -f "$_WB_PORTS_BAK" "$_WB_VHOST_BAK" 2>/dev/null || true
+  rm -rf "$(_journal_dir)"
 }
-_apache_rollback() {
-  [ "$_WB_ARMED" = 1 ] || return 0
-  _WB_ARMED=0
-  local ad m st keep; ad=$(_apache_dir); st=$(_apache_mods_state)
-  warn "rolling back this run's changes to the pre-existing Apache"
-  cp -p "$_WB_PORTS_BAK" "${ad}/ports.conf" || warn "could not restore ${ad}/ports.conf from ${_WB_PORTS_BAK}"
-  if [ -n "$_WB_VHOST_BAK" ]; then
-    cp -p "$_WB_VHOST_BAK" "$_WB_DEST"             # the previous working panel vhost
-    [ "$_WB_VHOST_ON" = 1 ] || a2dissite laranode >/dev/null 2>&1 || true
+# _apache_rollback_journal — put the owner's Apache back from the journal. The journal is kept
+# (return 1) when a restore failed, so the next start retries or refuses instead of forgetting.
+_apache_rollback_journal() {
+  local j ad dest m st rc=0 mods keep=""; j=$(_journal_dir); st=$(_apache_mods_state)
+  [ -f "$j/complete" ] || { rm -rf "$j"; return 0; }
+  ad=$(cat "$j/apache_dir"); dest=$(cat "$j/vhost_dest")
+  cp -p "$j/ports.conf" "${ad}/ports.conf" || { warn "could not restore ${ad}/ports.conf from ${j}/ports.conf"; rc=1; }
+  if [ -f "$j/vhost.orig" ]; then
+    cp -p "$j/vhost.orig" "$dest" || { warn "could not restore ${dest} from ${j}/vhost.orig"; rc=1; }   # the previous working panel vhost
+    [ -f "$j/vhost_enabled" ] || a2dissite laranode >/dev/null 2>&1 || true
   else
     a2dissite laranode >/dev/null 2>&1 || true
-    rm -f "$_WB_DEST"
+    rm -f "$dest"
   fi
-  # modules THIS run switched on, newest first (proxy_fcgi depends on proxy)
-  for m in $(printf '%s\n' $APACHE_MODS_ENABLED | tac); do
-    a2dismod "$m" >/dev/null 2>&1 || warn "could not disable module ${m}"
-  done
+  # modules THIS run switched on (recorded one by one in the state file), newest first
+  # (proxy_fcgi depends on proxy)
   if [ -f "$st" ]; then
-    keep=$(grep -vxF -f <(printf '%s\n' $APACHE_MODS_ENABLED) "$st" || true)
-    if [ -n "$keep" ]; then printf '%s\n' "$keep" > "$st"; else rm -f "$st"; fi
+    mods=$(sed '/^$/d' "$st" | tac)
+    for m in $mods; do
+      if a2dismod "$m" >/dev/null 2>&1; then :; else warn "could not disable module ${m}"; keep+="${m}"$'\n'; fi
+    done
+    if [ -n "$keep" ]; then printf '%s' "$keep" | tac > "$st"; else rm -f "$st"; fi
   fi
   APACHE_MODS_ENABLED=""
-  # Put the running Apache back on the restored configuration; never start the owner's Apache.
-  if [ "$_WB_WAS_ACTIVE" = 1 ] && [ "$_WB_RELOADED" = 1 ]; then
-    systemctl reload apache2 || warn "apache2 reload after the rollback failed: check it before its next restart"
+  # Put the running Apache back on the restored configuration, but only if it may have loaded
+  # ours (the reload was reached). An Apache that was running before this run is NEVER stopped;
+  # only one this run started is stopped again. The owner's stopped Apache is never started.
+  if [ -f "$j/was_active" ]; then
+    if [ -f "$j/reloaded" ]; then
+      systemctl reload apache2 || warn "apache2 reload after the rollback failed: check it before its next restart"
+    fi
   elif svc_active apache2; then
     systemctl stop apache2 || warn "could not stop the apache2 this run started"
   fi
-  rm -f "$_WB_PORTS_BAK" "$_WB_VHOST_BAK" 2>/dev/null || true
+  [ "$rc" = 0 ] || return 1
+  rm -rf "$j"
+}
+_apache_rollback() {            # the exit hook of the running installer
+  [ "$_WB_ARMED" = 1 ] || return 0
+  _WB_ARMED=0
+  warn "rolling back this run's changes to the pre-existing Apache"
+  _apache_rollback_journal || warn "the rollback is incomplete: journal kept in $(_journal_dir)"
+}
+# _apache_journal_recover — run at start: a previous installer was killed (SIGKILL / OOM / power
+# loss) between its first change to a pre-existing Apache and its end. Undo that first.
+_apache_journal_recover() {
+  local j pid; j=$(_journal_dir)
+  [ -d "$j" ] || return 0
+  pid=$(cat "$j/pid" 2>/dev/null || true)
+  if [ -n "$pid" ] && [ "$pid" != "$(_installer_pid)" ] && kill -0 "$pid" 2>/dev/null; then
+    die "Another Laranode installer (pid ${pid}) is changing this host's Apache right now. Wait for it to finish, then re-run."
+  fi
+  warn "a previous Laranode install was killed while it was changing apache2: undoing its changes first (restoring ports.conf and the panel vhost from ${j}, disabling the modules it enabled)"
+  _apache_rollback_journal || true
+  [ ! -d "$j" ] || die "Could not undo a killed install's changes to apache2. The original ports.conf is ${j}/ports.conf: restore it by hand (and remove the Listen/vhost/modules that install added), delete ${j}, then re-run. Nothing else was changed."
 }
 
 phase_webserver() {
@@ -1051,12 +1132,9 @@ phase_webserver() {
   # included, so the snapshot comes first): the next reload/restart by its owner must not
   # trip over a line we added.
   if [ "$APACHE_OWNED" = 0 ]; then
-    _WB_PORTS_BAK=$(mktemp); _WB_VHOST_BAK=""; _WB_VHOST_ON=0; _WB_DEST="$dest"
-    cp -p "${ad}/ports.conf" "$_WB_PORTS_BAK"
-    # A re-run overwrites a previously working panel vhost: keep it for the rollback.
-    if [ -e "$dest" ]; then _WB_VHOST_BAK=$(mktemp); cp -p "$dest" "$_WB_VHOST_BAK"; fi
-    [ ! -e "${ad}/sites-enabled/laranode.conf" ] || _WB_VHOST_ON=1
-    _WB_WAS_ACTIVE=0; _WB_RELOADED=0; ! svc_active apache2 || _WB_WAS_ACTIVE=1
+    # The snapshot is a journal on disk (also read by the next start after a SIGKILL); a
+    # re-run's previously working panel vhost is part of it.
+    _apache_journal_open "$ad" "$dest"
     _WB_ARMED=1
     _add_exit_hook _apache_rollback
   fi
@@ -1076,7 +1154,8 @@ phase_webserver() {
   apachectl configtest || die "Apache config test failed — review ${dest}"
 
   [ "$APACHE_OWNED" = 0 ] || systemctl enable apache2 >/dev/null 2>&1 || true
-  _WB_RELOADED=1     # from here the running Apache may have loaded our config: a rollback must reload it back
+  # from here the running Apache may have loaded our config: a rollback must reload it back
+  [ "$_WB_ARMED" = 0 ] || : > "$(_journal_dir)/reloaded"
   ( _refresh_service apache2 "$APACHE_OWNED" ) \
     || die "apache2 reload/start failed — the panel's changes to ${ad} were rolled back"
   svc_active apache2 || die "apache2 is not active after (re)load — the panel's changes to ${ad} were rolled back (the running Apache keeps its previous configuration)"
@@ -1670,6 +1749,8 @@ main() {
   # A guard left by an installer that was killed (SIGKILL / OOM / power loss) would silently
   # stop every later package install on this host from starting services.
   _policy_guard_clean_stale
+  # The same for a pre-existing Apache a killed installer left half-configured.
+  _apache_journal_recover
   preflight
   phase_packages
   phase_fetch_panel
