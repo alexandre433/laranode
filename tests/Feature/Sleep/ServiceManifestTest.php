@@ -97,6 +97,34 @@ test('no manifest fails CLOSED: a registry alone never authorises touching a ser
     }
 });
 
+test('a missing or unbacking manifest never traps a service asleep: disable (only) still works', function () {
+    foreach (['manifest deleted' => null, 'service flipped to managed:false' => [['laranode-reverb.service', false, 'reverb']]] as $why => $after) {
+        $this->sbx = sleepSandbox();
+        registerReverbFixture($this->sbx);
+        expect(runSleep($this->sbx, ['reverb', 'enable', '10'])['code'])->toBe(0);
+        $m = "{$this->sbx['root']}/managed/service-manifest.json";
+        $after === null ? unlink($m) : writeManifest($this->sbx, $after);
+        // everything that turns sleep ON or pokes the service stays refused (fail closed) ...
+        foreach ([['reverb', 'enable', '10'], ['reverb', 'wake'], ['reverb', 'sleep']] as $args) {
+            expect(runSleep($this->sbx, $args)['code'])->toBe(3, "{$why}: ".implode(' ', $args));
+        }
+        // ... but disable only restores the originals, so it must go through
+        $off = runSleep($this->sbx, ['reverb', 'disable']);
+        expect($off['code'])->toBe(0, "{$why}: ".$off['all'])
+            ->and(glob("{$this->sbx['root']}/systemd/*"))->toBe([])
+            ->and(file_exists("{$this->sbx['root']}/managed/sleep/reverb.state"))->toBeFalse();
+        exec('rm -rf '.escapeshellarg($this->sbx['root']));
+    }
+});
+
+test('disable without a manifest is still refused when sleep was never enabled (nothing to restore)', function () {
+    $this->sbx = sleepSandbox();
+    registerReverbFixture($this->sbx);
+    unlink("{$this->sbx['root']}/managed/service-manifest.json");
+    $r = runSleep($this->sbx, ['reverb', 'disable']);
+    expect($r['code'])->toBe(3)->and($r['calls'])->toBe('');
+});
+
 // ─── laranode-managed-register.sh: derives the registry from the manifest ───────
 
 function runRegister(array $sbx, array $keys, array $extraEnv = []): array
@@ -144,6 +172,21 @@ test('register: a pre-existing MySQL next to a Laranode-installed PostgreSQL is 
     writeManifest($this->sbx, [['postgresql@16-main.service', true, 'database'], ['mysql.service', false, 'preexisting']], 'pgsql', 'postgresql@16-main.service');
     $r = runRegister($this->sbx, ['hostdb']);
     expect($r['has']('hostdb'))->toBeFalse()->and($r['all'])->toContain('not MySQL/MariaDB');
+});
+
+test('register: a service that is now skipped loses its STALE registry entry', function () {
+    skipUnlessRoot();
+    $this->sbx = sleepSandbox();
+    writeManifest($this->sbx, [['laranode-reverb.service', true, 'reverb'], ['laranode-queue-worker.service', true, 'queue']]);
+    file_put_contents("{$this->sbx['root']}/panel/.env", "REVERB_SERVER_HOST=127.0.0.1\n");
+    $first = runRegister($this->sbx, ['reverb', 'queue']);
+    expect($first['has']('reverb'))->toBeTrue()->and($first['has']('queue'))->toBeTrue();
+    // Reverb is now bound somewhere we cannot mirror (IPv6) and the queue is no longer Laranode's
+    file_put_contents("{$this->sbx['root']}/panel/.env", "REVERB_SERVER_HOST=::1\n");
+    writeManifest($this->sbx, [['laranode-reverb.service', true, 'reverb'], ['laranode-queue-worker.service', false, 'queue']]);
+    $second = runRegister($this->sbx, ['reverb', 'queue']);
+    expect($second['has']('reverb'))->toBeFalse('stale bind_host=127.0.0.1 entry must go')
+        ->and($second['has']('queue'))->toBeFalse('manifest no longer backs the queue');
 });
 
 test('register: without a manifest NOTHING is registered, not even with the old LARANODE_DB_INSTALLED_BY_US=1', function () {

@@ -412,6 +412,25 @@ test('hostdb enable is refused when an ENFORCED mysqld/mariadbd AppArmor profile
     }
 });
 
+test('every AppArmor mode that DENIES refuses hostdb: enforce, kill and prompt (one case each)', function () {
+    foreach (['enforce', 'kill', 'prompt'] as $mode) {
+        $this->sbx = sleepSandbox();
+        hostdbSetup($this->sbx);
+        $env = apparmorFiles($this->sbx, 'Y', "/usr/sbin/mysqld ({$mode})\n");
+        $r = runSleep($this->sbx, ['hostdb', 'enable', '15'], $env);
+        expect($r['code'])->toBe(3, "{$mode}: ".$r['all'])->and($r['all'])->toContain('AppArmor')->and($r['calls'])->toBe('');
+        exec('rm -rf '.escapeshellarg($this->sbx['root']));
+    }
+    // and the modes that do not deny stay allowed
+    foreach (['complain', 'unconfined'] as $mode) {
+        $this->sbx = sleepSandbox();
+        hostdbSetup($this->sbx);
+        $r = runSleep($this->sbx, ['hostdb', 'enable', '15'], apparmorFiles($this->sbx, 'Y', "/usr/sbin/mysqld ({$mode})\n"));
+        expect($r['code'])->toBe(0, "{$mode}: ".$r['all']);
+        exec('rm -rf '.escapeshellarg($this->sbx['root']));
+    }
+});
+
 test('hostdb enable still works when AppArmor is off, in complain mode, or has no mysqld profile', function () {
     $cases = [
         'AppArmor module off' => ['N', "/usr/sbin/mysqld (enforce)\n"],

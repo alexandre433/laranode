@@ -160,6 +160,13 @@ esac
 # nothing can prove Laranode installed the service, so nothing is touched (re-run the installer,
 # which writes the manifest and re-registers).
 MANIFEST="$MANAGED_DIR/service-manifest.json"
+# Exception: `disable` of a key whose root-owned state says sleep is ON. It only restores the
+# originals (registry-gated above), so a deleted manifest, or a service that flipped to
+# managed:false on an installer re-run, must never trap a service asleep. Everything that turns
+# sleep on or pokes the service stays fail closed.
+RESTORE_ONLY=0
+if [ "$ACTION" = disable ] && [ -f "$STATE_FILE" ] && grep -qx 'enabled=1' "$STATE_FILE" 2>/dev/null; then RESTORE_ONLY=1; fi
+if [ "$RESTORE_ONLY" != 1 ]; then
 [ -f "$MANIFEST" ] || die $EX_REFUSED "service manifest $MANIFEST is missing: cannot prove Laranode installed '$KEY' (re-run the Laranode installer)"
 {
     if [ "$TESTMODE" != 1 ]; then
@@ -180,6 +187,7 @@ MANIFEST="$MANAGED_DIR/service-manifest.json"
             || die $EX_REFUSED "service manifest database unit '$MDB' is not a Laranode-installed MySQL/MariaDB"
     fi
 }
+fi
 
 # --- state helpers ----------------------------------------------------------------
 declare -A S=()
@@ -278,14 +286,14 @@ guard_hostdb() {
 # AppArmor: Ubuntu ships an enforced profile for mysqld that only allows /run/mysqld/*. Hosting-DB
 # sleep moves the real server socket to /run/laranode-hostdb/, which that profile denies, so the
 # database would fail to start on the first wake. We never rewrite security policy from this script:
-# refuse instead. Only an ENFORCED profile matters (complain mode logs, never denies). AppArmor
+# refuse instead. Only a profile in a DENYING mode matters (enforce, kill, prompt; complain logs and never denies). AppArmor
 # enabled but the profile list unreadable = cannot prove it is safe = refuse.
 apparmor_blocks_hostdb() {
     local en=""
     [ -r "$AA_ENABLED" ] && en=$(tr -d "[:space:]" < "$AA_ENABLED" 2>/dev/null)
     [ "$en" = Y ] || return 1
     [ -r "$AA_PROFILES" ] || return 0
-    grep -Eq '(^|/)(mysqld|mariadbd)[[:space:]]+[(]enforce[)]$' "$AA_PROFILES" 2>/dev/null
+    grep -Eq '(^|/)(mysqld|mariadbd)[[:space:]]+[(](enforce|kill|prompt)[)]$' "$AA_PROFILES" 2>/dev/null
 }
 guard_apparmor() {
     if apparmor_blocks_hostdb; then

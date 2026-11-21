@@ -84,7 +84,9 @@ check "queue: worker not enabled at boot" "! systemctl is-enabled --quiet larano
 check "queue: drop-in still uses --stop-when-empty" "grep -q 'stop-when-empty' /etc/systemd/system/laranode-queue-worker.service.d/laranode-sleep.conf"
 check "reverb clients unaffected: a connect to :$RPORT wakes it" "code=\$(curl -s -o /dev/null -m 30 -w '%{http_code}' http://127.0.0.1:$RPORT/ || true); [ \"\$code\" != 000 ] && systemctl is-active --quiet laranode-reverb.service"
 check "panel itself still serves /login" "[ \"\$(curl -s -o /dev/null -w '%{http_code}' http://localhost:80/login)\" = 200 ]"
-check "disable reverb + queue: exit 0" "$SLEEP_SH reverb disable && $SLEEP_SH queue disable"
+MF=/etc/laranode/service-manifest.json
+check "manifest gone: wake stays refused (fail closed)" "mv $MF /tmp/mf.bak && [ \"\$($SLEEP_SH reverb wake >/dev/null 2>&1; echo \$?)\" = 3 ]"
+check "manifest gone: disable reverb + queue STILL works (never trapped asleep)" "$SLEEP_SH reverb disable && $SLEEP_SH queue disable; rc=\$?; mv /tmp/mf.bak $MF; [ \$rc = 0 ]"
 check "disable restores the original state: reverb enabled at boot and running" "systemctl is-enabled --quiet laranode-reverb.service && systemctl is-active --quiet laranode-reverb.service"
 check "disable restores the original state: queue worker enabled at boot" "systemctl is-enabled --quiet laranode-queue-worker.service"
 check "disable leaves no sleep units behind" "[ ! -e /etc/systemd/system/laranode-sleep-reverb.socket ] && [ ! -e /etc/systemd/system/laranode-sleep-queue.timer ] && [ ! -e $DROPIN ]"

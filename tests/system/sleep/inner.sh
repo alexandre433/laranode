@@ -97,6 +97,15 @@ printf 'kind=reverb\nunit=laranode-reverb.service\npublic_port=8080\nbind_host=0
 check "no manifest: a registry entry alone is refused (exit 3, nothing touched)" bash -c "[ \"\$($SLEEP reverb enable 1 >/tmp/ln-last.out 2>&1; echo \$?)\" = 3 ] && grep -q manifest /tmp/ln-last.out && ! systemctl is-active --quiet laranode-sleep-reverb.socket"
 rm -f /etc/laranode/managed.d/reverb.conf
 
+# N5: a service that is skipped on a later register run loses its STALE registry entry
+write_manifest true
+printf 'kind=reverb\nunit=laranode-reverb.service\npublic_port=8080\nbind_host=127.0.0.1\n' > /etc/laranode/managed.d/reverb.conf
+printf 'kind=queue\nunit=laranode-queue-worker.service\n' > /etc/laranode/managed.d/queue.conf
+sed -i 's/"managed":true,"role":"queue"/"managed":false,"role":"queue"/' "$MF"
+bash "$REGISTER" queue >/dev/null 2>&1
+check "register: queue no longer backed by the manifest => its stale entry is dropped" test ! -e /etc/laranode/managed.d/queue.conf
+rm -f /etc/laranode/managed.d/reverb.conf /etc/laranode/managed.d/queue.conf
+
 write_manifest true
 bash "$REGISTER" reverb queue fpm hostdb
 echo "--- registry:"; head -20 /etc/laranode/managed.d/*.conf
@@ -281,6 +290,10 @@ check "…database untouched (still active, no proxy units)" bash -c "systemctl 
 check "apparmor enforced: hostdb wake refused too (a stale enabled state cannot start a doomed DB)" test "$(aa_run $AAD/enabled $AAD/profiles-enforced wake)" = 3
 check "…and it is the AppArmor gate speaking (not the sleep-not-enabled refusal)" grep -q AppArmor /tmp/ln-last.out
 check "apparmor enabled but profile list unreadable: refused (cannot prove it safe)" test "$(aa_run $AAD/enabled /nonexistent enable 1)" = 3
+printf '/usr/sbin/mysqld (kill)\n' > $AAD/profiles-kill
+printf '/usr/sbin/mysqld (prompt)\n' > $AAD/profiles-prompt
+check "apparmor kill-mode profile denies too: hostdb enable refused" test "$(aa_run $AAD/enabled $AAD/profiles-kill enable 1)" = 3
+check "apparmor prompt-mode profile denies too: hostdb enable refused" test "$(aa_run $AAD/enabled $AAD/profiles-prompt enable 1)" = 3
 check "apparmor complain-mode profile does not deny: hostdb enable allowed" test "$(aa_run $AAD/enabled $AAD/profiles-complain enable 1)" = 0
 check "…and disable restores" test "$(aa_run $AAD/enabled $AAD/profiles-complain disable)" = 0
 check "apparmor off (profile list irrelevant): hostdb enable allowed" test "$(aa_run $AAD/disabled $AAD/profiles-enforced enable 1)" = 0

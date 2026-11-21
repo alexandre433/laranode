@@ -26,8 +26,10 @@ MANIFEST="$DIR/service-manifest.json"
 
 install -d -m 0755 -o root -g root "$DIR" "$DIR/managed.d" "$DIR/sleep"
 
+WROTE=0
 write_entry() { # key ; stdin = k=v lines
     local tmp
+    WROTE=1
     tmp=$(mktemp "$DIR/managed.d/.tmp.XXXXXX") || exit 1
     cat > "$tmp"
     chown root:root "$tmp"; chmod 0644 "$tmp"
@@ -105,7 +107,7 @@ aa_state() {
     [ -r "$enabled" ] && en=$(tr -d '[:space:]' < "$enabled" 2>/dev/null)
     [ "$en" = Y ] || { echo none; return; }
     [ -r "$profiles" ] || { echo unknown; return; }
-    if grep -Eq '(^|/)(mysqld|mariadbd)[[:space:]]+[(]enforce[)]$' "$profiles" 2>/dev/null; then echo enforced; else echo none; fi
+    if grep -Eq '(^|/)(mysqld|mariadbd)[[:space:]]+[(](enforce|kill|prompt)[)]$' "$profiles" 2>/dev/null; then echo enforced; else echo none; fi
 }
 
 register_hostdb() {
@@ -143,14 +145,30 @@ apparmor=$(aa_state)
 EOF
 }
 
+# A key that is skipped now (manifest no longer backs it, Reverb bound somewhere we cannot
+# mirror, unit gone) must not keep a STALE entry from an earlier run: sleep.sh would still
+# trust it (e.g. an old bind_host). Drop it. A service that is still asleep stays asleep (socket
+# activation keeps working); the warning says how to get out.
+drop_stale() { # key
+    local f="$DIR/managed.d/$1.conf"
+    [ -e "$f" ] || return 0
+    rm -f "$f"
+    echo "dropped stale registry entry: $1" >&2
+    if grep -qx 'enabled=1' "$DIR/sleep/$1.state" 2>/dev/null; then
+        echo "WARNING: sleep is still ON for $1 but it is no longer registered; fix the cause and re-run the installer (or this script) to manage it again" >&2
+    fi
+}
+
 rc=0
 for key in "$@"; do
+    WROTE=0
     case "$key" in
         reverb) register_reverb ;;
         queue) register_queue ;;
         fpm) register_fpm ;;
         hostdb) register_hostdb ;;
-        *) echo "ERROR: unknown key '$key'" >&2; rc=2 ;;
+        *) echo "ERROR: unknown key '$key'" >&2; rc=2; continue ;;
     esac
+    [ "$WROTE" = 1 ] || drop_stale "$key"
 done
 exit $rc

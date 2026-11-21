@@ -27,11 +27,15 @@ did not install.
   `/run/mysqld/`; hostdb sleep moves the real socket to `/run/laranode-hostdb/`, which the profile would
   deny, so the database would fail to start on the first wake. Decision: **refuse, never rewrite policy.**
   `laranode-sleep.sh` refuses `hostdb enable` and `hostdb wake` (exit 3, Power page: *cannot sleep: AppArmor
-  profile blocks the moved DB socket*) when AppArmor is on and a `mysqld`/`mariadbd` profile is in enforce
-  mode, or when AppArmor is on but its profile list cannot be read (cannot prove it safe). Complain mode
+  profile blocks the moved DB socket*) when AppArmor is on and a `mysqld`/`mariadbd` profile is in a denying
+  mode, or when AppArmor is on but its profile list cannot be read (cannot prove it safe). "Enforce" here means every mode that denies: `enforce`, `kill` and `prompt`. Complain mode
   and AppArmor off do not deny, so they are allowed. The registry carries a root-recorded `apparmor=` hint
   for the page (the panel cannot read the kernel profile list); the script re-checks on every call and is
   authoritative. We do not write `/etc/apparmor.d/local/*` or run `apparmor_parser` from a sudo script.
+  Known limits: the check is point-in-time (a profile loaded AFTER sleep was enabled, e.g. by a later
+  `apt install`, is only noticed on the next `wake`/status; a client connect can still wake the DB through
+  systemd), and in an LXC/container where AppArmor reads `Y` but the profile list is not mounted the page
+  shows the AppArmor refusal although no profile exists (fail closed; the state could not be read).
   **Unproven:** the kernel enforcement itself and the exact profile-line format on a real Ubuntu 24.04
   host (containers have no AppArmor). The decision logic is tested against injected kernel files only.
   The common full-install case is already refused earlier (panel DB = hosting DB).
@@ -51,7 +55,13 @@ did not install.
    service as `managed:true` (installed by Laranode). `managed:false` means it was on the host first. No
    manifest (a host the current installer never ran on) means nothing is registered and every action is
    refused (exit 3) until the installer is re-run; a registry file alone never authorises anything.
-   The old `LARANODE_DB_INSTALLED_BY_US=1` fallback is gone.
+   The old `LARANODE_DB_INSTALLED_BY_US=1` fallback is gone. One exception, so a service is never
+   trapped asleep: `disable` of a key whose root-owned state says sleep is ON works without the manifest
+   (it only restores the originals and is still registry-gated); `enable`/`wake`/`sleep` stay refused.
+   `laranode-managed-register.sh` also drops the registry entry of any key it now skips (manifest no
+   longer backs it, Reverb bound to an address it cannot mirror), so a stale `bind_host` is never trusted;
+   if that key was asleep it prints a warning (the service stays asleep via socket activation until the
+   cause is fixed and the installer re-run).
 4. **Reversible**: `disable` restores boot enablement and running state byte-for-byte (pool files, units,
    `systemctl enable` state).
 5. Test-only path overrides (`LARANODE_SLEEP_TEST=1`) are ignored whenever `SUDO_UID` is set.
@@ -125,4 +135,4 @@ Reverb clients are unaffected.
 
 Known limits: a stale `public_port`/`bind_host` after an in-place Reverb port change is only picked up on the
 next installer run (re-register + `_reassert_sleep_wake`); `fpm` is gated on the global `php` manifest role,
-not per PHP version; with the manifest missing even `disable` is refused (re-run the installer).
+not per PHP version; with the manifest missing `enable`/`wake`/`sleep` are refused (re-run the installer) but `disable` of a sleeping key still works.
