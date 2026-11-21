@@ -38,6 +38,15 @@ jobs:
       - name: template tests
         run: bash local-dev/install-test/unit/test-templates.sh
 
+  sudo-hardening:
+    name: sudo hardening (perms + hostile arguments, stubbed host)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: installed perms + hostile arguments for every sudo'd script
+        run: bash local-dev/install-test/sudo-hardening/run-fast.sh
+
   mutation-smoke:
     name: mutation smoke (each guard must go red)
     runs-on: ubuntu-latest
