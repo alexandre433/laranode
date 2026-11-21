@@ -128,6 +128,31 @@ case "$KEY" in
         ;;
 esac
 
+# --- installer manifest gate (defence in depth) -----------------------------------
+# The installer records, per service, whether Laranode installed it (managed:true) or
+# found it already running (managed:false). When that manifest exists it is the source
+# of truth: a registry entry the manifest does not back is refused.
+MANIFEST="$MANAGED_DIR/service-manifest.json"
+if [ -f "$MANIFEST" ]; then
+    if [ "$TESTMODE" != 1 ]; then
+        read -r muid mmode < <(stat -c '%u %a' "$MANIFEST")
+        [ "$muid" = 0 ] && [[ $mmode =~ ^[0-7]*[0145][0145]$ ]] || die $EX_REFUSED "service manifest $MANIFEST is not root-owned/non-writable"
+    fi
+    case "$KEY" in
+        reverb) MROLE=reverb ;;
+        queue) MROLE=queue ;;
+        fpm) MROLE=php ;;
+        hostdb) MROLE=database ;;
+    esac
+    grep -F '"managed":true' "$MANIFEST" | grep -qF "\"role\":\"$MROLE\"" \
+        || die $EX_REFUSED "service manifest does not list a Laranode-installed '$MROLE' service (managed:true): external services are never touched"
+    if [ "$KEY" = hostdb ]; then
+        MDB=$(grep -F '"managed":true' "$MANIFEST" | grep -F '"role":"database"' | sed -n 's/.*"unit":"\([^"]*\)".*/\1/p' | head -1)
+        [[ $MDB =~ ^(mysql|mariadb|mysqld)\.service$ ]] \
+            || die $EX_REFUSED "service manifest database unit '$MDB' is not a Laranode-installed MySQL/MariaDB"
+    fi
+fi
+
 # --- state helpers ----------------------------------------------------------------
 declare -A S=()
 load_state() {
@@ -525,8 +550,11 @@ fpm_reload() { # versions...
             echo "php-fpm$ver config test failed; not reloading" >&2
             return 1
         fi
-        sc reload "php${ver}-fpm" >/dev/null 2>&1
+        # A missing/inactive php-fpm unit is not an error: nothing to reload, the new
+        # pool config is picked up when the unit next starts.
+        sc reload "php${ver}-fpm" >/dev/null 2>&1 || true
     done
+    return 0
 }
 enable_fpm() {
     local ver f seen=" "

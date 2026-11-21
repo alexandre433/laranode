@@ -10,8 +10,10 @@
 # the same build works on Ubuntu 24.04 and Debian 13.
 #
 # Usage: laranode-managed-register.sh <reverb|queue|fpm|hostdb> [...]
-#   hostdb is registered ONLY when LARANODE_DB_INSTALLED_BY_US=1 (the installer
-#   set it because it installed the database itself, not because one existed).
+#   When the installer wrote $DIR/service-manifest.json, that manifest is the source of
+#   truth: a key is registered only if the manifest lists its service as managed:true
+#   (installed by Laranode). Without a manifest (older installer) hostdb falls back to
+#   LARANODE_DB_INSTALLED_BY_US=1.
 #
 set -uo pipefail
 
@@ -21,6 +23,7 @@ set -uo pipefail
 DIR=${LARANODE_MANAGED_DIR:-/etc/laranode}
 UNIT_DIR=${LARANODE_UNIT_DIR:-/etc/systemd/system}
 PANEL_ENV=${LARANODE_PANEL_ENV:-/home/laranode_ln/panel/.env}
+MANIFEST="$DIR/service-manifest.json"
 
 install -d -m 0755 -o root -g root "$DIR" "$DIR/managed.d" "$DIR/sleep"
 
@@ -39,7 +42,21 @@ env_value() { # NAME default
     printf '%s' "${v:-$2}"
 }
 
+# manifest_allows <role>: 0 = allowed. With a manifest it must list a managed:true line
+# for the role; without one the caller falls back to the legacy behaviour.
+have_manifest() { [ -f "$MANIFEST" ]; }
+manifest_allows() {
+    grep -F '"managed":true' "$MANIFEST" | grep -qF "\"role\":\"$1\""
+}
+manifest_gate() { # role key ; returns 1 (and says why) when the manifest does not back it
+    have_manifest || return 0
+    manifest_allows "$1" && return 0
+    echo "skip $2: service manifest lists no Laranode-installed '$1' service (external, never managed)" >&2
+    return 1
+}
+
 register_reverb() {
+    manifest_gate reverb reverb || return 0
     [ -f "$UNIT_DIR/laranode-reverb.service" ] || { echo "skip reverb: laranode-reverb.service not installed" >&2; return 0; }
     local port
     port=$(env_value REVERB_SERVER_PORT 8080)
@@ -52,6 +69,7 @@ EOF
 }
 
 register_queue() {
+    manifest_gate queue queue || return 0
     [ -f "$UNIT_DIR/laranode-queue-worker.service" ] || { echo "skip queue: laranode-queue-worker.service not installed" >&2; return 0; }
     write_entry queue <<EOF
 kind=queue
@@ -60,18 +78,29 @@ EOF
 }
 
 register_fpm() {
+    manifest_gate php fpm || return 0
     write_entry fpm <<EOF
 kind=fpm
 EOF
 }
 
 register_hostdb() {
-    if [ "${LARANODE_DB_INSTALLED_BY_US:-0}" != 1 ]; then
+    if have_manifest; then
+        manifest_gate database hostdb || return 0
+    elif [ "${LARANODE_DB_INSTALLED_BY_US:-0}" != 1 ]; then
         echo "skip hostdb: database was not installed by Laranode (external, never managed)" >&2
         return 0
     fi
-    local engine unit sock cnf
-    if systemctl cat mariadb.service >/dev/null 2>&1; then engine=mariadb; unit=mariadb.service
+    local engine unit sock cnf mfunit=""
+    if have_manifest; then
+        # pin to the exact unit the installer recorded for the database it installed, so a
+        # pre-existing MySQL next to a Laranode-installed PostgreSQL is never picked up
+        mfunit=$(grep -F '"managed":true' "$MANIFEST" | grep -F '"role":"database"' | sed -n 's/.*"unit":"\([^"]*\)".*/\1/p' | head -1)
+        [[ $mfunit =~ ^(mysql|mariadb|mysqld)\.service$ ]] || { echo "skip hostdb: manifest database unit '$mfunit' is not MySQL/MariaDB" >&2; return 0; }
+        systemctl cat "$mfunit" >/dev/null 2>&1 || { echo "skip hostdb: $mfunit not found" >&2; return 0; }
+        unit=$mfunit
+        case $mfunit in mariadb.service) engine=mariadb ;; *) engine=mysql ;; esac
+    elif systemctl cat mariadb.service >/dev/null 2>&1; then engine=mariadb; unit=mariadb.service
     elif systemctl cat mysql.service >/dev/null 2>&1; then engine=mysql; unit=mysql.service
     else echo "skip hostdb: no MySQL/MariaDB unit found" >&2; return 0; fi
     # canonical unit (mysql.service is an alias of mariadb.service on Debian)
