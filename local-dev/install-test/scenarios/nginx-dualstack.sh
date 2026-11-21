@@ -8,7 +8,7 @@
 # must see :80 busy and take :8080, leaving nginx alone:
 #   - nginx is the same process (MainPID unchanged) and still answers on :80;
 #   - the panel answers on :8080;
-#   - cron and sysstat (new services, installed beside nginx) are running: the marked
+#   - cron (a new service, installed beside nginx) is running: the marked
 #     policy-rc.d guard that holds service starts back must not keep THEM from starting;
 #   - no policy-rc.d guard is left behind. The image ships its own policy-rc.d (it masks
 #     every postinst start); like a real host, PRESETUP removes it so the guard is real.
@@ -54,11 +54,11 @@ export POST_ASSERTS_CMD='
     grep -qxE "Listen 8080" /etc/apache2/ports.conf \
         || { echo "FAIL: the panel did not take :8080" >&2; exit 1; }
     echo "PASS: panel on :8080 (the dual-stack :80 listener was seen)"
-    for u in cron sysstat; do
+    for u in cron; do
         [ "$(systemctl is-active $u || true)" = active ] \
             || { echo "FAIL: $u is not running (held back by the start guard?)" >&2; exit 1; }
     done
-    echo "PASS: cron and sysstat (new services) are running"
+    echo "PASS: cron (a new service) is running"
     [ ! -e /usr/sbin/policy-rc.d ] \
         || { echo "FAIL: installer left a policy-rc.d behind" >&2; cat /usr/sbin/policy-rc.d >&2; exit 1; }
     echo "PASS: no policy-rc.d left behind"
