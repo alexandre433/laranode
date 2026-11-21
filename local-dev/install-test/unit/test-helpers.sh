@@ -11,6 +11,12 @@ INSTALLER="${SCRIPT_DIR}/../../../laranode-scripts/bin/laranode-installer.sh"
 # shellcheck source=/dev/null
 source "$INSTALLER"
 
+# Host-detection markers: pin the preflight tests to a plain Ubuntu 24.04 host
+# (no Proxmox, no CloudPanel) regardless of the machine running them.
+export LARANODE_OS_RELEASE_FILE="${SCRIPT_DIR}/fixtures/os-release.ubuntu-24.04"
+export LARANODE_PVE_DIR=/nonexistent-pve LARANODE_CLP_DIR=/nonexistent-clp
+unset LARANODE_BIND
+
 PASS=0; FAIL=0
 pass()  { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 flunk() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
