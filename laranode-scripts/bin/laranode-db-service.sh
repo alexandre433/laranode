@@ -1,7 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
-ln_need_root
+# The sleep-state test seam (same rule as laranode-sleep.sh: never honoured under sudo) lets the Pest
+# suite exercise the refusal as a non-root CI user; real calls are always root-checked.
+if ! { [ "${LARANODE_SLEEP_TEST:-}" = 1 ] && [ -z "${SUDO_UID:-}" ] && [ -n "${LARANODE_MANAGED_DIR:-}" ]; }; then ln_need_root; fi
 
 # Manage a database engine service (start / stop / restart)
 # Usage: laranode-db-service.sh <action> <engine>
