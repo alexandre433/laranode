@@ -1441,15 +1441,13 @@ phase_app() {
     log "APP_URL already '${cur_app_url}' — preserving (re-run safe)"
   fi
 
-  log "Installing sudoers drop-ins for www-data"
-  local drop SRC
-  for drop in laranode-panel laranode-cron laranode-runtimes laranode-ufw; do
-    SRC="${PANEL_PATH}/laranode-scripts/etc/sudoers.d/${drop}"
-    visudo -c -f "${SRC}" >/dev/null \
-      || die "sudoers file ${drop} failed syntax check — aborting"
-    install -m 440 "${SRC}" "/etc/sudoers.d/${drop}"
-  done
-  rm -f /etc/sudoers.d/laranode-postgres
+  # The scripts www-data may run as root live in a ROOT-OWNED copy, never in the panel
+  # checkout (which laranode_ln writes). The panel finds them through .env.
+  log "Installing the privileged scripts (root-owned) and sudoers drop-ins for www-data"
+  _install_privileged_scripts
+  _install_sudoers
+  env_set LARANODE_BIN_PATH "${LN_LIB_DEST}/bin" "${PANEL_PATH}/.env"
+  env_set LARANODE_TEMPLATES_PATH "${LN_LIB_DEST}/templates" "${PANEL_PATH}/.env"
 
   log "Running database migrations"
   /usr/bin/php8.4 artisan migrate --force \
@@ -1694,6 +1692,64 @@ _install_scheduler_cron() {
   log "Scheduler cron installed: ${dir}/laranode-schedule"
 }
 
+# ── Privileged scripts, sudoers, permissions ──────────────────────────────────
+#
+# Threat: www-data (the PHP user) runs scripts as root through sudo. If www-data, or
+# laranode_ln (which www-data is grouped with), can write the script, its directory, a
+# template it reads or a parent directory, www-data owns root. So:
+#   * the scripts, their lib/ and templates/ are COPIED to LN_LIB_DEST, owned by root,
+#     mode 755/644, and sudoers names files only inside it;
+#   * the panel checkout stays laranode_ln's (that is how the panel is updated) but is not
+#     group-writable: only storage/ and bootstrap/cache/ are. .env is 640.
+# Updating the scripts after a `git pull` is a deliberate root step:
+#   sudo /usr/local/lib/laranode/bin/laranode-sync-scripts.sh      (see docs/security-sudo.md)
+LN_LIB_DEST=/usr/local/lib/laranode
+
+_install_privileged_scripts() {
+  [ -f "${PANEL_PATH}/laranode-scripts/bin/laranode-sync-scripts.sh" ] \
+    || die "laranode-sync-scripts.sh missing from ${PANEL_PATH}/laranode-scripts/bin"
+  mkdir -p /usr/local/lib && chown root:root /usr/local/lib && chmod u=rwx,go=rx /usr/local/lib
+  bash "${PANEL_PATH}/laranode-scripts/bin/laranode-sync-scripts.sh" "${PANEL_PATH}" \
+    || die "could not install the privileged scripts into ${LN_LIB_DEST}"
+}
+
+_install_sudoers() {
+  local drop
+  for drop in laranode-panel laranode-cron laranode-runtimes laranode-ufw; do
+    [ -f "/etc/sudoers.d/${drop}" ] || die "sudoers drop-in ${drop} was not installed"
+    visudo -c -f "/etc/sudoers.d/${drop}" >/dev/null || die "sudoers drop-in ${drop} failed syntax check"
+  done
+  rm -f /etc/sudoers.d/laranode-postgres
+}
+
+_settle_permissions() {
+  local h=/home/laranode_ln p="${PANEL_PATH}"
+  mkdir -p "$h/logs"
+  chown -R laranode_ln:laranode_ln "$h"
+  # group (www-data) may read and traverse, never write
+  find "$h" -type d -exec chmod 750 {} +
+  find "$h" -type f -exec chmod 640 {} +
+  # the one place the web process writes inside the panel, plus its own log dir
+  chmod 770 "$h/logs"
+  find "$h/logs" -type f -exec chmod 660 {} +
+  if [ -d "$p/storage" ] || [ -d "$p/bootstrap/cache" ]; then
+    local d
+    for d in "$p/storage" "$p/bootstrap/cache"; do
+      [ -d "$d" ] || continue
+      find "$d" -type d -exec chmod 770 {} +
+      find "$d" -type f -exec chmod 660 {} +
+    done
+  fi
+  [ -f "$p/.env" ] && chmod 640 "$p/.env"
+  # the source copy of the scripts is only ever read (by the root sync): keep it that way
+  find "$p/laranode-scripts/bin" -type f -name '*.sh' -exec chmod 750 {} + 2>/dev/null || true
+  # the root-owned copy
+  if [ -d "${LN_LIB_DEST}" ]; then
+    chown -R root:root "${LN_LIB_DEST}"
+    chmod 755 "${LN_LIB_DEST}"
+  fi
+}
+
 phase_services() {
   log "Installing systemd service units"
   cp "${PANEL_PATH}/laranode-scripts/templates/laranode-queue-worker.service" \
@@ -1702,14 +1758,7 @@ phase_services() {
     /etc/systemd/system/laranode-reverb.service
 
   log "Setting file permissions"
-  mkdir -p /home/laranode_ln/logs
-  chown -R laranode_ln:laranode_ln /home/laranode_ln
-  find /home/laranode_ln -type d -exec chmod 770 {} \;
-  find /home/laranode_ln -type f -exec chmod 660 {} \;
-  find /home/laranode_ln/panel/laranode-scripts/bin -type f -exec chmod 100 {} \;
-  find /home/laranode_ln/panel/storage \
-       /home/laranode_ln/panel/bootstrap \
-       -type d -exec chmod 775 {} \;
+  _settle_permissions
 
   log "Enabling and starting services"
   systemctl daemon-reload
@@ -1729,10 +1778,10 @@ phase_services() {
 # Power page). Installs the sudoers drop-in and registers ONLY what the manifest above
 # lists as managed:true, so pre-existing services are never manageable.
 _install_sleep_wake() {
-  local src="${PANEL_PATH}/laranode-scripts/etc/sudoers.d/laranode-sleep"
+  local src="${LN_LIB_DEST}/etc/sudoers.d/laranode-sleep"
   if [ -f "$src" ] && visudo -c -f "$src" >/dev/null 2>&1; then
-    install -m 440 "$src" /etc/sudoers.d/laranode-sleep
-    bash "${PANEL_PATH}/laranode-scripts/bin/laranode-managed-register.sh" reverb queue fpm hostdb \
+    install -o root -g root -m 440 "$src" /etc/sudoers.d/laranode-sleep
+    bash "${LN_LIB_DEST}/bin/laranode-managed-register.sh" reverb queue fpm hostdb \
       || warn "sleep/wake registration failed; the feature stays unavailable"
     _reassert_sleep_wake
   else
@@ -1748,7 +1797,7 @@ _install_sleep_wake() {
 # bookkeeping (was_enabled/was_active) is kept by the script, so a later disable still
 # restores the original boot enablement. Best effort: a refusal only warns.
 _reassert_sleep_wake() {
-  local sleep_sh="${PANEL_PATH}/laranode-scripts/bin/laranode-sleep.sh"
+  local sleep_sh="${LN_LIB_DEST}/bin/laranode-sleep.sh"
   local dir="${LARANODE_MANAGED_DIR:-/etc/laranode}/sleep" k st idle
   [ -d "$dir" ] || return 0
   for k in reverb queue fpm hostdb; do

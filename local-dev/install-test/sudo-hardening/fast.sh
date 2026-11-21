@@ -18,7 +18,8 @@ echo "== provisioning (fast harness) =="
 export DEBIAN_FRONTEND=noninteractive
 command -v sudo >/dev/null || { apt-get update -qq && apt-get install -y -qq sudo >/dev/null; }
 
-: > "$LOG"
+mkdir -p /var/spool/stubcron && chmod 1777 /var/spool/stubcron
+: > "$LOG"; chmod 666 "$LOG"   # www-data runs some stubs (mysql restore/backup, cron)
 mkstub() {  # name [body]
     printf '#!/bin/sh\necho "%s $*" >> %s\n%s\nexit 0\n' "$1" "$LOG" "${2:-}" > "$STUB/$1"; chmod 755 "$STUB/$1"
 }
@@ -35,6 +36,7 @@ cat > "$STUB/crontab" <<'CT'
 echo "crontab $*" >> /var/log/laranode-stub.log
 mkdir -p /var/spool/stubcron
 u=$(id -un); [ "$1" = -u ] && { u=$2; shift 2; }
+[ "$1" = -- ] && shift
 case "$1" in
   -l) [ -f "/var/spool/stubcron/$u" ] && cat "/var/spool/stubcron/$u" || { echo "no crontab for $u" >&2; exit 1; } ;;
   -r) rm -f "/var/spool/stubcron/$u" ;;

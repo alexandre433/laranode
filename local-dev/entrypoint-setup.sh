@@ -2,7 +2,8 @@
 set -euo pipefail
 
 PANEL=/home/laranode_ln/panel
-BIN=/opt/laranode/bin
+LIB=/usr/local/lib/laranode
+BIN=$LIB/bin
 SENTINEL=/home/laranode_ln/.laranode-setup-done
 
 log() { echo -e "\033[34m[setup]\033[0m $*"; }
@@ -58,16 +59,13 @@ mysqladmin -u root ping >/dev/null 2>&1 || { log "ERROR: mysql did not start"; e
 # --- load env (for DB_PASSWORD, ADMIN_*, PGSQL_PASSWORD, etc.) ---
 set -a; . "$PANEL/local-dev/.env.docker"; set +a
 
-# --- linux-native bin dir with executable scripts + patched ssl-manager ---
-log "populating $BIN"
-mkdir -p "$BIN"
-cp -f /opt/laranode/bin-src/*.sh "$BIN"/
-cp -f "$PANEL/local-dev/bin/laranode-ssl-manager.sh" "$BIN/laranode-ssl-manager.sh"
-# Copy any scripts added directly to the panel's bin dir (e.g. laranode-cron.sh)
-for f in "$PANEL/laranode-scripts/bin/"*.sh; do
-    [ -f "$f" ] && cp -f "$f" "$BIN/$(basename "$f")"
-done
-chmod -R 0755 "$BIN"
+# --- root-owned copy of the privileged scripts (same layout as the installer) ---
+# The panel checkout is a bind mount writable by the host user, so the scripts www-data
+# may sudo are copied out to /usr/local/lib/laranode (root-owned), exactly like production.
+log "installing privileged scripts into $LIB"
+bash "$PANEL/laranode-scripts/bin/laranode-sync-scripts.sh" "$PANEL"
+# lab-only: ssl-manager patched to talk to the Pebble ACME sidecar (same guards as the real one)
+install -o root -g root -m 755 "$PANEL/local-dev/bin/laranode-ssl-manager.sh" "$BIN/laranode-ssl-manager.sh"
 
 # --- PostgreSQL: provision stats-reader role ---
 # PGSQL_PASSWORD is now available from .env.docker (loaded above).
@@ -88,8 +86,7 @@ SQL
 
 # Apply postgres sudoers drop-in
 log "writing postgres sudoers"
-cp -f "$PANEL/laranode-scripts/bin/laranode-postgres-sudoers" /etc/sudoers.d/laranode-postgres
-chmod 440 /etc/sudoers.d/laranode-postgres
+install -o root -g root -m 440 "$LIB/bin/laranode-postgres-sudoers" /etc/sudoers.d/laranode-postgres
 
 # Smoke test (BIN is now populated above)
 log "postgres smoke test"
@@ -97,27 +94,9 @@ sudo "$BIN/laranode-postgres.sh" create-db ln_smoke_test UTF8 en_US.UTF-8
 sudo "$BIN/laranode-postgres.sh" drop-db ln_smoke_test
 log "postgres smoke test PASSED"
 
-# --- container sudoers (www-data runs the scripts; mirrors installer line 172 + new path) ---
-log "writing sudoers"
-cat > /etc/sudoers.d/laranode <<EOF
-www-data ALL=(ALL) NOPASSWD: $BIN/*.sh, /usr/sbin/a2dissite, /bin/rm /etc/apache2/sites-available/*.conf
-EOF
-chmod 440 /etc/sudoers.d/laranode
-
-# --- cron sudoers drop-in (grants www-data NOPASSWD for laranode-cron.sh at panel path) ---
-log "writing laranode-cron sudoers drop-in"
-cp -f "$PANEL/laranode-scripts/etc/sudoers.d/laranode-cron" /etc/sudoers.d/laranode-cron
-chmod 440 /etc/sudoers.d/laranode-cron
-
-# --- runtimes sudoers drop-in (grants www-data NOPASSWD for runtime scripts) ---
-log "writing laranode-runtimes sudoers drop-in"
-cp -f "$PANEL/laranode-scripts/etc/sudoers.d/laranode-runtimes" /etc/sudoers.d/laranode-runtimes
-chmod 440 /etc/sudoers.d/laranode-runtimes
-
-# --- firewall (UFW) sudoers drop-in (firewall Actions call `sudo ufw` directly) ---
-log "writing laranode-ufw sudoers drop-in"
-cp -f "$PANEL/laranode-scripts/etc/sudoers.d/laranode-ufw" /etc/sudoers.d/laranode-ufw
-chmod 440 /etc/sudoers.d/laranode-ufw
+# --- sudoers: laranode-sync-scripts.sh already installed the named drop-ins (panel, cron,
+# runtimes, ufw) from the root-owned copy. Nothing here globs a directory.
+rm -f /etc/sudoers.d/laranode   # retired wildcard grant from older lab builds
 
 # --- enable Apache proxy modules (required for FrankenPHP/Swoole) ---
 log "enabling apache proxy modules"

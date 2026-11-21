@@ -75,11 +75,11 @@ install-test-rerun:
 	bash local-dev/install-test/run.sh rerun
 
 sync-scripts:
-	$(EXEC) 'cp -f /opt/laranode/bin-src/*.sh /opt/laranode/bin/ && cp -f /home/laranode_ln/panel/local-dev/bin/laranode-ssl-manager.sh /opt/laranode/bin/ && chmod -R 0755 /opt/laranode/bin'
+	$(EXEC) 'bash /home/laranode_ln/panel/laranode-scripts/bin/laranode-sync-scripts.sh /home/laranode_ln/panel && install -o root -g root -m 755 /home/laranode_ln/panel/local-dev/bin/laranode-ssl-manager.sh /usr/local/lib/laranode/bin/laranode-ssl-manager.sh'
 
 ssl-test:
 	$(COMPOSE) --profile ssl up -d
-	$(EXEC) 'sudo LARANODE_ACME_SERVER=$${LARANODE_ACME_SERVER:-https://pebble:14000/dir} /opt/laranode/bin/laranode-ssl-manager.sh status localhost || true'
+	$(EXEC) 'sudo LARANODE_ACME_SERVER=$${LARANODE_ACME_SERVER:-https://pebble:14000/dir} /usr/local/lib/laranode/bin/laranode-ssl-manager.sh status localhost || true'
 
 logs:
 	$(COMPOSE) logs -f

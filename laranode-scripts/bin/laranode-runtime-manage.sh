@@ -1,46 +1,26 @@
 #!/bin/bash
 set -euo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
+ln_need_root
+LN_ARGC=$#
 
 # laranode-runtime-manage.sh <action> <unit-name>
 # Manages systemd lifecycle for a Laranode runtime unit.
-# Called via sudo by SwitchRuntimeService.
+# Called via sudo by SwitchRuntimeService / DeleteWebsiteService.
+ln_argc 2 2 "$0 <action> <unit-name>"
+ln_enum "$1" ACTION enable disable start stop restart status remove
+UNIT=$2
 
-# ---- arg validation ----
-if [ $# -ne 2 ]; then
-    echo "Usage: $0 <action> <unit-name>" >&2
-    exit 1
+# laranode-(frankenphp|swoole)-<domain>.service and nothing else
+if [[ $UNIT =~ ^laranode-(frankenphp|swoole)-(.+)\.service$ ]]; then
+    ln_domain "${BASH_REMATCH[2]}" _unit_domain
+else
+    ln_die "invalid unit name"
 fi
 
-ACTION="$1"
-UNIT="$2"
-
-# Reject leading-dash args
-case "$ACTION" in -*) echo "Invalid action: $ACTION" >&2; exit 1 ;; esac
-case "$UNIT"   in -*) echo "Invalid unit: $UNIT" >&2; exit 1 ;; esac
-
-# Validate action
-if ! echo "$ACTION" | grep -qE '^(enable|disable|start|stop|restart|status|remove)$'; then
-    echo "Invalid action '$ACTION'. Must be: enable|disable|start|stop|restart|status|remove" >&2
-    exit 1
-fi
-
-# Validate unit name — must be a Laranode runtime unit only
-# Pattern: laranode-(frankenphp|swoole)-<slug>.service
-# Slug: alphanumeric, dots, hyphens, underscores — NO slashes (prevents path traversal)
-if ! echo "$UNIT" | grep -qE '^laranode-(frankenphp|swoole)-[a-zA-Z0-9._-]+\.service$'; then
-    echo "Invalid unit name '$UNIT'. Must match laranode-(frankenphp|swoole)-<slug>.service" >&2
-    exit 1
-fi
-# Reject consecutive dots in unit name (punch-list #4 — prevents foo..bar.service traversal)
-if echo "$UNIT" | grep -qE '\.\.'; then
-    echo "Invalid unit name '$UNIT': consecutive dots not allowed." >&2
-    exit 1
-fi
-
-# ---- dispatch ----
 if [ "$ACTION" = "remove" ]; then
     systemctl disable --now "$UNIT" 2>/dev/null || true
-    rm -f "/etc/systemd/system/$UNIT"
+    rm -f -- "/etc/systemd/system/$UNIT"
     systemctl daemon-reload
     echo "Removed unit $UNIT"
     exit 0

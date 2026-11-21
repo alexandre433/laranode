@@ -58,7 +58,7 @@ class SwitchRuntimeService
         }
 
         $binPath = config('laranode.laranode_bin_path');
-        $templateDir = base_path('laranode-scripts/templates');
+        $templateDir = rtrim(config('laranode.templates_path'), '/');
         $systemUser = $website->user->systemUsername;
         $phpVersion = $website->phpVersion->version;
         $documentRoot = $website->document_root;

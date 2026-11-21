@@ -92,6 +92,9 @@ NL=$'\n'
 HUSER=( root root_ln '../../etc/x' 'alice_ln x' "alice_ln${NL}root:Pwned" 'a;id' '-n' '*' nobody postgres '' 'alice_ln/..' '$(id)' svc svc_ln laranode_ln_x ../alice_ln )
 V_user=alice;   H_user=( "${HUSER[@]}" )
 V_userln=alice_ln; H_userln=( "${HUSER[@]}" )
+# pool removal runs AFTER the account is gone (DeleteAccountService), so it accepts any well-formed
+# name; only malformed names and the panel's own user are hostile there.
+V_userrm=alice; H_userrm=( '../../etc/x' 'alice_ln x' "alice_ln${NL}root:Pwned" 'a;id' '-n' '*' '' 'alice_ln/..' '$(id)' laranode ../alice_ln )
 V_newuser=carol; H_newuser=( '../x' 'a b' "a${NL}b" 'a;id' '-n' '*' '' "$(printf 'x%.0s' {1..60})" 'a:b' laranode )
 V_domain=example.com
 H_domain=( '../x' 'a/b' 'a b' "a${NL}b" '-x.com' '*' 'x.com;id' 'x..com' '' 'a.com/../../etc/cron.d/x' '.hidden' 'a.com.' 'a$(id).com' 'a|b.com' '-' 'a#b.com' )
@@ -141,6 +144,7 @@ V_status=status; H_status=( bogus -x "status${NL}x" '' )
 V_remove=remove; H_remove=( bogus -x "remove${NL}x" '' )
 V_generate=generate; H_generate=( bogus -x "generate${NL}x" '' )
 V_cronset=list; H_cronset=( bogus -x "list${NL}x" '' 'list;id' )
+V_cronsetc=set; H_cronsetc=( bogus -x "set${NL}x" '' 'set;id' )
 V_create=create; H_create=( bogus -x "create${NL}x" '' )
 V_delete=delete; H_delete=( bogus -x "delete${NL}x" '' )
 V_sslroot=/home/alice_ln/domains/example.com/public
@@ -159,8 +163,8 @@ SPECS=(
  'php-list|laranode-php-list.sh|root||true'
  'php-service|laranode-php-service.sh|root|phpaction phpver|grep -q "systemctl restart php8.4-fpm" /var/log/laranode-stub.log'
  'php-uninstall|laranode-php-uninstall.sh|root|phpver|grep -q "apt-get remove" /var/log/laranode-stub.log'
- 'remove-all-pools|laranode-remove-all-user-php-fpm-pools.sh|root|user|[ ! -e /etc/php/8.4/fpm/pool.d/alice_ln.conf ]'
- 'remove-pool-user|laranode-remove-php-fpm-pool-for-user.sh|root|user phpver|[ ! -e /etc/php/8.4/fpm/pool.d/alice_ln.conf ]'
+ 'remove-all-pools|laranode-remove-all-user-php-fpm-pools.sh|root|userrm|[ ! -e /etc/php/8.4/fpm/pool.d/alice_ln.conf ]'
+ 'remove-pool-user|laranode-remove-php-fpm-pool-for-user.sh|root|userrm phpver|[ ! -e /etc/php/8.4/fpm/pool.d/alice_ln.conf ]'
  'restart-php-fpm|laranode-restart-php-fpm.sh|root|phpver|true'
  'restore-db|laranode-restore-db.sh|root|cnf tmpin_sql dbname dbuser|grep -q "select 1" /tmp/mysql-stdin-last'
  'restore-files|laranode-restore-files.sh|root|tmpin_tar destdir userln|[ "$(stat -c %U /home/alice_ln/domains/example.com/restored.txt)" = alice_ln ]'
@@ -174,7 +178,7 @@ SPECS=(
  'user-delete|laranode-user-manager.sh|root|delete user|! getent passwd alice_ln >/dev/null'
  'db-service|laranode-db-service.sh|root|dbaction dbengine|grep -q "systemctl restart mysql" /var/log/laranode-stub.log'
  'cron-list|laranode-cron.sh|www-data|cronset userln|true'
- 'cron-set|laranode-cron.sh|www-data|cronset userln crontmp|true'
+ 'cron-set|laranode-cron.sh|www-data|cronsetc userln crontmp|true'
  'ssl-status|laranode-ssl-manager.sh|root|status domain|true'
  'ssl-remove|laranode-ssl-manager.sh|root|remove domain|true'
  'ssl-generate|laranode-ssl-manager.sh|root|generate domain email sslroot|grep -q "certbot certonly" /var/log/laranode-stub.log'

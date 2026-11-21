@@ -1,33 +1,35 @@
 #!/bin/bash
-# Check if at least two arguments are provided (path and system user)
-if [ $# -lt 2 ]; then
-  echo "Usage: $0 {path} {system user}"
-  exit 1
-fi
+set -euo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
+ln_need_root
+LN_ARGC=$#
 
-SYSTEM_USER=$2
-# Automatically append _ln to $USERNAME if not already present
-if echo "$SYSTEM_USER" | grep -qv '_ln$'; then
-    SYSTEM_USER+="_ln"
-fi
-
-TARGET_PATH="/home/$SYSTEM_USER/$1"
-# remove duplicate slashes
-TARGET_PATH=$(echo "$TARGET_PATH" | tr -s '/')
+# Usage: laranode-file-permissions.sh {path relative to the home} {system user}
+# Sets 660 (file) / 770 (dir) and the owner, as the site user, on a path inside the home.
+ln_argc 2 2 "$0 {path} {system user}"
+ln_sysuser "$2" SYSTEM_USER
+REL=$1
+[ "${#REL}" -le 1024 ] && [[ $REL =~ ^[A-Za-z0-9._/-]+$ ]] || ln_die "invalid path"
+[[ $REL =~ (^|/)\.\.(/|$) ]] && ln_die "invalid path"
+REL=$(printf '%s' "$REL" | tr -s '/')
+REL=${REL#/}
+HOME_DIR="/home/$SYSTEM_USER"
+TARGET_PATH="$HOME_DIR/$REL"
+[ ! -L "$TARGET_PATH" ] || ln_die "refusing a symlink"
 
 echo "Setting permissions for $TARGET_PATH"
 
-# Set file permissions
-if [ -f "$TARGET_PATH" ]; then
-    echo "$1 is a file. Doing 660"
-    chmod 660 "$TARGET_PATH"
+# Hold the inode, prove it is inside the home, then act on the held fd only: a tenant
+# that swaps a path component for a symlink after this point changes nothing.
+ln_open9_under "$TARGET_PATH" "$HOME_DIR"
+if [ -f /proc/self/fd/9 ]; then
+    echo "$REL is a file. Doing 660"
+    chmod 660 /proc/self/fd/9
+    chown "$SYSTEM_USER:$SYSTEM_USER" /proc/self/fd/9
+elif [ -d /proc/self/fd/9 ]; then
+    echo "$REL is a directory. Doing 770"
+    chmod 770 /proc/self/fd/9
+    chown "$SYSTEM_USER:$SYSTEM_USER" /proc/self/fd/9
+else
+    ln_die "not a regular file or directory"
 fi
-
-# Set directory permissions
-if [ -d "$TARGET_PATH" ]; then
-    echo "$1 is a directory. Doing 770"
-    chmod 770 "$TARGET_PATH"
-fi
-
-# Change owner to system user
-chown "$SYSTEM_USER:$SYSTEM_USER" "$TARGET_PATH"

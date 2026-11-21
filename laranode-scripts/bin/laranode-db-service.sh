@@ -1,5 +1,7 @@
 #!/bin/bash
 set -euo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
+ln_need_root
 
 # Manage a database engine service (start / stop / restart)
 # Usage: laranode-db-service.sh <action> <engine>

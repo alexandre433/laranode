@@ -1,54 +1,41 @@
 #!/bin/bash
+set -euo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
+ln_need_root
+LN_ARGC=$#
 
-# Check if at least two arguments are provided (action and username)
-if [ $# -lt 2 ]; then
-  echo "Usage: $0 {create|delete} username {allow shell/ssh login (optional): yes|no} {password (required if allow shell/ssh login is yes)}"
-  exit 1
-fi
-
-ACTION=$1
-USERNAME=$2
-ALLOW_LOGIN=${3:-no}  # Default to "no" if not specified
-PASSWORD=$4
+# Usage: laranode-user-manager.sh {create|delete} username {allow shell/ssh login: yes|no} {password}
+ln_argc 2 4 "$0 {create|delete} username {allow shell/ssh login (optional): yes|no} {password (required if allow shell/ssh login is yes)}"
+ln_enum "$1" ACTION create delete
+ALLOW_LOGIN=no
+[ $# -ge 3 ] && ln_enum "$3" ALLOW_LOGIN yes no
+PASSWORD=
+if [ $# -ge 4 ]; then ln_secret "$4" PASSWORD; fi
 
 # Ensure password is provided if allow shell/ssh login is "yes"
 if [ "$ALLOW_LOGIN" = "yes" ] && [ -z "$PASSWORD" ]; then
-  echo "Error: Password is required when allow shell/ssh login is 'yes'."
+  echo "Error: Password is required when allow shell/ssh login is 'yes'." >&2
   exit 1
-fi
-
-# Automatically append _ln to $USERNAME if not already present
-if echo "$USERNAME" | grep -qv '_ln$'; then
-  USERNAME+="_ln"
 fi
 
 # Function to create a user
 create_user() {
+  ln_newuser "$1" USERNAME
   # Check if the user already exists
   if id "$USERNAME" &>/dev/null; then
     echo "User $USERNAME already exists."
     exit 1
   fi
 
-  # Create the user
+  # Create the user (a login shell only when asked for)
   if [ "$ALLOW_LOGIN" = "yes" ]; then
-    # Create user with login shell
-    useradd -m "$USERNAME"
-    if [ $? -ne 0 ]; then
-      echo "Error: Failed to create user $USERNAME."
-      exit 1
-    fi
-
-    # add password to user
-    echo "$USERNAME:$PASSWORD" | chpasswd
+    # -s explicit: useradd would fall back to /bin/sh (upstream crivion/laranode fe77fd0)
+    useradd -m -s /bin/bash -- "$USERNAME"
+    # password goes to chpasswd on stdin, one validated line
+    printf '%s:%s\n' "$USERNAME" "$PASSWORD" | chpasswd
     echo "User $USERNAME created successfully with SSH login allowed."
   else
-    # Create user with no login shell
-    useradd -m -s /usr/sbin/nologin "$USERNAME"
-    if [ $? -ne 0 ]; then
-      echo "Error: Failed to create user $USERNAME."
-      exit 1
-    fi
+    useradd -m -s /usr/sbin/nologin -- "$USERNAME"
     echo "User $USERNAME created successfully with no SSH login."
   fi
 
@@ -70,37 +57,18 @@ create_user() {
 
 # Function to delete a user
 delete_user() {
-  # Check if the user exists
-  if ! id "$USERNAME" &>/dev/null; then
-    echo "User $USERNAME does not exist."
-    exit 1
-  fi
+  ln_sysuser "$1" USERNAME   # existing, uid >= 1000, home /home/<user>, never the panel user
 
   # remove this user from www-data's groups
-  deluser www-data "$USERNAME"
+  gpasswd -d www-data "$USERNAME" >/dev/null 2>&1 || true   # gpasswd ships with passwd; deluser needs the adduser package
 
   # Delete the user and their home directory
-  userdel -r "$USERNAME"
-  if [ $? -ne 0 ]; then
-    echo "Error: Failed to delete user $USERNAME."
-    exit 1
-  fi
-
+  userdel -r -- "$USERNAME"
 
   echo "User $USERNAME deleted successfully."
 }
 
-# Perform the action based on the first argument (create or delete)
 case $ACTION in
-  create)
-    create_user
-    ;;
-  delete)
-    delete_user
-    ;;
-  *)
-    echo "Error: Invalid action. Use 'create' or 'delete'."
-    exit 1
-    ;;
+  create) create_user "$2" ;;
+  delete) delete_user "$2" ;;
 esac
-

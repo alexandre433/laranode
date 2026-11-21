@@ -1,39 +1,35 @@
 #!/bin/bash
+set -euo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
+ln_need_root
+LN_ARGC=$#
 
-if [ -z "$1" ]; then
-    echo "Usage: $0 SYSTEM_USER"
-    exit 1
-fi
+# Usage: laranode-remove-all-user-php-fpm-pools.sh {system user}
+ln_argc 1 1 "$0 SYSTEM_USER"
+# syntax only: account deletion removes the account first, then its pools
+ln_sysuser "$1" SYSTEM_USER syntax
 
-SYSTEM_USER="$1"
 count=0
 affected_versions=()
 
-# Find and process pool configs
-while IFS= read -r file; do
-    if [ -f "$file" ]; then
-        version=$(echo "$file" | grep -oP '/etc/php/\K[0-9]+\.[0-9]+')
-        echo "Removing $file"
-        rm -v "$file"
-        affected_versions+=("$version")
-        ((count++))
-    fi
-done < <(find /etc/php/*/fpm/pool.d -name "${SYSTEM_USER}.conf")
+# Find and process pool configs (SYSTEM_USER is validated: no glob characters)
+for file in /etc/php/*/fpm/pool.d/"$SYSTEM_USER".conf; do
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    [[ $file =~ ^/etc/php/([0-9]+\.[0-9]+)/fpm/pool\.d/ ]] || continue
+    echo "Removing $file"
+    rm -v -- "$file"
+    affected_versions+=("${BASH_REMATCH[1]}")
+    count=$((count + 1))
+done
 
 echo "Removed $count pool configuration(s)"
 
 # Restart only affected PHP-FPM versions
 for version in "${affected_versions[@]}"; do
     echo "Restarting php${version}-fpm"
-    #systemctl restart "php${version}-fpm"
-
-    # get pid of this php-fpm and USR2 it
-    #PID_FILE="/var/run/php/php${version}-fpm.pid"
-    #kill -USR2 $(cat "$PID_FILE")
-
     (sleep 2 && systemctl reload "php${version}-fpm") >/dev/null 2>&1 &
 done
 
-if [ $count -eq 0 ]; then
+if [ "$count" -eq 0 ]; then
     echo "No pool configurations found for $SYSTEM_USER"
 fi
