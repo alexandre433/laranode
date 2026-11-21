@@ -41,6 +41,7 @@ NGX
     md5sum /etc/postgresql/*/main/pg_hba.conf > /root/hba.before
     pg_lsclusters --no-header > /root/pg.before
     dpkg -s mariadb-server | sed -n "s/^Version: //p" > /root/db.version.before
+    systemctl show -p MainPID --value php8.4-fpm > /root/phpfpm.pid.before
     for _ in $(seq 1 15); do ss -tlnH "( sport = :80 )" | grep -q . && break; sleep 1; done
     echo "PRESETUP: clp-like host ready (nginx 80/443/8080, mariadb, pg, ufw, php8.4)"
 '
@@ -61,6 +62,9 @@ export POST_ASSERTS_CMD='
     [ "$(curl -sk --max-time 5 https://127.0.0.1:443/)" = "NGINX_443" ] || { echo "FAIL: nginx :443 changed" >&2; exit 1; }
     [ "$(curl -s --max-time 5 http://127.0.0.1:8080/)" = "VARNISH_BACKEND_8080" ] || { echo "FAIL: :8080 backend changed" >&2; exit 1; }
     echo "PASS: nginx :80, :443 and the :8080 backend untouched"
+    # the pre-existing php8.4-fpm was reloaded at most, never restarted
+    [ "$(systemctl show -p MainPID --value php8.4-fpm)" = "$(cat /root/phpfpm.pid.before)" ] || { echo "FAIL: php8.4-fpm was restarted" >&2; exit 1; }
+    echo "PASS: php8.4-fpm MainPID unchanged (never restarted)"
     # PostgreSQL 16 untouched
     pg_lsclusters --no-header | diff -q - /root/pg.before >/dev/null || { echo "FAIL: pg clusters changed" >&2; pg_lsclusters >&2; exit 1; }
     md5sum /etc/postgresql/*/main/pg_hba.conf | diff -q - /root/hba.before >/dev/null || { echo "FAIL: pg_hba.conf changed" >&2; exit 1; }

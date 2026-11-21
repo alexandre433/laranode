@@ -83,22 +83,28 @@ back to `:8080` when `:80` is occupied.
 | `LARANODE_OS` | auto-detect | `ubuntu` or `debian`: force the package path for a derivative distro (VERSION_ID must still be 24.04 / 13) |
 | `LARANODE_BIND` | `local` on Proxmox/CloudPanel, else `all` | `all`, `local` (127.0.0.1) or an IPv4. Panel Apache vhost and Reverb listen only there; reach a local-bound panel over an SSH tunnel |
 | `LARANODE_DATA_DIR` | — | Fresh PostgreSQL install only: put cluster data under `<dir>/postgresql/<ver>/<cluster>` (e.g. a bigger disk) |
-| `LARANODE_UNATTENDED` | `0` | `1` = take all defaults, suppress all prompts and `confirm` gates |
+| `LARANODE_UNATTENDED` | `0` | `1` = take all defaults, suppress all prompts and `confirm` gates. Without a TTY and without `1` the install stops at the confirmation (no silent proceed) |
 
 ### Supported hosts
 
 Ubuntu 24.04 and Debian 13 (trixie); anything else is refused with a clear message.
 Debian uses its own `php8.4` and PostgreSQL 17 (no ondrej/sury repo). Ubuntu keeps the ondrej PPA.
 Every `apt-get install` is simulated first (`apt_install`): the installer dies if apt would
-**remove** any package, and on Proxmox/CloudPanel hosts also if it would **upgrade** a host-stack
-package (pve-*, percona-*, nginx, php*, postgresql*, ...).
+**remove** any package, or **upgrade** a host-stack package (pve-*, percona-*, nginx, php8.x-*,
+postgresql*, openssh-server, ...) — on every host, not just Proxmox/CloudPanel — and runs with
+`--no-upgrade`. `needrestart` is held to list-only (`NEEDRESTART_MODE=l`) so apt cannot restart host services.
+An unsupported OS is refused before the first apt call. `.env` (DB password) is created 0640 and
+`/home/laranode_ln` 0750 from the start; MySQL passwords never appear in process arguments.
+Pre-existing Apache / php-fpm (manifest `managed:false`) are never restarted: a running one gets a graceful
+`reload`, a stopped one a `start`; only units this installer installed are restarted.
 
 
 ### Safe on hosts with existing services
 
 | Pre-existing condition | Installer behaviour |
 |------------------------|---------------------|
-| Apache / nginx on :80 | Panel vhost written to `laranode.conf` on :8080; existing server fully untouched |
+| nginx on :80 | Panel vhost written to `laranode.conf` on :8080; existing server fully untouched |
+| Apache on :80 (live sites) | Its `Listen`/`000-default`/sites/mod_ssl are never changed; panel gets its own vhost + `Listen 8080` (PHP-FPM handler inline in that vhost, no global `a2enconf`); Apache is **gracefully reloaded** (same PID, no dropped connections), never restarted or `a2dissite`d. `LARANODE_BIND` + :80 is refused (cannot narrow its wildcard `Listen 80`) |
 | MySQL with a root password | Authenticates with `LARANODE_MYSQL_ROOT_PASSWORD`; root password **never changed** |
 | Multiple Postgres clusters | `LARANODE_PG_PORT` required; only that cluster's socket is touched |
 | System `php` not 8.4 | `php8.4` packages installed additively; system default left unchanged; panel calls/units use `/usr/bin/php8.4` |
@@ -143,9 +149,9 @@ installer, and assert services active + HTTP 200 + admin login. Run from the rep
     make -f local-dev/Makefile install-test-unit       # host helper + host-detection unit tests (no container, ~2 s)
     make -f local-dev/Makefile install-test-templates  # host template-content tests (no container)
     make -f local-dev/Makefile install-test            # baseline scenario only
-    make -f local-dev/Makefile install-test-matrix     # all 8 scenarios (~1-2 hr)
+    make -f local-dev/Makefile install-test-matrix     # all 9 scenarios (~1-2 hr)
 
-Scenarios: `baseline` | `nginx80` | `mysql-rootpw` | `pgsql` | `rerun` | `debian13` | `pve` | `cloudpanel`.
+Scenarios: `baseline` | `nginx80` | `mysql-rootpw` | `pgsql` | `rerun` | `debian13` | `pve` | `cloudpanel` | `apache80`.
 Run or debug a single scenario:
 
     bash local-dev/install-test/run.sh pgsql

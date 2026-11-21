@@ -5,7 +5,7 @@
 #   bash local-dev/install-test/run.sh              # baseline (default)
 #   bash local-dev/install-test/run.sh baseline     # explicit
 #   bash local-dev/install-test/run.sh pgsql        # named scenario
-#   bash local-dev/install-test/run.sh matrix       # all 8, fail-fast off, summary
+#   bash local-dev/install-test/run.sh matrix       # all 9, fail-fast off, summary
 #
 # Per-run options (env):
 #   KEEP=1   keep container after run for inspection
@@ -15,7 +15,7 @@ export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 SCENARIO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/scenarios" && pwd)"
 ARG="${1:-baseline}"
 
-ALL_SCENARIOS=(baseline nginx80 mysql-rootpw pgsql rerun debian13 pve cloudpanel)
+ALL_SCENARIOS=(baseline nginx80 mysql-rootpw pgsql rerun debian13 pve cloudpanel apache80)
 
 if [ "$ARG" = matrix ]; then
     declare -a pass=()

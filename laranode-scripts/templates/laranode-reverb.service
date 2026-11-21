@@ -4,6 +4,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+User=laranode_ln
+Group=laranode_ln
 ExecStart=/usr/bin/php8.4 /home/laranode_ln/panel/artisan reverb:start
 Restart=on-failure
 RestartSec=5s

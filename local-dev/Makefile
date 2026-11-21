@@ -55,7 +55,7 @@ build-assets:
 # Clean-room install tests. Each boots a vanilla ubuntu:24.04 container, runs
 # the REAL installer, and asserts services + HTTP + admin login.
 #   install-test        — baseline only (mysql, :80); fastest signal
-#   install-test-matrix — all 8 scenarios sequentially; ~1-2 hr total
+#   install-test-matrix — all 9 scenarios sequentially; ~1-2 hr total
 #   install-test-unit   — host-only helper tests; no container; seconds
 install-test:
 	bash local-dev/install-test/run.sh

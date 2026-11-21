@@ -161,7 +161,6 @@ apt_removal()     { base; apt_run $'Remv percona-server-server [8.4.7]\nInst mys
 apt_upgrade_clp() { base; IS_CLOUDPANEL=1; apt_run 'Inst nginx-common [1.28.0-1+clp-noble] (1.29 Ubuntu)'; apt_refused && printf '%s' "$OUT" | grep -q nginx-common; }
 apt_upgrade_pve() { base; IS_PROXMOX=1;    apt_run 'Inst pve-manager [9.2.21] (9.3.0 Proxmox)'; apt_refused && printf '%s' "$OUT" | grep -q pve-manager; }
 apt_benign_upgrade_clp() { base; IS_CLOUDPANEL=1; apt_run $'Inst libcurl4 [8.5.0] (8.5.1 Ubuntu)\nInst apache2 (2.4 Ubuntu)'; apt_passed; }
-apt_plain_upgrade_ok()   { base; apt_run 'Inst nginx-common [1.0] (1.1 Ubuntu)'; apt_passed; }
 apt_new_install_clp()    { base; IS_CLOUDPANEL=1; apt_run 'Inst apache2 (2.4 Ubuntu)'; apt_passed; }
 apt_sim_fails() {
   base; CALLS=$(mktemp)
@@ -173,7 +172,6 @@ t "CloudPanel host: refuses when apt would UPGRADE nginx (no real install)"     
 t "Proxmox host: refuses when apt would UPGRADE pve-manager (no real install)"      apt_upgrade_pve
 t "CloudPanel host: unrelated library upgrade passes through"                       apt_benign_upgrade_clp
 t "CloudPanel host: fresh install of a new package passes through"                  apt_new_install_clp
-t "plain host: protected-looking upgrade passes (guard is host-scoped)"             apt_plain_upgrade_ok
 t "apt_install refuses when the simulation fails (unknown package)"                 apt_sim_fails
 
 # ---- MySQL branch must not install over Percona ------------------------------
@@ -375,6 +373,155 @@ npm_legacy_peers() { grep -qE '^[[:space:]]+npm install --legacy-peer-deps$' "$I
 npm_dom_explicit() { grep -q '"@testing-library/dom"' "${SCRIPT_DIR}/../../../package.json"; }
 t "installer runs npm install --legacy-peer-deps (arborist edgesOut crash)"     npm_legacy_peers
 t "package.json lists @testing-library/dom explicitly (peer of RTL 16)"          npm_dom_explicit
+
+
+# ==============================================================================
+# PR #4 review fixes (each test must FAIL on the pre-fix installer)
+# ==============================================================================
+
+# ---- 1. a pre-existing Apache keeps every Listen it had ----------------------
+echo "=== pre-existing Apache keeps its listeners ==="
+ports_pre_8080()  { ports_run :; APACHE_OWNED=0; HTTP_PORT=8080 BIND_ADDR=""; _apache_ports_conf "$p"; grep -qxE 'Listen 80' "$p" && grep -qxE 'Listen 8080' "$p"; }
+ports_pre_bound() { ports_run :; APACHE_OWNED=0; HTTP_PORT=8090 BIND_ADDR=127.0.0.1; _apache_ports_conf "$p"; grep -qxE 'Listen 80' "$p" && grep -qxE 'Listen 127.0.0.1:8090' "$p"; }
+ports_pre_443_untouched() { ports_run :; APACHE_OWNED=0; HTTP_PORT=8090 BIND_ADDR=127.0.0.1; _apache_ports_conf "$p"; [ "$(grep -cE '^[[:space:]]*Listen 443' "$p")" = 2 ]; }
+ports_pre_idem()  { ports_run :; APACHE_OWNED=0; HTTP_PORT=8080 BIND_ADDR=""; _apache_ports_conf "$p"; _apache_ports_conf "$p"; [ "$(grep -cxE 'Listen 8080' "$p")" = 1 ]; }
+t "pre-existing Apache + panel on 8080: stock 'Listen 80' kept, 'Listen 8080' added" ports_pre_8080
+t "pre-existing Apache + bound panel: 'Listen 80' kept, scoped panel Listen added"   ports_pre_bound
+t "pre-existing Apache: its own 'Listen 443' is never rewritten"                    ports_pre_443_untouched
+t "pre-existing Apache: re-run does not duplicate the panel Listen"                 ports_pre_idem
+
+pre_env() { base; export LARANODE_MANIFEST_FILE=/nonexistent-manifest; pkg_installed() { [ "$1" = apache2 ]; }; port_in_use() { [ "$1" = 80 ]; }; ss() { echo 'LISTEN 0 511 *:80 *:* users:(("apache2",pid=1,fd=4))'; }; }
+pf_pre_apache_bind_80() { pre_env; export LARANODE_HTTP_PORT=80 LARANODE_BIND=local; preflight; }
+pf_pre_apache_open_80() { pre_env; export LARANODE_HTTP_PORT=80; preflight; expect HTTP_PORT "$HTTP_PORT" 80; }
+pf_pre_apache_default() { pre_env; preflight; expect HTTP_PORT "$HTTP_PORT" 8080 && expect APACHE_OWNED "$APACHE_OWNED" 0; }
+pf_own_apache_bind_80() {  # re-run of our own bound install: manifest says apache2 is ours
+  pre_env; mf=$(mktemp); echo '{"unit":"apache2.service","managed":true,"role":"web"}' > "$mf"; export LARANODE_MANIFEST_FILE="$mf"
+  export LARANODE_HTTP_PORT=80 LARANODE_BIND=local; preflight; expect APACHE_OWNED "$APACHE_OWNED" 1; }
+tf "pre-existing Apache on :80 + LARANODE_BIND=local + :80 refused (cannot narrow its Listen)" pf_pre_apache_bind_80
+t  "pre-existing Apache on :80, explicit :80, all interfaces: shares :80 (vhost only)"          pf_pre_apache_open_80
+t  "pre-existing Apache on :80: panel defaults to 8080, Apache marked not owned"                pf_pre_apache_default
+t  "re-run of our own bound install (manifest managed:true) is still allowed"                   pf_own_apache_bind_80
+
+# ---- 2/3. no restart, no a2dissite, no ssl module on a pre-existing Apache/php-fpm -
+echo "=== pre-existing services are never restarted ==="
+svc_run() {  # svc_run <unit> <owned> <active:0|1>  -> SVC_LOG
+  SVC_LOG=$(mktemp); base
+  systemctl() { echo "$*" >> "$SVC_LOG"; }
+  svc_active() { [ "$ACTIVE" = 1 ]; }
+  ACTIVE=$3; _refresh_service "$1" "$2"
+}
+refresh_owned()       { svc_run apache2 1 1; grep -qx 'restart apache2' "$SVC_LOG"; }
+refresh_pre_active()  { svc_run apache2 0 1; grep -qx 'reload apache2' "$SVC_LOG" && ! grep -q restart "$SVC_LOG"; }
+refresh_pre_inactive(){ svc_run php8.4-fpm 0 0; grep -qx 'start php8.4-fpm' "$SVC_LOG" && ! grep -qE 'restart|reload' "$SVC_LOG"; }
+no_bare_restarts()    { base; ! declare -f phase_webserver phase_services | grep -E 'systemctl restart (apache2|php8\.4-fpm)'; }
+dissite_owned()       { base; DLOG=$(mktemp); a2dissite() { echo "$*" >> "$DLOG"; }; APACHE_OWNED=1; _disable_default_site; grep -q 000-default "$DLOG"; }
+dissite_pre()         { base; DLOG=$(mktemp); a2dissite() { echo "$*" >> "$DLOG"; }; APACHE_OWNED=0; _disable_default_site; ! grep -q . "$DLOG"; }
+mods_owned_ssl()      { base; APACHE_OWNED=1; _apache_modules | tr ' ' '\n' | grep -qx ssl; }
+mods_pre_no_ssl()     { base; APACHE_OWNED=0; ! _apache_modules | tr ' ' '\n' | grep -qx ssl; }
+t "our own Apache/php-fpm: restart (we installed it)"                        refresh_owned
+t "pre-existing running unit: graceful reload only, never restart"           refresh_pre_active
+t "pre-existing stopped unit: start only"                                    refresh_pre_inactive
+t "phase_webserver/phase_services contain no bare 'systemctl restart apache2|php8.4-fpm'" no_bare_restarts
+t "a2dissite 000-default runs on an Apache this installer installed"         dissite_owned
+t "a2dissite 000-default never runs on a pre-existing Apache"                dissite_pre
+t "our own Apache gets mod_ssl enabled"                                      mods_owned_ssl
+t "pre-existing Apache: mod_ssl is not enabled (would open a new :443)"      mods_pre_no_ssl
+
+vhost_pre_handler() { base; d=$(mktemp -d); printf '<VirtualHost *:__PORT__>\n    DocumentRoot __DOCROOT__\n</VirtualHost>\n' > "$d/t"; APACHE_OWNED=0; _vhost_render "$d/t" "$d/o" 8080 /x/public; grep -q 'proxy:unix:/run/php/php8.4-fpm.sock' "$d/o" && grep -q 'VirtualHost \*:8080' "$d/o" && [ "$(grep -c '</VirtualHost>' "$d/o")" = 1 ]; }
+vhost_owned_plain() { base; d=$(mktemp -d); printf '<VirtualHost *:__PORT__>\n    DocumentRoot __DOCROOT__\n</VirtualHost>\n' > "$d/t"; APACHE_OWNED=1; _vhost_render "$d/t" "$d/o" 80 /x/public; ! grep -q 'proxy:unix' "$d/o" && grep -q 'DocumentRoot /x/public' "$d/o"; }
+t "pre-existing Apache: php-fpm handler lives in the panel vhost only"        vhost_pre_handler
+t "our own Apache: vhost rendered without an inline handler (global conf)"   vhost_owned_plain
+
+# ---- 4. unsupported OS refused before any apt call -------------------------------
+echo "=== refusal precedes any install ==="
+main_refuses_before_apt() {
+  base; export LARANODE_OS_RELEASE_FILE="${FIX}/os-release.debian-12"
+  CALLS=$(mktemp); apt-get() { echo "apt-get $*" >> "$CALLS"; return 1; }
+  ( main ) >/dev/null 2>&1 && return 1
+  [ ! -s "$CALLS" ]
+}
+t "main on Debian 12 without 'ss': refused with zero apt-get calls" main_refuses_before_apt
+
+# ---- 5. LARANODE_BIND scopes mod_ssl's :443 too -------------------------------------
+echo "=== bound panel does not leave Apache on a public :443 ==="
+ports_bound_443() { ports_run :; APACHE_OWNED=1; HTTP_PORT=80 BIND_ADDR=127.0.0.1; _apache_ports_conf "$p"; ! grep -qE '^[[:space:]]*Listen 443' "$p" && grep -qE '^[[:space:]]*Listen 127.0.0.1:443' "$p"; }
+ports_bound_443_busy() { ports_run :; APACHE_OWNED=1; HTTP_PORT=80 BIND_ADDR=127.0.0.1; port_in_use() { [ "$1" = 443 ]; }; ss() { return 1; }; _apache_ports_conf "$p"; ! grep -qE '^[[:space:]]*Listen (127.0.0.1:)?443' "$p"; }
+t "LARANODE_BIND=local on a normal host: 'Listen 443' becomes 'Listen 127.0.0.1:443'" ports_bound_443
+t "bound panel + :443 held by another service: 'Listen 443' disabled, not duplicated"   ports_bound_443_busy
+
+# ---- 6. apt guard on every host, needrestart off ----------------------------------------
+echo "=== apt guard everywhere ==="
+apt_plain_upgrade_refused() { base; apt_run 'Inst nginx-common [1.0] (1.1 Ubuntu)'; apt_refused && printf '%s' "$OUT" | grep -q nginx-common; }
+apt_plain_ssh_refused()     { base; apt_run 'Inst openssh-server [1:9.6] (1:9.7 Ubuntu)'; apt_refused; }
+apt_plain_benign_ok()       { base; apt_run $'Inst libcurl4 [8.5.0] (8.5.1 Ubuntu)\nInst apache2 (2.4 Ubuntu)'; apt_passed; }
+apt_no_upgrade_flag() { base; CALLS=$(mktemp); ( apt-get() { echo "$*" >> "$CALLS"; }; apt_install curl ) >/dev/null 2>&1; [ "$(grep -c -- '--no-upgrade' "$CALLS")" = 2 ]; }
+needrestart_off() { ( source "$INSTALLER"; [ "${NEEDRESTART_MODE:-}" = l ] && [ "${NEEDRESTART_SUSPEND:-}" = 1 ] ); }
+t "plain host: refuses when apt would UPGRADE a protected service package (nginx)" apt_plain_upgrade_refused
+t "plain host: refuses when apt would upgrade openssh-server"                       apt_plain_ssh_refused
+t "plain host: unrelated library upgrade still passes"                              apt_plain_benign_ok
+t "apt-get install runs with --no-upgrade (simulation and real)"                    apt_no_upgrade_flag
+t "needrestart cannot restart services during the install (NEEDRESTART_MODE=l)"    needrestart_off
+
+# ---- 7. secrets never world-readable -----------------------------------------------------------
+echo "=== .env / secrets permissions ==="
+seed_env_640() {
+  base; PANEL_PATH=$(mktemp -d); printf 'APP_KEY=\n' > "$PANEL_PATH/.env.example"
+  MLOG=$(mktemp); chmod() { echo "chmod $*" >> "$MLOG"; command chmod "$@"; }; chgrp() { echo "chgrp $*" >> "$MLOG"; }
+  getent() { return 0; }
+  _seed_env
+  [ -f "$PANEL_PATH/.env" ] && grep -qx "chmod 640 $PANEL_PATH/.env" "$MLOG" && grep -qx "chgrp laranode_ln $PANEL_PATH/.env" "$MLOG"
+}
+seed_env_keeps_existing() { base; PANEL_PATH=$(mktemp -d); echo 'KEEP=1' > "$PANEL_PATH/.env"; : > "$PANEL_PATH/.env.example"; _seed_env; grep -qx 'KEEP=1' "$PANEL_PATH/.env"; }
+no_plain_env_cp() { base; ! declare -f _mysql_branch _pgsql_branch phase_app | grep -E 'cp .*\.env\.example'; }
+home_750() {
+  base; PANEL_PATH=$(mktemp -d); mkdir "$PANEL_PATH/laranode-scripts"; MLOG=$(mktemp)
+  useradd() { :; }; usermod() { :; }; chmod() { echo "chmod $*" >> "$MLOG"; }; id() { return 0; }
+  phase_fetch_panel >/dev/null 2>&1
+  grep -qx 'chmod 750 /home/laranode_ln' "$MLOG"
+}
+t "_seed_env creates .env at 0640 with group laranode_ln (no 0644 window)"   seed_env_640
+t "_seed_env never overwrites an existing .env"                              seed_env_keeps_existing
+t "DB branches and phase_app no longer 'cp .env.example' directly"           no_plain_env_cp
+t "/home/laranode_ln is 0750 right after useradd (Debian default is 0755)"   home_750
+
+# ---- nits: refuse early, argv secrets, TTY, IPv4 octets -------------------------------------------
+echo "=== early refusals / argv secrets ==="
+pf_pg_needs_port()  { base; pg_cluster_count() { echo 2; }; export LARANODE_DB_ENGINE=pgsql; preflight; }
+pf_pg_with_port()   { base; pg_cluster_count() { echo 2; }; export LARANODE_DB_ENGINE=pgsql LARANODE_PG_PORT=5433; preflight; }
+pf_node_old()       { base; have_cmd() { [ "$1" = node ]; }; node() { echo v18.19.0; }; preflight; }
+pf_node_ok()        { base; have_cmd() { [ "$1" = node ]; }; node() { echo v22.1.0; }; preflight; }
+pf_bad_octet()      { base; export LARANODE_BIND=999.1.1.1; preflight; }
+pf_good_ip()        { base; export LARANODE_BIND=100.64.0.7; preflight; expect BIND_ADDR "$BIND_ADDR" 100.64.0.7; }
+confirm_no_tty()    { base; export LARANODE_UNATTENDED=0; out=$(confirm "go?" </dev/null 2>&1); rc=$?; [ $rc -ne 0 ] && printf '%s' "$out" | grep -q LARANODE_UNATTENDED; }
+tf "pgsql + existing clusters + no LARANODE_PG_PORT: refused in preflight (nothing mutated yet)" pf_pg_needs_port
+t  "pgsql + existing clusters + LARANODE_PG_PORT: preflight passes"                              pf_pg_with_port
+tf "Node < 20 present: refused in preflight"                                                    pf_node_old
+t  "Node 22 present: preflight passes"                                                          pf_node_ok
+tf "LARANODE_BIND=999.1.1.1 refused (octet > 255)"                                              pf_bad_octet
+t  "LARANODE_BIND=<valid ipv4> accepted"                                                        pf_good_ip
+t  "confirm without TTY and without LARANODE_UNATTENDED=1 says so"                              confirm_no_tty
+
+mysql_pw_not_in_argv() {
+  base; PANEL_PATH=$(mktemp -d); : > "$PANEL_PATH/.env.example"
+  ALOG=$(mktemp); SQLLOG=$(mktemp)
+  pkg_installed() { [ "$1" = mysql-server ]; }
+  systemctl() { return 0; }; persist_secret() { :; }; openssl() { echo dbsecretpw; }
+  export LARANODE_MYSQL_ROOT_PASSWORD=rootsecretpw
+  mysql() {
+    echo "$*" >> "$ALOG"
+    # socket auth is "broken": only works when the password arrives via MYSQL_PWD or -p
+    if [ -z "${MYSQL_PWD:-}" ] && ! printf '%s' "$*" | grep -q -- '-p'; then return 1; fi
+    [ -t 0 ] || cat >> "$SQLLOG"
+    return 0
+  }
+  _mysql_branch
+  ! grep -q 'rootsecretpw' "$ALOG" && ! grep -q 'dbsecretpw' "$ALOG"
+}
+t "MySQL root and panel passwords never appear in mysql's argv (env + stdin)" mysql_pw_not_in_argv
+
+# ---- pre-existing (cheap): Reverb must not run as root ---------------------------------------------------
+reverb_not_root() { grep -qx 'User=laranode_ln' "${SCRIPT_DIR}/../../../laranode-scripts/templates/laranode-reverb.service"; }
+t "laranode-reverb.service runs as laranode_ln, not root" reverb_not_root
 
 echo ""
 echo "Results: passed=$PASS  failed=$FAIL"

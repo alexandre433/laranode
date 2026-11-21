@@ -2,6 +2,10 @@
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
+# needrestart (default on Ubuntu 22.04+/24.04 images) restarts services after apt
+# installs. List-only mode (l) and suspend stop it from restarting host services
+# (sshd, nginx, the DB, ...) behind the operator's back.
+export NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1
 
 # ---- Overridable config (env-var interface — set before sourcing or calling) ----
 LARANODE_REPO="${LARANODE_REPO:-https://github.com/alexandre433/laranode.git}"
@@ -36,6 +40,10 @@ version_ge() { printf '%s\n%s\n' "$2" "$1" | sort -V -C; }
 # confirm MSG — returns 0 to proceed; auto-yes when LARANODE_UNATTENDED=1
 confirm() {
   [ "${LARANODE_UNATTENDED:-0}" = "1" ] && return 0
+  if [ ! -t 0 ]; then
+    echo "FATAL: no terminal to confirm on (stdin is not a TTY, e.g. 'curl | bash' or CI). Re-run with LARANODE_UNATTENDED=1 to accept the plan." >&2
+    return 1
+  fi
   local _a=""
   read -rp "$1 [y/N] " _a
   [[ "$_a" =~ ^[Yy]$ ]]
@@ -64,8 +72,22 @@ env_set() {
 
 # persist_secret LINE — append to /root/.laranode-credentials (0600)
 persist_secret() {
-  printf '%s\n' "$*" >> /root/.laranode-credentials
+  # umask 077: the file is created 0600 from the first byte (no 0644 window).
+  ( umask 077; printf '%s\n' "$*" >> /root/.laranode-credentials )
   chmod 600 /root/.laranode-credentials
+}
+
+# _seed_env — create the panel .env from .env.example when absent. It receives the DB
+# password right after, so it is never world-readable: created under umask 027 and
+# handed to the panel's group (www-data/laranode_ln) at 0640. An existing .env is
+# never touched.
+_seed_env() {
+  local env="${PANEL_PATH}/.env"
+  [ -f "$env" ] && return 0
+  ( umask 027; cp "${PANEL_PATH}/.env.example" "$env" )
+  chmod 640 "$env"
+  if getent group laranode_ln >/dev/null 2>&1; then chgrp laranode_ln "$env"; fi
+  return 0
 }
 
 # ------------------------------------------------------------------------------
@@ -139,26 +161,27 @@ pg_cluster_count() {
 }
 
 # apt_install PKG... — guarded apt-get install. Simulates first and refuses when the
-# transaction would REMOVE any package, or (on Proxmox/CloudPanel hosts) upgrade a
-# package that belongs to the host's own stack. Stops apt -y from silently
-# replacing Percona, CloudPanel's nginx/php, Proxmox packages, etc.
-_PROTECTED_PKG_RE='^(proxmox-|pve-|libpve-|qemu-server|lxc-pve|percona-|mysql-|mariadb-|postgresql|libpq|cloudpanel|nginx|libnginx|php[0-9.]*-|varnish|redis|docker|containerd|tailscale|ufw)'
+# transaction would REMOVE any package, or UPGRADE a package that belongs to a host
+# service stack — on EVERY host: an upgrade restarts the service, and a plain Ubuntu
+# box can run nginx/PostgreSQL/sshd just as well as a Proxmox one. --no-upgrade also
+# keeps apt from upgrading already-installed packages that are merely named on the
+# command line. Stops apt -y from silently replacing Percona, CloudPanel's nginx/php,
+# Proxmox packages, etc.
+_PROTECTED_PKG_RE='^(proxmox-|pve-|libpve-|qemu-server|lxc-pve|percona-|mysql-|mariadb-|postgresql|libpq|cloudpanel|nginx|libnginx|php[0-9]+\.[0-9]+-|varnish|redis|docker|containerd|tailscale|ufw|openssh-server)'
 apt_install() {
   local sim
-  sim=$(apt-get install -s -y "$@" 2>&1) \
+  sim=$(apt-get install -s --no-upgrade -y "$@" 2>&1) \
     || die "apt-get simulation failed for: $* — ${sim}"
   local removals
   removals=$(printf '%s\n' "$sim" | grep '^Remv ' || true)
   [ -z "$removals" ] \
     || die "Refusing to install: $* — apt would REMOVE packages:"$'\n'"${removals}"
-  if [ "$IS_PROXMOX" = 1 ] || [ "$IS_CLOUDPANEL" = 1 ]; then
-    local upgrades
-    upgrades=$(printf '%s\n' "$sim" | grep -E '^Inst [^ ]+ \[' \
-      | awk '{print $2}' | grep -E "$_PROTECTED_PKG_RE" || true)
-    [ -z "$upgrades" ] \
-      || die "Refusing to install: $* — apt would UPGRADE host-managed packages:"$'\n'"${upgrades}"
-  fi
-  apt-get install -y "$@"
+  local upgrades
+  upgrades=$(printf '%s\n' "$sim" | grep -E '^Inst [^ ]+ \[' \
+    | awk '{print $2}' | grep -E "$_PROTECTED_PKG_RE" || true)
+  [ -z "$upgrades" ] \
+    || die "Refusing to install: $* — apt would UPGRADE host-managed packages:"$'\n'"${upgrades}"
+  apt-get install --no-upgrade -y "$@"
 }
 
 # ------------------------------------------------------------------------------
@@ -261,8 +284,8 @@ preflight() {
   case "$_bind" in
     all)   BIND_ADDR="" ;;
     local) BIND_ADDR="127.0.0.1" ;;
-    *)     [[ "$_bind" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
-             || die "LARANODE_BIND must be all, local or an IPv4 address, got: ${_bind}"
+    *)     [[ "$_bind" =~ ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$ ]] \
+             || die "LARANODE_BIND must be all, local or an IPv4 address (octets 0-255), got: ${_bind}"
            BIND_ADDR="$_bind" ;;
   esac
 
@@ -289,6 +312,29 @@ preflight() {
   # the panel just adds its vhost). Any other holder makes the install impossible.
   if [ "$port80_free" = 0 ] && [ "$HTTP_PORT" = 80 ] && [ "$port80_holder" != "apache2" ]; then
     die ":80 is held by ${port80_holder} — pick another LARANODE_HTTP_PORT."
+  fi
+  # A pre-existing Apache keeps its own 'Listen' lines (we only add to them). It
+  # listens on every interface on :80, so the panel cannot also be narrowed to one
+  # address on :80 — the two Listen lines would conflict and Apache would not start.
+  if [ "$APACHE_OWNED" = 0 ] && [ "$HTTP_PORT" = 80 ] && [ -n "$BIND_ADDR" ]; then
+    die "A pre-existing Apache owns :80 on every interface; the panel cannot be bound to ${BIND_ADDR}:80 beside it. Set LARANODE_HTTP_PORT to another port (e.g. 8080) or LARANODE_BIND=all."
+  fi
+
+  # ---- Refuse impossible installs now, before any mutation ----------------------
+  # (these used to abort halfway through the install, after packages were added)
+  if [ "$DB_ENGINE" = pgsql ] && [ "${PG_PREEXISTING:-0}" -gt 0 ] && [ -z "${LARANODE_PG_PORT:-}" ]; then
+    local _prev_pg_port=""
+    if [ -f "${PANEL_PATH}/.env" ] && grep -q '^DB_CONNECTION="\?pgsql' "${PANEL_PATH}/.env"; then
+      _prev_pg_port=$(grep -E '^DB_PORT=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d "\"' " || true)
+    fi
+    [ -n "$_prev_pg_port" ] \
+      || die "PostgreSQL cluster(s) already exist on this host. Set LARANODE_PG_PORT to the cluster the panel may use:"$'\n'"$(pg_lsclusters --no-header 2>/dev/null || true)"
+  fi
+  if have_cmd node; then
+    local _node_major
+    _node_major=$(node --version 2>/dev/null | sed 's/^v//; s/\..*//' || true)
+    { [[ "$_node_major" =~ ^[0-9]+$ ]] && [ "$_node_major" -ge 20 ]; } \
+      || die "The panel build needs Node >=20; found $(node --version 2>/dev/null || echo unknown). Install or upgrade Node and re-run."
   fi
 
   # ---- Resolve REVERB_PORT -----------------------------------------------------
@@ -353,6 +399,9 @@ phase_fetch_panel() {
   log "Creating laranode_ln system user"
   useradd -m -s /bin/bash laranode_ln 2>/dev/null || true
   usermod -aG laranode_ln www-data
+  # Debian's adduser default is 0755: close the home (and the .env built inside it)
+  # to other local users from the start. phase_services settles the final modes.
+  chmod 750 /home/laranode_ln
 
   log "Cloning panel from ${LARANODE_REPO}"
   if [ ! -d "${PANEL_PATH}/laranode-scripts" ]; then
@@ -411,7 +460,8 @@ _mysql_branch() {
       "Enter the existing MySQL root password")
     [ -n "${root_pw}" ] \
       || die "MySQL root socket auth failed and LARANODE_MYSQL_ROOT_PASSWORD is not set — cannot provision the panel database"
-    root_args=(-u root -p"${root_pw}")
+    # The password goes through the environment, never argv (visible in `ps`).
+    export MYSQL_PWD="${root_pw}"
     mysql "${root_args[@]}" -e 'SELECT 1' >/dev/null 2>&1 \
       || die "MySQL root auth failed with provided password — check LARANODE_MYSQL_ROOT_PASSWORD"
     log "MySQL root auth: caching_sha2_password / native_password (socket unavailable)"
@@ -430,20 +480,22 @@ _mysql_branch() {
   # CREATE DATABASE IF NOT EXISTS is a no-op on re-run.
   # GRANT is idempotent in MySQL 8+.
   # NEVER ALTER USER root here or anywhere else in the installer.
-  mysql "${root_args[@]}" -e "
+  # SQL arrives on stdin so the new password is not in argv either.
+  mysql "${root_args[@]}" <<SQL || die "MySQL: failed to provision laranode user/database — see output above"
     CREATE USER IF NOT EXISTS 'laranode'@'localhost' IDENTIFIED BY '${db_pass}';
     ALTER  USER              'laranode'@'localhost' IDENTIFIED BY '${db_pass}';
     CREATE DATABASE IF NOT EXISTS laranode
            CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
     GRANT ALL PRIVILEGES ON *.* TO 'laranode'@'localhost' WITH GRANT OPTION;
     FLUSH PRIVILEGES;
-  " || die "MySQL: failed to provision laranode user/database — see output above"
+SQL
+  unset MYSQL_PWD
 
   # ── Write .env (only after all DB ops succeeded) ─────────────────────────
   # phase_database runs before phase_app, so .env may not exist yet. Seed it
   # from .env.example first (full template) so env_set updates existing keys
   # instead of leaving a stub .env that phase_app would then preserve as-is.
-  [ -f "${PANEL_PATH}/.env" ] || cp "${PANEL_PATH}/.env.example" "${PANEL_PATH}/.env"
+  _seed_env
   env_set DB_CONNECTION mysql        "${PANEL_PATH}/.env"
   env_set DB_HOST       127.0.0.1    "${PANEL_PATH}/.env"
   env_set DB_PORT       3306         "${PANEL_PATH}/.env"
@@ -625,7 +677,7 @@ SQL
   # phase_database runs before phase_app, so .env may not exist yet. Seed it
   # from .env.example first (full template) so env_set updates existing keys
   # instead of leaving a stub .env that phase_app would then preserve as-is.
-  [ -f "${PANEL_PATH}/.env" ] || cp "${PANEL_PATH}/.env.example" "${PANEL_PATH}/.env"
+  _seed_env
 
   # Panel's own DB connection (config/database.php 'pgsql' block reads DB_*).
   env_set DB_CONNECTION pgsql           "${PANEL_PATH}/.env"
@@ -677,6 +729,16 @@ _apache_ports_conf() {
   local ports_conf="$1"
   local _listen="${HTTP_PORT}"
   [ -z "$BIND_ADDR" ] || _listen="${BIND_ADDR}:${HTTP_PORT}"
+
+  # A pre-existing Apache keeps every Listen it had (its own :80, its :443 vhosts).
+  # The panel only adds its own line; the live sites keep answering untouched.
+  if [ "${APACHE_OWNED:-1}" = 0 ]; then
+    if [ "$HTTP_PORT" -ne 80 ] && ! grep -qxE "[[:space:]]*Listen[[:space:]]+${_listen}[[:space:]]*" "$ports_conf"; then
+      printf 'Listen %s\n' "${_listen}" >> "$ports_conf"
+    fi
+    return 0
+  fi
+
   if [ "$HTTP_PORT" -ne 80 ] || [ -n "$BIND_ADDR" ]; then
     sed -i -E "/^[[:space:]]*Listen[[:space:]]+(80|(([0-9]{1,3}\.){3}[0-9]{1,3}:)?${HTTP_PORT})[[:space:]]*\$/d" "$ports_conf"
     printf 'Listen %s\n' "${_listen}" >> "$ports_conf"
@@ -689,6 +751,57 @@ _apache_ports_conf() {
   elif port_in_use 443 && ! ss -tlnp '( sport = :443 )' 2>/dev/null | grep -q apache2; then
     sed -i -E 's/^([[:space:]]*)Listen[[:space:]]+443([[:space:]]+https)?[[:space:]]*$/\1# laranode: :443 busy, disabled: Listen 443\2/' "$ports_conf"
     warn ":443 is in use on this host — Apache's 'Listen 443' disabled; panel stays HTTP-only (use the SSH tunnel)."
+  elif [ -n "$BIND_ADDR" ]; then
+    # A bound panel must not leave mod_ssl's wildcard :443 open to the network.
+    sed -i -E "s/^([[:space:]]*)Listen[[:space:]]+443([[:space:]]+https)?[[:space:]]*\$/\1Listen ${BIND_ADDR}:443\2/" "$ports_conf"
+  fi
+}
+
+# _refresh_service UNIT OWNED — apply new config to a unit. A unit this installer
+# owns is restarted. A pre-existing one is NEVER restarted: a graceful reload keeps
+# the main PID and drops no connection; a stopped one is only started.
+_refresh_service() {
+  local unit="$1" owned="$2"
+  if [ "$owned" = 1 ]; then
+    systemctl restart "$unit" || die "${unit} restart failed"
+  elif svc_active "$unit"; then
+    systemctl reload "$unit" || die "${unit} reload failed (pre-existing unit left running with its old config)"
+  else
+    systemctl start "$unit" || die "${unit} start failed"
+  fi
+}
+
+# _disable_default_site — the stock 000-default site belongs to whoever configured
+# the Apache; only an Apache this installer installed loses it.
+_disable_default_site() {
+  if [ "${APACHE_OWNED:-1}" = 1 ]; then
+    a2dissite 000-default >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
+# _apache_modules — modules the panel vhost needs. mod_ssl is only enabled on an
+# Apache we installed: on a pre-existing one it would open a new :443 listener.
+_apache_modules() {
+  local m="proxy_fcgi rewrite setenvif headers proxy proxy_http"
+  [ "${APACHE_OWNED:-1}" = 0 ] || m+=" ssl"
+  echo "$m"
+}
+
+# _vhost_render TEMPLATE DEST PORT DOCROOT — render the panel vhost. On a
+# pre-existing Apache the PHP-FPM handler is set inside this vhost only: the global
+# a2enconf php8.4-fpm would re-route .php for every existing site.
+_vhost_render() {
+  local tmpl="$1" dest="$2" port="$3" docroot="$4"
+  sed -e "s|__PORT__|${port}|g" -e "s|__DOCROOT__|${docroot}|g" "$tmpl" > "$dest"
+  if [ "${APACHE_OWNED:-1}" = 0 ]; then
+    sed -i '/^<\/VirtualHost>/d' "$dest"
+    cat >> "$dest" <<'VHOST'
+    <FilesMatch ".+\.ph(?:ar|p|tml)$">
+        SetHandler "proxy:unix:/run/php/php8.4-fpm.sock|fcgi://localhost"
+    </FilesMatch>
+</VirtualHost>
+VHOST
   fi
 }
 
@@ -733,7 +846,8 @@ phase_webserver() {
   [ "$_added_policy" -eq 1 ] && rm -f /usr/sbin/policy-rc.d
 
   log "Enabling required Apache modules"
-  a2enmod proxy_fcgi rewrite setenvif headers ssl proxy proxy_http >/dev/null
+  # shellcheck disable=SC2046
+  a2enmod $(_apache_modules) >/dev/null
 
   [ -n "${HTTP_PORT:-}" ]  || die "HTTP_PORT not set — preflight must run first"
   [ -n "${PANEL_PATH:-}" ] || die "PANEL_PATH not set — preflight must run first"
@@ -742,21 +856,23 @@ phase_webserver() {
   local tmpl="${PANEL_PATH}/laranode-scripts/templates/apache-panel.template"
   local dest="/etc/apache2/sites-available/laranode.conf"
   [ -f "$tmpl" ] || die "apache-panel.template missing at ${tmpl}"
-  sed -e "s|__PORT__|${HTTP_PORT}|g" \
-      -e "s|__DOCROOT__|${PANEL_PATH}/public|g" \
-      "$tmpl" > "$dest"
+  _vhost_render "$tmpl" "$dest" "$HTTP_PORT" "${PANEL_PATH}/public"
 
-  # Panel never uses the stock default site.
-  a2dissite 000-default >/dev/null 2>&1 || true
+  # Panel never uses the stock default site (only an Apache we installed loses it).
+  _disable_default_site
 
   _apache_ports_conf /etc/apache2/ports.conf
 
   a2ensite laranode || die "a2ensite laranode failed"
-  apachectl configtest || die "Apache config test failed — review ${dest}"
+  if ! apachectl configtest; then
+    # Leave a pre-existing, running Apache exactly as it was.
+    [ "$APACHE_OWNED" = 1 ] || a2dissite laranode >/dev/null 2>&1 || true
+    die "Apache config test failed — review ${dest}"
+  fi
 
-  systemctl enable apache2 >/dev/null 2>&1 || true
-  systemctl restart apache2 || die "apache2 start/restart failed after enabling laranode.conf"
-  svc_active apache2 || die "apache2 is not active after restart"
+  [ "$APACHE_OWNED" = 0 ] || systemctl enable apache2 >/dev/null 2>&1 || true
+  _refresh_service apache2 "$APACHE_OWNED"
+  svc_active apache2 || die "apache2 is not active after (re)load"
 
   # Confirm the socket is open (full HTTP 200 check is phase_services, after the
   # app is bootstrapped). This surfaces port-fork bugs early.
@@ -841,7 +957,11 @@ phase_php_node() {
 
   # php8.4-fpm package provides /etc/apache2/conf-available/php8.4-fpm.conf;
   # a2enconf must run after the package is installed.
-  if [ -f /etc/apache2/conf-available/php8.4-fpm.conf ]; then
+  if [ "$APACHE_OWNED" = 0 ]; then
+    # Pre-existing Apache: a global conf would route .php for ALL its sites through
+    # php8.4-fpm. The panel vhost carries its own handler instead (_vhost_render).
+    log "Pre-existing Apache: PHP-FPM handler set in the panel vhost only (no global a2enconf)"
+  elif [ -f /etc/apache2/conf-available/php8.4-fpm.conf ]; then
     a2enconf php8.4-fpm
   else
     # CloudPanel's php8.4-fpm build does not ship the Apache conf snippet.
@@ -898,7 +1018,7 @@ phase_app() {
 
   # .env — copy example only when absent; never clobber existing config.
   if [ ! -f "${PANEL_PATH}/.env" ]; then
-    cp "${PANEL_PATH}/.env.example" "${PANEL_PATH}/.env"
+    _seed_env
     log ".env created from .env.example"
   else
     log ".env already present — preserving existing configuration"
@@ -1043,12 +1163,30 @@ phase_app() {
 # "managed":false = present before the installer ran: never stop/start/restart it.
 # ------------------------------------------------------------------------------
 PRE_APACHE=0; PRE_PHPFPM=0; PRE_UNITS=""
+# *_OWNED = 1 when this installer may restart the unit (it installed it, here or on a
+# previous run). 0 = the package was there before us: its listeners, sites and
+# running process are left alone (reload at most, never restart).
+APACHE_OWNED=1; PHPFPM_OWNED=1
 PANEL_DB_UNIT=""; PANEL_DB_MANAGED=0
+
+# _prior_managed — units a previous run recorded as managed (re-run must not
+# reclassify what we installed earlier as "pre-existing").
+_prior_managed() {
+  local mf="${LARANODE_MANIFEST_FILE:-/etc/laranode/service-manifest.json}"
+  [ -f "$mf" ] || return 0
+  grep '"managed":true' "$mf" | sed -n 's/.*"unit":"\([^"]*\)".*/\1/p' || true
+}
+
+# _unit_is_prior UNIT — a previous run of this installer marked UNIT managed:true.
+_unit_is_prior() { _prior_managed | grep -qxF "$1"; }
 
 # capture_preexisting — read-only snapshot taken in preflight, before any install.
 capture_preexisting() {
   pkg_installed apache2   && PRE_APACHE=1 || PRE_APACHE=0
   pkg_installed php8.4-fpm && PRE_PHPFPM=1 || PRE_PHPFPM=0
+  APACHE_OWNED=1; PHPFPM_OWNED=1
+  if [ "$PRE_APACHE" = 1 ] && ! _unit_is_prior apache2.service; then APACHE_OWNED=0; fi
+  if [ "$PRE_PHPFPM" = 1 ] && ! _unit_is_prior php8.4-fpm.service; then PHPFPM_OWNED=0; fi
   PRE_UNITS=""
   have_cmd systemctl || return 0
   local pat
@@ -1058,14 +1196,6 @@ capture_preexisting() {
                    | awk '$1 ~ /\.service$/ {print $1}')$'\n'
   done
   PRE_UNITS=$(printf '%s' "$PRE_UNITS" | sed '/^$/d' | sort -u)
-}
-
-# _prior_managed — units a previous run recorded as managed (re-run must not
-# reclassify what we installed earlier as "pre-existing").
-_prior_managed() {
-  local mf="${LARANODE_MANIFEST_FILE:-/etc/laranode/service-manifest.json}"
-  [ -f "$mf" ] || return 0
-  grep '"managed":true' "$mf" | sed -n 's/.*"unit":"\([^"]*\)".*/\1/p' || true
 }
 
 # write_service_manifest — call after all services are installed and started.
@@ -1166,8 +1296,8 @@ phase_services() {
   systemctl enable laranode-reverb.service
   systemctl start laranode-queue-worker.service
   systemctl start laranode-reverb.service
-  systemctl restart apache2
-  systemctl restart php8.4-fpm
+  _refresh_service apache2 "$APACHE_OWNED"
+  _refresh_service php8.4-fpm "$PHPFPM_OWNED"
   write_service_manifest
 }
 
@@ -1206,14 +1336,17 @@ phase_summary() {
 # bare Debian 13) may not ship iproute2; without it every port would read as free.
 # Installing iproute2 is the only change made before the plan is shown.
 ensure_probe_tools() {
-  command -v ss >/dev/null 2>&1 && return 0
+  have_cmd ss && return 0
   log "Installing iproute2 (provides ss, needed to detect busy ports)"
   apt-get update -q
-  DEBIAN_FRONTEND=noninteractive apt-get install -y iproute2
-  command -v ss >/dev/null 2>&1 || die "ss (iproute2) is required for port detection"
+  apt_install iproute2
+  have_cmd ss || die "ss (iproute2) is required for port detection"
 }
 
 main() {
+  # An unsupported OS is refused BEFORE the first apt call (ensure_probe_tools
+  # installs a package). preflight runs detect_os again; it is a pure read.
+  detect_os
   ensure_probe_tools
   preflight
   phase_packages
