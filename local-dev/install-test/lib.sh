@@ -142,6 +142,17 @@ run_scenario() {
     else
         printf "   %-32s %s\n" "scheduler cron.d + schedule:list" "MISSING"; ok=0
     fi
+
+    # --- Service manifest: present, ours = managed:true ---
+    if docker exec "$cname" bash -c \
+        'mf=/etc/laranode/service-manifest.json; [ -f "$mf" ] \
+         && grep -q "\"unit\":\"laranode-reverb.service\",\"managed\":true" "$mf" \
+         && grep -q "\"unit\":\"laranode-queue-worker.service\",\"managed\":true" "$mf" \
+         && grep -q "\"version\":1" "$mf"'; then
+        printf "   %-32s %s\n" "service manifest" "ok"
+    else
+        printf "   %-32s %s\n" "service manifest" "MISSING/INVALID"; ok=0
+    fi
     # --- Engine-specific DB service ---
     if [ "$expect_engine" = pgsql ]; then
         # Any version/cluster name (16/main on Ubuntu 24.04, 17/main on Debian 13):

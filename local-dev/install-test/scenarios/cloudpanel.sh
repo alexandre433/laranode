@@ -75,6 +75,12 @@ export POST_ASSERTS_CMD='
     # system php alternative untouched by the installer (no PPA re-add logic needed)
     ss -tlnp "( sport = :443 )" | grep -q apache2 && { echo "FAIL: apache took :443" >&2; exit 1; }
     echo "PASS: apache not on :443"
+    # manifest: pre-existing services are recorded as NOT managed, ours as managed
+    mf=/etc/laranode/service-manifest.json
+    for u in nginx.service mariadb.service postgresql@16-main.service; do
+        grep -q "\"unit\":\"$u\",\"managed\":false" "$mf" || { echo "FAIL: manifest should list $u as managed:false" >&2; cat "$mf" >&2; exit 1; }
+    done
+    echo "PASS: manifest marks nginx, mariadb and PG16 as pre-existing (managed:false)"
 '
 
 run_scenario

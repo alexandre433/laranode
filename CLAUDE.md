@@ -113,6 +113,26 @@ already a non-placeholder value, and `db:seed` is skipped when the `users` table
 non-empty. (Note: a re-run that does not pass `LARANODE_HTTP_PORT` will see the panel's
 own Apache holding `:80` and select `:8080`; pass the original port to keep it in place.)
 
+### Service manifest (what the installer owns)
+
+The installer writes `/etc/laranode/service-manifest.json` (override: `LARANODE_MANIFEST_FILE`),
+world-readable, one service per line so shell and PHP can both parse it:
+
+```json
+{"version":1,"generated":"2026-11-21T01:00:00Z","host":{"os":"debian 13","proxmox":true,"cloudpanel":false},"db":{"engine":"pgsql","unit":"postgresql@17-main.service"},
+"services":[
+{"unit":"laranode-reverb.service","managed":true,"role":"reverb","reason":"installed-by-laranode"},
+{"unit":"postgresql@16-main.service","managed":false,"role":"preexisting","reason":"present-before-install"}
+]}
+```
+
+- `"managed":true` = created/installed by the installer (kept across re-runs). Safe to stop/start (sleep/wake).
+- `"managed":false` = present before the installer ran (DS: PG16, Redis, Percona, CloudPanel nginx/php-fpm, any
+  pre-existing Apache/PHP-FPM/MySQL). **Never stop, start, restart or reconfigure these.**
+- Roles: `reverb`, `queue`, `web` (apache2), `php` (php8.4-fpm), `database` (the panel's DB unit), `preexisting`.
+- Always managed: `laranode-reverb.service`, `laranode-queue-worker.service`. A consumer must treat a unit that is
+  missing from the file as not managed.
+
 ### Install-test matrix
 
 Clean-room integration tests in `local-dev/install-test/` boot one vanilla

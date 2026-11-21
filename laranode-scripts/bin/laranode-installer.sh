@@ -162,6 +162,7 @@ preflight() {
   detect_proxmox
   detect_cloudpanel
   PG_PREEXISTING=$(pg_cluster_count)
+  capture_preexisting
 
   # ---- Web server on :80 -------------------------------------------------------
   local port80_free=1
@@ -374,12 +375,15 @@ _mysql_branch() {
   else
     log "Database — MySQL: installing mysql-server"
     apt_install mysql-server
+    PANEL_DB_MANAGED=1
   fi
   # enable+start is idempotent whether mysql was just installed or pre-existed.
   if systemctl cat mysql >/dev/null 2>&1; then
     systemctl enable --now mysql
+    PANEL_DB_UNIT=mysql.service
   elif systemctl cat mariadb >/dev/null 2>&1; then
     systemctl enable --now mariadb
+    PANEL_DB_UNIT=mariadb.service
   else
     die "No mysql/mariadb systemd unit found after install"
   fi
@@ -472,6 +476,7 @@ _pgsql_branch() {
       log "PostgreSQL data directory base: ${LARANODE_PG_DATADIR%/}/<ver>/<cluster>"
     fi
     apt_install postgresql postgresql-client
+    PANEL_DB_MANAGED=1
   fi
 
   # ── cluster discovery ─────────────────────────────────────────────────────
@@ -524,6 +529,7 @@ _pgsql_branch() {
 
   # ── enable + start the versioned unit ────────────────────────────────────
   systemctl enable --now "postgresql@${PG_VER}-${PG_CLUSTER_NAME}"
+  PANEL_DB_UNIT="postgresql@${PG_VER}-${PG_CLUSTER_NAME}.service"
 
   # ── generate panel DB password ─────────────────────────────────────────
   local DB_PASS DB_PASS_TAG
@@ -531,7 +537,7 @@ _pgsql_branch() {
   # Dollar-quote tag: random lowercase alphanum so it never collides with the
   # base64 password (which cannot contain lowercase alpha runs of 8 chars
   # identically — but we tag anyway for correctness).
-  DB_PASS_TAG=$(head -c 16 /dev/urandom | base64 | tr -dc 'a-z0-9' | head -c 8)
+  DB_PASS_TAG="q$(head -c 16 /dev/urandom | base64 | tr -dc 'a-z0-9' | head -c 8)"  # must start with a letter: $4abc$ is not a valid dollar-quote tag
 
   # ── idempotent role (laranode LOGIN) ─────────────────────────────────────
   # Dollar-quote the password to survive special chars from openssl rand.
@@ -588,7 +594,7 @@ SQL
   # We must target the same cluster port that the panel uses, not :5432 blindly.
   local PGSQL_READER_PASS PGSQL_PG_TAG
   PGSQL_READER_PASS=$(openssl rand -base64 18)
-  PGSQL_PG_TAG=$(head -c 16 /dev/urandom | base64 | tr -dc 'a-z0-9' | head -c 8)
+  PGSQL_PG_TAG="q$(head -c 16 /dev/urandom | base64 | tr -dc 'a-z0-9' | head -c 8)"
 
   sudo -u postgres psql -p "$PG_PORT" -v ON_ERROR_STOP=1 --dbname=postgres <<SQL
 DO \$\$
@@ -987,7 +993,11 @@ phase_app() {
   fi
 
   log "Building front-end assets"
-  npm install
+  # package-lock.json is gitignored, so each install resolves the registry afresh. npm 10 then
+  # crashes in arborist (peer set of vitest 4 vs vitest 5 add-ons: "reading edgesOut").
+  # --legacy-peer-deps skips auto-installing peers; the ones the build needs are explicit
+  # in package.json (e.g. @testing-library/dom).
+  npm install --legacy-peer-deps
   # phase_services `find -type f -exec chmod 660` strips exec bits from npm
   # binaries on a previous install. Restore u+x on bin-script files so that
   # npm run build succeeds on idempotent re-runs. chmod -R silently skips
@@ -1000,6 +1010,102 @@ phase_app() {
 # ==============================================================================
 # Phase 7 — Services, firewall, permissions
 # ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Service manifest — which systemd units this installer owns vs. found and left alone.
+# Written to ${LARANODE_MANIFEST_FILE:-/etc/laranode/service-manifest.json}. One service
+# per line so shell and PHP can both read it. Consumers (e.g. the sleep/wake feature)
+# may stop/start ONLY entries with "managed":true. Format v1:
+#   {"version":1,"generated":"<UTC ISO8601>","host":{"os":"debian 13","proxmox":false,
+#    "cloudpanel":false},"db":{"engine":"pgsql","unit":"postgresql@17-main.service"},
+#    "services":[
+#   {"unit":"laranode-reverb.service","managed":true,"role":"reverb","reason":"installed-by-laranode"},
+#   {"unit":"nginx.service","managed":false,"role":"preexisting","reason":"present-before-install"}
+#    ]}
+# "managed":true  = created or installed by this installer (also kept across re-runs).
+# "managed":false = present before the installer ran: never stop/start/restart it.
+# ------------------------------------------------------------------------------
+PRE_APACHE=0; PRE_PHPFPM=0; PRE_UNITS=""
+PANEL_DB_UNIT=""; PANEL_DB_MANAGED=0
+
+# capture_preexisting — read-only snapshot taken in preflight, before any install.
+capture_preexisting() {
+  pkg_installed apache2   && PRE_APACHE=1 || PRE_APACHE=0
+  pkg_installed php8.4-fpm && PRE_PHPFPM=1 || PRE_PHPFPM=0
+  PRE_UNITS=""
+  have_cmd systemctl || return 0
+  local pat
+  for pat in 'nginx*' 'apache2*' 'mysql*' 'mariadb*' 'percona*' 'postgresql@*' 'redis*' \
+             'varnish*' 'memcached*' 'clp-*' 'php*-fpm*'; do
+    PRE_UNITS+=$(systemctl list-units --type=service --all --plain --no-legend "$pat" 2>/dev/null \
+                   | awk '$1 ~ /\.service$/ {print $1}')$'\n'
+  done
+  PRE_UNITS=$(printf '%s' "$PRE_UNITS" | sed '/^$/d' | sort -u)
+}
+
+# _prior_managed — units a previous run recorded as managed (re-run must not
+# reclassify what we installed earlier as "pre-existing").
+_prior_managed() {
+  local mf="${LARANODE_MANIFEST_FILE:-/etc/laranode/service-manifest.json}"
+  [ -f "$mf" ] || return 0
+  grep '"managed":true' "$mf" | sed -n 's/.*"unit":"\([^"]*\)".*/\1/p' || true
+}
+
+# write_service_manifest — call after all services are installed and started.
+write_service_manifest() {
+  local mf="${LARANODE_MANIFEST_FILE:-/etc/laranode/service-manifest.json}"
+  local prior; prior=$(_prior_managed)
+  local -a lines=()
+  local seen=" "
+  _mf_add() {  # unit managed role reason
+    case "$seen" in *" $1 "*) return 0;; esac
+    seen+="$1 "
+    lines+=("$(printf '{"unit":"%s","managed":%s,"role":"%s","reason":"%s"}' "$1" "$2" "$3" "$4")")
+  }
+  _is_prior() { printf '%s\n' "$prior" | grep -qxF "$1"; }
+  local u
+
+  _mf_add laranode-reverb.service         true reverb "installed-by-laranode"
+  _mf_add laranode-queue-worker.service   true queue  "installed-by-laranode"
+  if [ "$PRE_APACHE" = 0 ] || _is_prior apache2.service; then
+    _mf_add apache2.service true web "installed-by-laranode"
+  else
+    _mf_add apache2.service false web "present-before-install (panel vhost added only)"
+  fi
+  if [ "$PRE_PHPFPM" = 0 ] || _is_prior php8.4-fpm.service; then
+    _mf_add php8.4-fpm.service true php "installed-by-laranode"
+  else
+    _mf_add php8.4-fpm.service false php "present-before-install"
+  fi
+  if [ -n "$PANEL_DB_UNIT" ]; then
+    if [ "$PANEL_DB_MANAGED" = 1 ] || _is_prior "$PANEL_DB_UNIT"; then
+      _mf_add "$PANEL_DB_UNIT" true database "installed-by-laranode"
+    else
+      _mf_add "$PANEL_DB_UNIT" false database "present-before-install (panel schema/role added only)"
+    fi
+  fi
+  # Everything else seen running before the install is not ours, ever.
+  while IFS= read -r u; do
+    [ -n "$u" ] || continue
+    _mf_add "$u" false preexisting "present-before-install"
+  done <<< "$PRE_UNITS"
+
+  mkdir -p "$(dirname "$mf")"
+  {
+    printf '{"version":1,"generated":"%s","host":{"os":"%s %s","proxmox":%s,"cloudpanel":%s},' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$OS_ID" "$OS_VERSION" \
+      "$([ "$IS_PROXMOX" = 1 ] && echo true || echo false)" \
+      "$([ "$IS_CLOUDPANEL" = 1 ] && echo true || echo false)"
+    printf '"db":{"engine":"%s","unit":"%s"},\n"services":[\n' "${DB_ENGINE:-}" "$PANEL_DB_UNIT"
+    local i
+    for i in "${!lines[@]}"; do
+      printf '%s%s\n' "${lines[$i]}" "$([ "$i" -lt $((${#lines[@]} - 1)) ] && echo ,)"
+    done
+    printf ']}\n'
+  } > "$mf"
+  chmod 644 "$mf"
+  log "Service manifest written: ${mf}"
+}
 
 # _install_scheduler_cron — the panel defines scheduled work in bootstrap/app.php
 # (backups every minute, SSL-expiry notices, pruning) but nothing ever ran
@@ -1045,6 +1151,7 @@ phase_services() {
   systemctl start laranode-reverb.service
   systemctl restart apache2
   systemctl restart php8.4-fpm
+  write_service_manifest
 }
 
 # ==============================================================================

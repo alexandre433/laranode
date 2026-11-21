@@ -278,6 +278,76 @@ tf "missing cron template aborts the install"                       cron_missing
 t  "cron.d file name has no dot (cron would ignore it)"             cron_filename_ok
 t  "phase_services wires the scheduler; phase_packages installs cron" cron_wired
 
+# ---- service manifest --------------------------------------------------------
+echo "=== service manifest ==="
+mf_setup() { base; export LARANODE_MANIFEST_FILE="$(mktemp -d)/etc/service-manifest.json"; OS_ID=debian OS_VERSION=13; IS_PROXMOX=1 IS_CLOUDPANEL=0; DB_ENGINE=pgsql; PRE_APACHE=0 PRE_PHPFPM=0 PRE_UNITS="" PANEL_DB_UNIT="" PANEL_DB_MANAGED=0; }
+mf_line() { grep -F "\"unit\":\"$1\"" "$LARANODE_MANIFEST_FILE"; }   # the one line for a unit
+mf_managed()  { mf_line "$1" | grep -q '"managed":true'; }
+mf_left_alone() { mf_line "$1" | grep -q '"managed":false'; }
+mf_valid_json() { if command -v jq >/dev/null 2>&1; then jq -e . "$LARANODE_MANIFEST_FILE" >/dev/null; else echo "(jq absent: skipped)"; fi; }
+mf_fresh() {
+  mf_setup; PANEL_DB_UNIT=postgresql@17-main.service PANEL_DB_MANAGED=1
+  write_service_manifest; mf_valid_json
+  for u in laranode-reverb.service laranode-queue-worker.service apache2.service php8.4-fpm.service postgresql@17-main.service; do mf_managed $u || { echo "$u not managed"; return 1; }; done
+}
+mf_preexisting_left_alone() {
+  mf_setup; PRE_APACHE=1 PRE_PHPFPM=1 PANEL_DB_UNIT=mariadb.service PANEL_DB_MANAGED=0
+  PRE_UNITS=$'nginx.service\nredis-server.service\npostgresql@16-main.service\nclp-agent.service\nmysql.service'
+  write_service_manifest; mf_valid_json
+  for u in apache2.service php8.4-fpm.service mariadb.service nginx.service redis-server.service postgresql@16-main.service clp-agent.service mysql.service; do mf_left_alone $u || { echo "$u should be managed:false"; return 1; }; done
+  mf_managed laranode-reverb.service && mf_managed laranode-queue-worker.service
+}
+mf_never_double_listed() { mf_setup; PRE_UNITS=$'apache2.service\nlaranode-reverb.service'; write_service_manifest; [ "$(grep -c '"unit":"apache2.service"' "$LARANODE_MANIFEST_FILE")" = 1 ] && [ "$(grep -c '"unit":"laranode-reverb.service"' "$LARANODE_MANIFEST_FILE")" = 1 ] && mf_managed laranode-reverb.service; }
+mf_rerun_keeps_ownership() {   # run 1 installs apache; run 2 sees it "pre-existing" but it is still ours
+  mf_setup; write_service_manifest
+  PRE_APACHE=1 PRE_PHPFPM=1 PRE_UNITS=$'apache2.service\nphp8.4-fpm.service'; write_service_manifest
+  mf_managed apache2.service && mf_managed php8.4-fpm.service
+}
+mf_rerun_never_adopts() {   # a unit once recorded as left-alone must not become managed on re-run
+  mf_setup; PRE_APACHE=1; PANEL_DB_UNIT=mysql.service; write_service_manifest
+  PRE_APACHE=1; write_service_manifest
+  mf_left_alone apache2.service && mf_left_alone mysql.service
+}
+mf_meta() { mf_setup; PANEL_DB_UNIT=postgresql@17-main.service; write_service_manifest; grep -q '"version":1' "$LARANODE_MANIFEST_FILE" && grep -q '"os":"debian 13"' "$LARANODE_MANIFEST_FILE" && grep -q '"proxmox":true' "$LARANODE_MANIFEST_FILE" && grep -q '"engine":"pgsql","unit":"postgresql@17-main.service"' "$LARANODE_MANIFEST_FILE"; }
+mf_perms() { mf_setup; write_service_manifest; [ -f "$LARANODE_MANIFEST_FILE" ] && [ "$(stat -c %a "$LARANODE_MANIFEST_FILE" 2>/dev/null || echo 644)" = 644 ]; }
+mf_wired() {
+  base
+  declare -f phase_services | grep -q write_service_manifest && declare -f preflight | grep -q capture_preexisting \
+    && declare -f _mysql_branch | grep -q 'PANEL_DB_UNIT=mysql.service' && declare -f _pgsql_branch | grep -q 'PANEL_DB_UNIT='
+}
+capture_runs_clean() {   # capture_preexisting with no systemctl must not fail the install
+  base; PRE_APACHE=9; pkg_installed() { [ "$1" = apache2 ]; }; capture_preexisting; [ "$PRE_APACHE" = 1 ] && [ "$PRE_PHPFPM" = 0 ] && [ -z "$PRE_UNITS" ]
+}
+t "fresh host: everything the installer set up is managed:true (valid JSON)"   mf_fresh
+t "pre-existing apache/php/db/nginx/redis/PG16/clp: managed:false"             mf_preexisting_left_alone
+t "no unit listed twice; our units win over the pre-existing snapshot"          mf_never_double_listed
+t "re-run keeps ownership of what run 1 installed"                              mf_rerun_keeps_ownership
+t "re-run never adopts a pre-existing service"                                  mf_rerun_never_adopts
+t "manifest carries version, host, engine and db unit"                          mf_meta
+t "manifest file created world-readable"                                        mf_perms
+t "preflight snapshots, db branches name their unit, phase_services writes"     mf_wired
+t "capture_preexisting works without systemctl"                                 capture_runs_clean
+
+# ---- dollar-quote tags (PostgreSQL rejects a tag that starts with a digit) -----
+echo "=== pg dollar-quote tags ==="
+tag_letter_first() {
+  local line i tag
+  while IFS= read -r line; do
+    for i in $(seq 1 300); do
+      tag=""; eval "$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[A-Z_]+=//; s/[[:space:]]+#.*$//; s/^/tag=/')"
+      case "$tag" in [a-z]*) ;; *) echo "tag '$tag' from: $line"; return 1;; esac
+    done
+  done < <(grep -E '^[[:space:]]*(DB_PASS_TAG|PGSQL_PG_TAG)=' "$INSTALLER")
+}
+t "dollar-quote tags always start with a letter (300 draws each)" tag_letter_first
+
+# ---- front-end install must survive registry drift (no committed lockfile) ------
+echo "=== npm install ==="
+npm_legacy_peers() { grep -qE '^[[:space:]]+npm install --legacy-peer-deps$' "$INSTALLER"; }
+npm_dom_explicit() { grep -q '"@testing-library/dom"' "${SCRIPT_DIR}/../../../package.json"; }
+t "installer runs npm install --legacy-peer-deps (arborist edgesOut crash)"     npm_legacy_peers
+t "package.json lists @testing-library/dom explicitly (peer of RTL 16)"          npm_dom_explicit
+
 echo ""
 echo "Results: passed=$PASS  failed=$FAIL"
 [ "$FAIL" -eq 0 ] && echo "ALL PASS" && exit 0

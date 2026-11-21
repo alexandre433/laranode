@@ -55,6 +55,12 @@ export POST_ASSERTS_CMD='
     # Apache holds no 443 listener
     ss -tlnp "( sport = :443 )" | grep -q apache2 && { echo "FAIL: apache took :443" >&2; exit 1; }
     echo "PASS: apache not on :443"
+    # manifest: nginx stand-in pre-existing, panel PG managed (fresh cluster installed by us)
+    mf=/etc/laranode/service-manifest.json
+    grep -q "\"unit\":\"nginx.service\",\"managed\":false" "$mf" || { echo "FAIL: nginx should be managed:false" >&2; cat "$mf" >&2; exit 1; }
+    grep -q "\"unit\":\"postgresql@17-main.service\",\"managed\":true" "$mf" || { echo "FAIL: PG 17 should be managed:true" >&2; cat "$mf" >&2; exit 1; }
+    grep -q "\"proxmox\":true" "$mf" || { echo "FAIL: manifest host.proxmox should be true" >&2; exit 1; }
+    echo "PASS: manifest: nginx managed:false, PG17 managed:true, proxmox:true"
 '
 
 run_scenario
