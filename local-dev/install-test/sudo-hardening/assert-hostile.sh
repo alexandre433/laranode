@@ -367,6 +367,28 @@ if [ "${STUBS:-0}" = 1 ]; then
     done
 fi
 
+if [ "${STUBS:-0}" = 1 ]; then
+    # Calls the spec table cannot express: PHP-shaped argument lists with an EMPTY operand.
+    # Symfony Process turns the PHP `null` in CreateAccountService (ssh_access off) into "",
+    # so the script really receives:  create <user> no ""
+    extra_pos() {   # name oracle script args…   (args may contain "")
+        local name="$1" oracle="$2" script="$3" out rc; shift 3
+        selected "$script" || selected "$name" || return 0
+        world_restore
+        out=$(RUNAS=root ln_run "$script" "$@" 2>&1); rc=$?
+        n_pos=$((n_pos + 1))
+        [ "$rc" -eq 0 ] || { bad "$name: valid PHP-shaped call REFUSED (rc=$rc): ${out:0:300}"; return 0; }
+        if ! eval "$oracle"; then bad "$name: valid call exited 0 but the expected effect is missing"; return 0; fi
+        echo "  ok: $name"
+    }
+    extra_pos user-create-nossh-emptyarg \
+        '[ "$(getent passwd erin_ln | cut -d: -f7)" = /usr/sbin/nologin ] && [ -d /home/erin_ln/domains ]' \
+        laranode-user-manager.sh create erin no ""
+    extra_pos user-create-nossh-3args \
+        '[ "$(getent passwd frank_ln | cut -d: -f7)" = /usr/sbin/nologin ]' \
+        laranode-user-manager.sh create frank no
+fi
+
 echo "hostile cases run: $n_host, positive cases run: $n_pos"
 if [ "$fail" = 0 ]; then echo "HOSTILE: PASS"; else echo "HOSTILE: FAIL" >&2; fi
 exit "$fail"

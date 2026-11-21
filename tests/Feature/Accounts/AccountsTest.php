@@ -135,3 +135,55 @@ test('non admin cannot create accounts', function () {
 
     $response->assertForbidden();
 });
+
+test('creating an account without ssh access sends no empty operand to the user-manager script', function () {
+    // Symfony Process turns a PHP null into "" and the script validates a fourth operand as a
+    // password, so account creation with ssh off must not pass one at all.
+    Process::fake();
+
+    $user = User::factory()->isAdmin()->create();
+
+    $this->actingAs($user)
+        ->post(route('accounts.store'), [
+            'name' => 'No Ssh',
+            'username' => 'nossh-user',
+            'email' => 'nossh@example.com',
+            'password' => 'password',
+            'password_confirmation' => 'password',
+            'ssh_access' => false,
+            'role' => 'user',
+        ])
+        ->assertSessionHasNoErrors();
+
+    Process::assertRan(function ($process) {
+        $cmd = $process->command;
+        if (! is_array($cmd) || ! str_contains($cmd[1] ?? '', 'laranode-user-manager.sh')) {
+            return false;
+        }
+        // sudo <script> create <user> no   — and nothing after it, least of all null or ""
+        return array_slice($cmd, 2) === ['create', 'nossh-user_ln', 'no'];
+    });
+});
+
+test('creating an account with ssh access passes the password as the fourth operand', function () {
+    Process::fake();
+
+    $user = User::factory()->isAdmin()->create();
+
+    $this->actingAs($user)
+        ->post(route('accounts.store'), [
+            'name' => 'With Ssh',
+            'username' => 'withssh-user',
+            'email' => 'withssh@example.com',
+            'password' => 'password',
+            'password_confirmation' => 'password',
+            'ssh_access' => true,
+            'role' => 'user',
+        ])
+        ->assertSessionHasNoErrors();
+
+    Process::assertRan(fn ($process) => is_array($process->command)
+        && str_contains($process->command[1] ?? '', 'laranode-user-manager.sh')
+        && array_slice($process->command, 2) === ['create', 'withssh-user_ln', 'yes', 'password']
+    );
+});

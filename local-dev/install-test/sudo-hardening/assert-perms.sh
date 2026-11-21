@@ -66,17 +66,27 @@ if [ -f "$ENVF" ]; then
     if [ $(( 0$m & 0137 )) -ne 0 ]; then bad ".env mode is $m (must be <= 640: no group write, no world access)"; else ok ".env mode $m"; fi
 fi
 
-# The panel checkout: the web user reads it, it must not WRITE it (only storage, bootstrap/cache
-# and the logs dir are the web process's scratch space). Group/other-writable anything else
-# lets a compromised www-data plant code that the panel user (queue worker, cron) then runs.
+# The panel checkout: the web user reads it, it must not WRITE it (only storage and the logs
+# dir are the web process's scratch space). Group/other-writable anything else lets a
+# compromised www-data plant code that the panel user (queue worker, cron) runs, and that an
+# installer / upgrade run as root would `require` (bootstrap/cache/{packages,services,config}.php
+# are loaded by every artisan call). bootstrap/cache is therefore NOT writable by www-data.
 H=/home/laranode_ln
 if [ -d "$H/panel" ]; then
     loose=$(find "$H" -xdev ! -type l \( -perm -g+w -o -perm -o+w \) \
         ! -path "$H/panel/storage" ! -path "$H/panel/storage/*" \
-        ! -path "$H/panel/bootstrap/cache" ! -path "$H/panel/bootstrap/cache/*" \
         ! -path "$H/logs" ! -path "$H/logs/*" 2>/dev/null | head -5)
-    if [ -n "$loose" ]; then bad "group/other-writable under $H outside storage, bootstrap/cache, logs: $(echo $loose)"
-    else ok "nothing under $H is group/other-writable except storage, bootstrap/cache, logs"; fi
+    if [ -n "$loose" ]; then bad "group/other-writable under $H outside storage and logs: $(echo $loose)"
+    else ok "nothing under $H is group/other-writable except storage and logs"; fi
+    if [ -d "$H/panel/bootstrap/cache" ]; then
+        if runuser -u www-data -- sh -c ": > '$H/panel/bootstrap/cache/.probe-www'" 2>/dev/null; then
+            rm -f "$H/panel/bootstrap/cache/.probe-www"; bad "www-data can create files in $H/panel/bootstrap/cache"
+        else ok "www-data cannot write bootstrap/cache"; fi
+        for f in "$H"/panel/bootstrap/cache/*.php; do
+            [ -e "$f" ] || continue
+            if runuser -u www-data -- test -w "$f" 2>/dev/null; then bad "www-data can write $f"; fi
+        done
+    fi
 fi
 
 if [ "$fail" = 0 ]; then echo "PERMS: PASS"; else echo "PERMS: FAIL" >&2; fi
