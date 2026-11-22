@@ -141,6 +141,35 @@ mut bin/laranode-installer.sh 'installer: env_set edits .env as root (follows a 
     '  printf '"'"'%s\n'"'"' "$v" | _as_panel_user bash -c "$(declare -f _env_set_inner)' \
     '  printf '"'"'%s\n'"'"' "$v" | bash -c "$(declare -f _env_set_inner)'
 
+# --- PR B: host.conf web user (Proxmox: laranode_web, never www-data) + ufw gate (assert-sync.sh) --
+# Not listed: the post-render "www-data still named" grep (the render's two fixed substitutions
+# are each caught; the grep only refuses a drop-in the allowlist already refused), user-manager's
+# usermod/gpasswd of $LN_WEB_USER (www-data on the fast harness host: an equivalent mutant there;
+# the pve-webuser container scenario covers it)
+mut $S 'sync: grants never rendered for the host.conf web user' \
+    '    render_for_web_user "$STAGE/etc/sudoers.d/$d"' '    :'
+mut $S 'sync: Proxmox host may grant www-data (pveproxy) sudo' \
+    'if [ -d "$PVE_DIR" ] || command -v pveversion >/dev/null 2>&1; then' 'if false; then'
+mut $S 'sync: untrusted host.conf (symlink, not root, writable) accepted' \
+    '|| die "$HOST_CONF must be a regular root-owned file' '|| true "$HOST_CONF must be a regular root-owned file'
+mut $S 'sync: unknown host.conf line ignored' \
+    '            *) die "unexpected line in $HOST_CONF: $line" ;;' '            *) : ;;'
+mut $S 'sync: missing web user accepted' \
+    '|| die "panel web user $WEB_USER does not exist"' '|| true'
+mut $S 'sync: ufw=0 still installs laranode-ufw' \
+    '    if [ "$UFW" = 0 ] && [ "$d" = laranode-ufw ]; then continue; fi' '    :'
+mut $S 'sync: ufw=0 leaves an installed laranode-ufw in place' \
+    'if [ "$UFW" = 0 ]; then rm -f -- "$SUDOERS_DIR/laranode-ufw"; fi' ':'
+mut $S 'sync: runas column (www-data) not rendered' \
+    $'           -e "s/^www-data ALL=(www-data) NOPASSWD: /$WEB_USER ALL=($WEB_USER) NOPASSWD: /" -- "$f"' \
+    $'           -e "s/^www-data ALL=(www-data) NOPASSWD: /$WEB_USER ALL=(www-data) NOPASSWD: /" -- "$f"'
+mut $L 'validate.sh: Proxmox host with LN_WEB_USER=www-data accepted' \
+    '    if [ -d /etc/pve ] && [ "$LN_WEB_USER" = www-data ]; then' '    if false; then'
+mut $L 'validate.sh: untrusted host.conf accepted' \
+    '|| ln_die "$f must be a regular root-owned file' '|| true "$f must be a regular root-owned file'
+mut $L 'validate.sh: unknown host.conf value ignored' \
+    '                *) ln_die "unexpected line in $f" ;;' '                *) : ;;'
+
 IMG=laranode-sudo-fast
 docker build -q -t "$IMG" - >/dev/null <<'DF'
 FROM debian:13

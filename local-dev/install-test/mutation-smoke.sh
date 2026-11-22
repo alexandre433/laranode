@@ -99,6 +99,35 @@ MUTATIONS=(
   # sudo review r3 F3
   'protected_hardlinks=0 accepted|s#\[ "$v" = 1 \] || die "fs.protected_hardlinks#true || die "fs.protected_hardlinks#'
   'protected_hardlinks never checked by main|s#^  _require_protected_hardlinks$#  :#'
+  # PR B G2/G7: Proxmox web user (laranode_web, never www-data) + ufw gate
+  'Proxmox: web user never resolved in preflight|s#^  _resolve_web_user$#  :#'
+  'Proxmox: panel runs as www-data again|s#^  WEB_USER=laranode_web$#  WEB_USER=www-data#'
+  'Proxmox: pre-existing Apache accepted (cannot switch its User)|s#|| die "Proxmox host with a pre-existing Apache#|| true "#'
+  'Proxmox: pre-existing php8.4-fpm accepted|s#|| die "Proxmox host with a pre-existing php8.4-fpm#|| true "#'
+  'Proxmox: ufw stays on without LARANODE_PVE_UFW|s#\[ "\${LARANODE_PVE_UFW:-0}" = 1 \] || UFW_ENABLED=0#:#'
+  'web user never created/verified|s#^  _ensure_web_user$#  :#'
+  'web user uid not checked (root or a login uid accepted)|s#|| die "panel web user \${WEB_USER} must be a system account#|| true "#'
+  'web user in group www-data accepted|s#die "panel web user \${WEB_USER} is in group www-data#true "#'
+  'www-data kept in the panel group on Proxmox|s#gpasswd -d www-data laranode_ln >/dev/null || die#true || die#'
+  'host.conf never written|s#^  _write_host_conf$#  :#'
+  'ufw sudoers required even with ufw off|s#if \[ "\${UFW_ENABLED:-1}" = 1 \]; then need+=(laranode-ufw); else rm -f "\${sd}/laranode-ufw"; fi#need+=(laranode-ufw)#'
+  'Firewall page flag not written|s#^  _panel_feature_env$#  :#'
+  'panel Apache not switched to the web user|s#^  _apache_web_user$#  :#'
+  'panel PHP-FPM pool not written for the web user|s#^  _write_panel_pool$#  :#'
+  # PR B G1: pinned ref
+  'no ref: silent default branch installed|s#\[ -n "\$r" \] || die "No ref to install#true || die "#'
+  'ref not validated (option smuggling)|s#=~ ^\[A-Za-z0-9\]\[A-Za-z0-9._/-\]{0,127}\$ \]\]#=~ .* ]]#'
+  'clone through a symlinked PANEL_PATH|s#\[ ! -L "\$PANEL_PATH" \] || die#true || die#'
+  'clone runs as root again|s#_as_panel_user git clone --quiet#git clone --quiet#'
+  'clone HEAD not verified against the ref|s#|| die "checkout is not at#|| true "#'
+  'existing checkout not verified against LARANODE_REF|s#|| die "the existing checkout at#|| true "#'
+  # PR B G3: production env
+  'APP_ENV not production|s#^  env_set APP_ENV production#  env_set APP_ENV local#'
+  'APP_DEBUG left on|s#^  env_set APP_DEBUG false#  env_set APP_DEBUG true#'
+  # PR B r4 nits
+  'env_set accepts a newline / CR / double quote|s#) die "refusing to write \${k}: the value holds#) true "#'
+  'sync stash left behind on die (no exit hook)|s#^  _add_exit_hook _stash_cleanup$#  :#'
+  '.env read by root again (follows a planted link)|s#v=\$(_as_panel_user cat -- "\${PANEL_PATH}/.env"#v=$(cat -- "${PANEL_PATH}/.env"#'
 )
 
 fail=0

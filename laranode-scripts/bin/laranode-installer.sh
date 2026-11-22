@@ -275,8 +275,7 @@ env_set() {
   local k="$1" v="$2" f="$3"
   # one line, no quote: a newline would add a second KEY= line (or cut the value), a '"'
   # would end the quoted value early
-  case "$v" in *$'
-'*|*$''*|*'"'*) die "refusing to write ${k}: the value holds a newline, CR or double quote" ;; esac
+  case "$v" in *$'\n'*|*$'\r'*|*'"'*) die "refusing to write ${k}: the value holds a newline, CR or double quote" ;; esac
   printf '%s\n' "$v" | _as_panel_user bash -c "$(declare -f _env_set_inner); cd /; _env_set_inner \"\$@\"" _ "$k" "$f"
 }
 

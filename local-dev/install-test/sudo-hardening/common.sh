@@ -6,8 +6,17 @@
 # `sudo -l -U www-data` really grants, so the same assertions prove both the
 # legacy layout (scripts inside the www-data-writable panel tree) and the fixed one.
 
-ln_sudo_rules() {   # one command spec per line, as sudo -l prints them for www-data
-    sudo -l -U www-data 2>/dev/null \
+# The panel web user: www-data, or laranode_web on a Proxmox host (the installer records it in
+# /etc/laranode/host.conf). Every check below runs as, and reads the grants of, that account.
+ln_web_user() {
+    local u
+    u=$(sed -n 's/^web_user=\(www-data\|laranode_web\)$/\1/p' /etc/laranode/host.conf 2>/dev/null | tail -n1)
+    echo "${u:-www-data}"
+}
+LN_WEB=$(ln_web_user)
+
+ln_sudo_rules() {   # one command spec per line, as sudo -l prints them for the web user
+    sudo -l -U "$LN_WEB" 2>/dev/null \
       | sed -n -E 's/^ +\([^)]*\) +//p' \
       | sed -E 's/^((NOPASSWD|PASSWD|SETENV|NOSETENV|EXEC|NOEXEC|LOG_INPUT|LOG_OUTPUT):[ ]*)+//' \
       | tr ',' '\n' | sed -E 's/^ +//; s/ +$//' | sed '/^$/d'
@@ -26,13 +35,14 @@ ln_tpl_dir() {      # template dir = sibling of the script dir
     echo "$(cd "$b/.." && pwd)/templates"
 }
 
-# run a sudo'd script the way PHP does: as www-data, `sudo -n <script> args…`
-ln_run() {          # ln_run script-basename args…   (RUNAS=root|www-data)
+# run a sudo'd script the way PHP does: as the web user, `sudo -n <script> args…`
+# (RUNAS=www-data means "as the web user itself", whatever its name on this host)
+ln_run() {          # ln_run script-basename args…   (RUNAS=root|www-data|direct)
     local s="$1"; shift
     local -a pre=(sudo -n)
-    [ "${RUNAS:-root}" = www-data ] && pre=(sudo -n -u www-data)
+    [ "${RUNAS:-root}" = www-data ] && pre=(sudo -n -u "$LN_WEB")
     [ "${RUNAS:-root}" = direct ] && pre=()   # no sudo at all: the script itself must refuse a non-root caller
-    timeout 30 runuser -u www-data -- "${pre[@]}" "$(ln_bin_dir)/$s" "$@" </dev/null
+    timeout 30 runuser -u "$LN_WEB" -- "${pre[@]}" "$(ln_bin_dir)/$s" "$@" </dev/null
 }
 
 # Everything a hostile call could damage, as one comparable string.
