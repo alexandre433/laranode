@@ -1656,8 +1656,25 @@ mtg_pve() { mtg_run laranode_web
 t  "upgrade to laranode_web: every tenant group gains laranode_web and loses www-data" mtg_pve
 mtg_plain() { mtg_run www-data; [ ! -s "$CALLS" ] || { echo "plain host touched groups:"; cat "$CALLS"; return 1; }; }
 t  "plain host (www-data): no tenant group is touched"                             mtg_plain
-mtg_called() { bash -c "source '$INSTALLER'; declare -f _ensure_web_user" | grep -q '_migrate_tenant_groups'; }
-t  "_ensure_web_user migrates the tenant groups on the dedicated web user"         mtg_called
+# PR #11 r2 (availability): the migration drops www-data from every tenant group while Apache still
+# runs as www-data. It must happen only once nothing can die before the Apache user switch: NOT in
+# _ensure_web_user (phase_fetch_panel: before the LARANODE_REF check and the sudoers die), but in
+# phase_webserver right before _apache_web_user (the User snippet) and the Apache reload.
+mtg_not_early() { ! bash -c "source '$INSTALLER'; declare -f _ensure_web_user phase_fetch_panel" | grep -q '_migrate_tenant_groups'; }
+t  "tenant groups are NOT migrated in _ensure_web_user / phase_fetch_panel (before the ref check)" mtg_not_early
+mtg_in_webserver() { local body a b
+  body=$(bash -c "source '$INSTALLER'; declare -f phase_webserver")
+  a=$(printf '%s\n' "$body" | grep -n '^ *_migrate_tenant_groups;*$' | head -1 | cut -d: -f1)
+  b=$(printf '%s\n' "$body" | grep -n '^ *_apache_web_user;*$' | head -1 | cut -d: -f1)
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ] && [ $((b - a)) -le 3 ]; }
+t  "phase_webserver migrates the tenant groups right before the Apache user switch" mtg_in_webserver
+mtg_after_ref() { local body a b
+  body=$(bash -c "source '$INSTALLER'; declare -f main")
+  a=$(printf '%s\n' "$body" | grep -n '^ *phase_fetch_panel;*$' | head -1 | cut -d: -f1)
+  b=$(printf '%s\n' "$body" | grep -n '^ *phase_webserver;*$' | head -1 | cut -d: -f1)
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ] \
+    && bash -c "source '$INSTALLER'; declare -f phase_fetch_panel" | grep -q '_verify_checkout_ref'; }
+t  "the ref is verified in phase_fetch_panel, which main runs before phase_webserver (the migration)" mtg_after_ref
 mtg_fail() { mtg_run laranode_web; gpasswd() { return 1; }; _migrate_tenant_groups; }
 tfm "a tenant group that cannot be migrated stops the install" "could not remove www-data from tenant group" mtg_fail
 tf "Proxmox: refused when laranode_web is a regular (uid >= 1000) account"         ewu_run laranode_web 1001 "www-data"
