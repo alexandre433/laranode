@@ -5,6 +5,9 @@
 #   2. APP_KEY is identical after both runs
 #   3. custom LARANODE_APP_URL is preserved across runs
 #   4. admin login still works (standard run_scenario assertion)
+#   5. PR #11 r2: a REAL clone (not an injected tree) from a local repo at a LIGHTWEIGHT tag lands
+#      detached at exactly that commit; the re-run at the ANNOTATED tag (same commit) passes the
+#      ref + clean-tree check; a re-run at another tag dies and leaves the checkout alone.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,9 +23,33 @@ SCENARIO=rerun
 # the second run checks the first-run seed sentinel.
 PRESETUP='
 set -euo pipefail
-echo "[rerun] === First installer run ==="
-LARANODE_APP_URL=http://laranode.example.com LARANODE_UNATTENDED=1 COMPOSER_CACHE_DIR=/composer-cache \
-    bash /home/laranode_ln/panel/laranode-scripts/bin/laranode-installer.sh
+fail() { echo "FAIL: $*" >&2; exit 1; }
+echo "[rerun] === Local repo: lightweight tag, annotated tag (same commit), a later tag ==="
+apt-get update -qq >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git >/dev/null 2>&1 \
+    || fail "could not install git for the local test repo"
+git config --system --add safe.directory "*"
+R=/srv/ln-repo
+mkdir -p $R && tar -C /home/laranode_ln/panel -cf - . | tar -C $R -xf -
+git -C $R init -q
+git -C $R -c user.name=t -c user.email=t@t add -A
+git -C $R -c user.name=t -c user.email=t@t commit -q -m base
+git -C $R tag v-light
+git -C $R -c user.name=t -c user.email=t@t tag -a v-ann -m annotated
+TAGGED=$(git -C $R rev-parse v-light^{commit})
+[ "$(git -C $R rev-parse v-ann^{commit})" = "$TAGGED" ] || fail "annotated tag does not peel to the same commit"
+git -C $R -c user.name=t -c user.email=t@t commit -q --allow-empty -m later
+git -C $R tag v-later
+chmod -R a+rX $R
+# no checkout: the first run must do a real clone
+rm -rf /home/laranode_ln/panel
+
+echo "[rerun] === First installer run: real clone at the lightweight tag ==="
+LARANODE_REPO=$R LARANODE_REF=v-light LARANODE_APP_URL=http://laranode.example.com LARANODE_UNATTENDED=1 COMPOSER_CACHE_DIR=/composer-cache \
+    bash $R/laranode-scripts/bin/laranode-installer.sh
+HEAD1=$(runuser -u laranode_ln -- git -C /home/laranode_ln/panel rev-parse HEAD)
+[ "$HEAD1" = "$TAGGED" ] || fail "clone HEAD $HEAD1 is not the tagged commit $TAGGED"
+if runuser -u laranode_ln -- git -C /home/laranode_ln/panel symbolic-ref -q HEAD >/dev/null 2>&1; then fail "clone is on a branch, not detached"; fi
+echo "PASS: real clone at the lightweight tag: detached HEAD = tagged commit"
 
 echo "[rerun] === Seeding admin after run 1 (users-table sentinel for run 2) ==="
 /usr/bin/php8.4 /home/laranode_ln/panel/artisan tinker \
@@ -39,11 +66,19 @@ URL1="$(grep "^APP_URL=" /home/laranode_ln/panel/.env | cut -d= -f2- | tr -d "\"
 printf "KEY1=%s\nURL1=%s\n" "$KEY1" "$URL1" > /tmp/laranode-rerun-state
 echo "[rerun] KEY1=${KEY1}"
 echo "[rerun] URL1=${URL1}"
+echo "[rerun] === Re-run at ANOTHER tag must die on the ref check and leave the checkout alone ==="
+if LARANODE_REPO=$R LARANODE_REF=v-later LARANODE_UNATTENDED=1 LARANODE_HTTP_PORT=80 COMPOSER_CACHE_DIR=/composer-cache \
+    bash /home/laranode_ln/panel/laranode-scripts/bin/laranode-installer.sh > /tmp/rerun-badref.log 2>&1; then
+    fail "re-run at a different LARANODE_REF succeeded"
+fi
+grep -q "is not at LARANODE_REF" /tmp/rerun-badref.log || { tail -15 /tmp/rerun-badref.log >&2; fail "re-run died, but not on the ref check"; }
+[ "$(runuser -u laranode_ln -- git -C /home/laranode_ln/panel rev-parse HEAD)" = "$TAGGED" ] || fail "the refused re-run moved the checkout"
+echo "PASS: re-run at another tag refused by the ref check, checkout untouched"
 echo "[rerun] === PRESETUP done; run_scenario will now run the installer a second time ==="
 '
 
 # run_scenario runs this as the second (main) installer invocation:
-INSTALLER_ENV="LARANODE_APP_URL=http://laranode.example.com LARANODE_UNATTENDED=1 LARANODE_HTTP_PORT=80"
+INSTALLER_ENV="LARANODE_REPO=/srv/ln-repo LARANODE_REF=v-ann LARANODE_APP_URL=http://laranode.example.com LARANODE_UNATTENDED=1 LARANODE_HTTP_PORT=80"
 EXPECT_PORT=80
 EXPECT_ENGINE=mysql
 
