@@ -69,7 +69,10 @@ return [
 
         'provider' => 'config',
 
-        'apps' => [
+        // Apps without an id (the optional ESP32 / SMARTH ones on a host that does not configure them)
+        // are dropped: Reverb's periodic ConfigApplicationProvider::all() hits findById(null) on them
+        // and the server crashed (then restarted) about once a minute.
+        'apps' => array_values(array_filter([
             [
                 'key' => env('REVERB_APP_KEY'),
                 'secret' => env('REVERB_APP_SECRET'),
@@ -90,7 +93,7 @@ return [
                 'secret' => env('REVERB_ESP32_SECRET'),
                 'app_id' => env('REVERB_ESP32_APP_ID'),
                 'options' => [
-                    'host' =>  env('REVERB_ESP32_HOST'),
+                    'host' => env('REVERB_ESP32_HOST'),
                     'port' => env('REVERB_PORT', 443),
                     'scheme' => env('REVERB_SCHEME', 'https'),
                     'useTLS' => env('REVERB_SCHEME', 'https') === 'https',
@@ -102,7 +105,7 @@ return [
             ],
             [
                 'app_id' => env('REVERB_SMARTH_APP_ID'),
-                'key' =>  env('REVERB_SMARTH_KEY'),
+                'key' => env('REVERB_SMARTH_KEY'),
                 'secret' => env('REVERB_SMARTH_SECRET'),
                 'options' => [
                     'host' => env('REVERB_SMARTH_HOST'),
@@ -114,8 +117,8 @@ return [
                 'ping_interval' => env('REVERB_APP_PING_INTERVAL', 60),
                 'activity_timeout' => env('REVERB_APP_ACTIVITY_TIMEOUT', 30),
                 'max_message_size' => env('REVERB_APP_MAX_MESSAGE_SIZE', 10_000),
-            ]
-        ],
+            ],
+        ], fn ($app) => filled($app['app_id'] ?? null))),
 
     ],
 
