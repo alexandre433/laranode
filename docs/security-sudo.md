@@ -110,6 +110,8 @@ application-profile name). Options (`-…`) never pass through.
   * `assert-sync.sh`: `laranode-sync-scripts.sh` publishes a clean tree and refuses each hostile
     drop-in / symlinked source / bad script / hostile template line (one case per allowlist rule),
     and keeps root-only files out of the published tree while a symlink swap races the sync;
+  * `assert-installer-env.sh`: the installer's `_seed_env` / `env_set` never copy or edit through a symlink
+    `laranode_ln` planted (`.env.example` -> root-only file, `.env` -> a root-owned file);
   * `assert-hostile.sh`: for every sudo'd script, hostile arguments (root, `../`, newline, spaces,
     sed metacharacters, globs, option injection, symlinks) run as `www-data`; each must exit
     non-zero AND leave a host-state snapshot unchanged; valid PHP-shaped calls must still work.
