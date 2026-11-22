@@ -48,7 +48,7 @@ export POST_ASSERTS_CMD='
     # the stand-in pveproxy still runs as www-data, untouched
     systemctl is-active -q pveproxy.service || fail "pveproxy stand-in stopped"
     pp=$(systemctl show -p MainPID --value pveproxy.service)
-    [ "$(ps -o user= -p "$pp" | tr -d " ")" = www-data ] || fail "pveproxy stand-in not running as www-data"
+    [ "$(ps -o user:32= -p "$pp" | tr -d " ")" = www-data ] || fail "pveproxy stand-in not running as www-data"
     echo "PASS: pveproxy stand-in still runs as www-data"
     # www-data: no sudo, no laranode group
     sudo -n -l -U www-data 2>/dev/null | grep -q laranode && { sudo -l -U www-data >&2; fail "www-data holds a laranode sudo grant"; }
@@ -71,20 +71,20 @@ export POST_ASSERTS_CMD='
     # Apache + PHP-FPM workers run as laranode_web
     apache2ctl -t -D DUMP_RUN_CFG 2>/dev/null | grep -q "^User: name=\"laranode_web\"" || { apache2ctl -t -D DUMP_RUN_CFG >&2; fail "Apache User is not laranode_web"; }
     curl -s -o /dev/null http://127.0.0.1/login || true
-    wa=$(ps -o user= -C apache2 | sort | uniq -c | tr "\n" ";")
-    ps -o user= -C apache2 | grep -vx root | grep -vqx laranode_web && fail "apache2 worker not running as laranode_web: $wa"
-    ps -o user= -C apache2 | grep -qx laranode_web || fail "no apache2 worker as laranode_web: $wa"
+    wa=$(ps -o user:32= -C apache2 | sort | uniq -c | tr "\n" ";")
+    ps -o user:32= -C apache2 | grep -vx root | grep -vqx laranode_web && fail "apache2 worker not running as laranode_web: $wa"
+    ps -o user:32= -C apache2 | grep -qx laranode_web || fail "no apache2 worker as laranode_web: $wa"
     grep -q "^user = laranode_web" /etc/php/8.4/fpm/pool.d/laranode-panel.conf || fail "panel pool does not run as laranode_web"
-    pf=$(ps -o user=,args= -C php-fpm8.4 | grep "pool laranode-panel" | awk "{print \$1}" | sort -u | tr "\n" " ")
+    pf=$(ps -o user:32=,args= -C php-fpm8.4 | grep "pool laranode-panel" | awk "{print \$1}" | sort -u | tr "\n" " ")
     [ -z "$pf" ] || [ "$pf" = "laranode_web " ] || fail "laranode-panel pool workers run as: $pf"
     echo "PASS: Apache workers and the panel PHP-FPM pool run as laranode_web"
     # ufw gated off: no drop-in, Firewall page 404, .env flag false
     [ -e /etc/sudoers.d/laranode-ufw ] && fail "laranode-ufw sudoers drop-in installed on Proxmox"
-    grep -q "^LARANODE_FIREWALL_ENABLED=false" /home/laranode_ln/panel/.env || fail ".env lacks LARANODE_FIREWALL_ENABLED=false"
+    grep -qE "^LARANODE_FIREWALL_ENABLED=\"?false\"?$" /home/laranode_ln/panel/.env || fail ".env lacks LARANODE_FIREWALL_ENABLED=false"
     echo "PASS: no laranode-ufw drop-in, firewall flag off"
     # production env, .env 640
-    grep -q "^APP_ENV=production" /home/laranode_ln/panel/.env || fail "APP_ENV is not production"
-    grep -q "^APP_DEBUG=false" /home/laranode_ln/panel/.env || fail "APP_DEBUG is not false"
+    grep -qE "^APP_ENV=\"?production\"?$" /home/laranode_ln/panel/.env || fail "APP_ENV is not production"
+    grep -qE "^APP_DEBUG=\"?false\"?$" /home/laranode_ln/panel/.env || fail "APP_DEBUG is not false"
     [ "$(stat -c %a /home/laranode_ln/panel/.env)" = 640 ] || fail ".env mode $(stat -c %a /home/laranode_ln/panel/.env)"
     echo "PASS: APP_ENV=production, APP_DEBUG=false, .env 640"
     # the panel works AS laranode_web: login page 200, an admin session reaches /dashboard,
@@ -96,11 +96,11 @@ export POST_ASSERTS_CMD='
     code=$(curl -s -o /dev/null -w "%{http_code}" -c "$j" -b "$j" -H "X-XSRF-TOKEN: $tok" \
         --data-urlencode "email=admin@laranode.test" --data-urlencode "password=password" http://127.0.0.1/login)
     case "$code" in 302|303) : ;; *) fail "POST /login answered $code" ;; esac
-    code=$(curl -s -o /dev/null -w "%{http_code}" -c "$j" -b "$j" http://127.0.0.1/dashboard)
-    [ "$code" = 200 ] || fail "GET /dashboard as admin answered $code"
+    code=$(curl -s -o /dev/null -w "%{http_code}" -c "$j" -b "$j" http://127.0.0.1/dashboard/admin)
+    [ "$code" = 200 ] || fail "GET /dashboard/admin as admin answered $code"
     code=$(curl -s -o /dev/null -w "%{http_code}" -c "$j" -b "$j" http://127.0.0.1/admin/firewall)
     [ "$code" = 404 ] || fail "GET /admin/firewall as admin answered $code (want 404 on Proxmox)"
-    echo "PASS: admin logs in over HTTP, dashboard 200, /admin/firewall 404"
+    echo "PASS: admin logs in over HTTP, /dashboard/admin 200, /admin/firewall 404"
 '
 
 run_scenario

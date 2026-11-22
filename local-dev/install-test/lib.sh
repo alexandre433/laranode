@@ -128,7 +128,7 @@ run_scenario() {
 
     echo "[$scenario][5/6] Seeding admin account..."
     docker exec "$cname" bash -lc \
-        'cd /home/laranode_ln/panel && /usr/bin/php8.4 artisan tinker --execute='\''
+        'cd /home/laranode_ln/panel && runuser -u laranode_ln -- /usr/bin/php8.4 artisan tinker --execute='\''
             App\Models\User::updateOrCreate(
                 ["username" => "laranode"],
                 ["name" => "Admin", "email" => "admin@laranode.test",
@@ -199,13 +199,24 @@ run_scenario() {
 
     # --- Admin login check ---
     login=$(docker exec "$cname" bash -lc \
-        'cd /home/laranode_ln/panel && /usr/bin/php8.4 artisan tinker --execute='\''
+        'cd /home/laranode_ln/panel && runuser -u laranode_ln -- /usr/bin/php8.4 artisan tinker --execute='\''
             echo Illuminate\Support\Facades\Auth::attempt(
                 ["email" => "admin@laranode.test", "password" => "password"]
             ) ? "yes" : "no";
         '\''' 2>/dev/null | tail -1)
     printf "   %-32s %s\n" "admin login" "$login"
     echo "$login" | grep -q yes || ok=0
+
+    # Runtime audit: root never writes inside the panel account's home. The installer runs every
+    # composer/artisan/npm/git step as laranode_ln; a root-owned file there (a log or cache an
+    # artisan call as root created, a root clone) is what a later root step could be tricked
+    # through. Checked after install + seeding + login, i.e. after every panel PHP run.
+    rootfiles=$(docker exec "$cname" find /home/laranode_ln -xdev -user root 2>/dev/null | head -5)
+    if [ -z "$rootfiles" ]; then
+        printf "   %-32s %s\n" "no root-owned file in ~laranode_ln" "ok"
+    else
+        printf "   %-32s %s\n" "no root-owned file in ~laranode_ln" "FOUND: $(echo $rootfiles)"; ok=0
+    fi
 
     # ── Sudo hardening gate (every full install) ────────────────────────────
     # www-data holds NOPASSWD sudo on the privileged scripts, so (1) nothing it can
@@ -216,7 +227,7 @@ run_scenario() {
     if [ "${SKIP_SUDO_HARDENING:-0}" != 1 ]; then
         echo "[post] sudo hardening: installed permissions"
         docker exec "${cname}" bash /src/local-dev/install-test/sudo-hardening/assert-perms.sh || ok=0
-        echo "[post] sudo hardening: hostile arguments as www-data"
+        echo "[post] sudo hardening: hostile arguments as the panel web user"
         docker exec "${cname}" bash /src/local-dev/install-test/sudo-hardening/assert-hostile.sh || ok=0
     fi
 

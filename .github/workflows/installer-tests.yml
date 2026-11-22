@@ -73,7 +73,7 @@ jobs:
         # Every container scenario runs on every change (one job each, in parallel, so the
         # wall time is the slowest single scenario, not the sum).
         #   clean room: baseline, mysql-rootpw, pgsql, rerun, debian13
-        #   host guards: pve, cloudpanel
+        #   host guards: pve, pve-webuser, cloudpanel
         #   pre-existing services: nginx80, apache80, apache-stopped, phpfpm-live, port-busy
         scenario:
           - baseline
@@ -83,6 +83,7 @@ jobs:
           - rerun
           - debian13
           - pve
+          - pve-webuser
           - cloudpanel
           - apache80
           - port-busy

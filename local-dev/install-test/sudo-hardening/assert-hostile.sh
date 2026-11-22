@@ -30,7 +30,7 @@ fx_reset() {
     for u in alice_ln bob_ln; do
         getent passwd "$u" >/dev/null || useradd -m -s /usr/sbin/nologin "$u"
         mkdir -p "/home/$u/domains" "/home/$u/logs"
-        usermod -aG "$u" www-data
+        usermod -aG "$u" "$LN_WEB"
     done
     getent passwd svc_ln >/dev/null || useradd -u 501 -M -s /usr/sbin/nologin svc_ln   # uid < 1000
     getent passwd evilhome_ln >/dev/null || useradd -M -d /var/evilhome -s /usr/sbin/nologin evilhome_ln   # uid >= 1000 but home is not /home/evilhome_ln
@@ -56,21 +56,21 @@ fx_reset() {
         printf '%s\n[Service]\nExecStartPre=/bin/touch /tmp/pwned-template\n' "$evil" > "/tmp/evildir/$t"
     done
     printf '%s\n' "$evil" > /tmp/evil.template
-    chown -R www-data:www-data /tmp/evildir /tmp/evil.template
-    runuser -u www-data -- ln -sfn /etc /home/alice_ln/domains/linketc
+    chown -R "$LN_WEB:$LN_WEB" /tmp/evildir /tmp/evil.template
+    runuser -u "$LN_WEB" -- ln -sfn /etc /home/alice_ln/domains/linketc
     # a FIFO planted by the web user: opening it would block a root script for ever
-    runuser -u www-data -- mkfifo /home/alice_ln/domains/example.com/public/fifo
-    runuser -u www-data -- ln -sfn /etc/hostname /tmp/laranode-link-out
-    runuser -u www-data -- ln -sfn /etc/shadow /tmp/laranode-restore-link
+    runuser -u "$LN_WEB" -- mkfifo /home/alice_ln/domains/example.com/public/fifo
+    runuser -u "$LN_WEB" -- ln -sfn /etc/hostname /tmp/laranode-link-out
+    runuser -u "$LN_WEB" -- ln -sfn /etc/shadow /tmp/laranode-restore-link
     # valid temp inputs, created by www-data like PHP's tempnam()
-    runuser -u www-data -- sh -c ': > /tmp/laranode-backup-pos.tgz; : > /tmp/laranode-backup-pos2.tgz'
-    runuser -u www-data -- sh -c 'printf "[client]\npassword=x\n" > /tmp/laranode-restore-x.cnf; chmod 600 /tmp/laranode-restore-x.cnf'
+    runuser -u "$LN_WEB" -- sh -c ': > /tmp/laranode-backup-pos.tgz; : > /tmp/laranode-backup-pos2.tgz'
+    runuser -u "$LN_WEB" -- sh -c 'printf "[client]\npassword=x\n" > /tmp/laranode-restore-x.cnf; chmod 600 /tmp/laranode-restore-x.cnf'
     ( cd /home/alice_ln/domains/example.com && mkdir -p /tmp/tarsrc && echo hi > /tmp/tarsrc/restored.txt \
         && tar -czf /tmp/laranode-restore-pos.tgz -C /tmp/tarsrc . && rm -rf /tmp/tarsrc )
     printf 'select 1;\n' | gzip > /tmp/laranode-restore-pos.sql.gz
     rm -f /tmp/laranode_cron_pos   # created by www-data, like PHP's tempnam (root may not reopen it: fs.protected_regular)
-    runuser -u www-data -- sh -c 'printf "* * * * *\\tphp /home/alice_ln/domains/example.com/public/index.php\\n" > /tmp/laranode_cron_pos'
-    chown www-data:www-data /tmp/laranode-restore-pos.tgz /tmp/laranode-restore-pos.sql.gz /tmp/laranode_cron_pos
+    runuser -u "$LN_WEB" -- sh -c 'printf "* * * * *\\tphp /home/alice_ln/domains/example.com/public/index.php\\n" > /tmp/laranode_cron_pos'
+    chown "$LN_WEB:$LN_WEB" /tmp/laranode-restore-pos.tgz /tmp/laranode-restore-pos.sql.gz /tmp/laranode_cron_pos
     : > /var/log/laranode-stub.log 2>/dev/null || true
 }
 
@@ -175,7 +175,7 @@ V_ufwdis=disable;         H_ufwdis=( bogus -x '' 'disable;id' )
 SPECS=(
  'add-pool|laranode-add-php-fpm-pool.sh|root|user phpver tpl_pool|grep -q "^\[alice_ln\]" /etc/php/8.4/fpm/pool.d/alice_ln.conf'
  'add-vhost|laranode-add-vhost.sh|root|userln domain docroot phpver tpl_vhost|grep -q "ServerName example.com" /etc/apache2/sites-available/example.com.conf && ! grep -q "{" /etc/apache2/sites-available/example.com.conf'
- 'backup-files|laranode-backup-files.sh|root|sitepath tmpout userln|tar -tzf /tmp/laranode-backup-pos.tgz | grep -q public && [ "$(stat -c %U /tmp/laranode-backup-pos.tgz)" = www-data ]'
+ 'backup-files|laranode-backup-files.sh|root|sitepath tmpout userln|tar -tzf /tmp/laranode-backup-pos.tgz | grep -q public && [ "$(stat -c %U /tmp/laranode-backup-pos.tgz)" = "$LN_WEB" ]'
  'create-directory|laranode-create-directory.sh|root|dirpath user|[ -d /home/alice_ln/domains/new.com/public ] && [ "$(stat -c %U /home/alice_ln/domains/new.com/public)" = alice_ln ]'
  'db-backup|laranode-db-backup.sh|root|engine dbname dbuser cnf dbout|[ -s /tmp/laranode-db-backup-pos.sql.gz ]'
  'file-permissions|laranode-file-permissions.sh|root|relpath user|[ "$(stat -c "%U %a" /home/alice_ln/domains/example.com/public/index.php)" = "alice_ln 660" ]'
@@ -283,7 +283,7 @@ selected() { [ "${#ONLY[@]}" -eq 0 ] && return 0; local s; for s in "${ONLY[@]}"
 check_hostile() {   # label script runas args…
     local label="$1" script="$2" runas="$3"; shift 3
     local before after rc out
-    id www-data >/dev/null 2>&1 || { bad "$label: www-data account vanished; restoring"; world_restore; }
+    id "$LN_WEB" >/dev/null 2>&1 || { bad "$label: web user account vanished; restoring"; world_restore; }
     before=$(ln_snap)
     out=$(RUNAS="$runas" ln_run "$script" "$@" 2>&1); rc=$?
     after=$(ln_snap)

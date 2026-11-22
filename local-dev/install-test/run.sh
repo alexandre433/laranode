@@ -15,7 +15,7 @@ export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 SCENARIO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/scenarios" && pwd)"
 ARG="${1:-baseline}"
 
-ALL_SCENARIOS=(baseline nginx80 mysql-rootpw pgsql rerun debian13 pve cloudpanel apache80 port-busy apache-stopped rerun-sleep phpfpm-live nginx-dualstack apache-badconf)
+ALL_SCENARIOS=(baseline nginx80 mysql-rootpw pgsql rerun debian13 pve pve-webuser cloudpanel apache80 port-busy apache-stopped rerun-sleep phpfpm-live nginx-dualstack apache-badconf)
 
 if [ "$ARG" = matrix ]; then
     declare -a pass=()
