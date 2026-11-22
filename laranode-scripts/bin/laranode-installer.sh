@@ -11,7 +11,7 @@ set -euo pipefail
 if [ "${LARANODE_INSTALLER_TEST:-0}" != 1 ]; then
   unset APT_ALLOW_SERVICE_START LARANODE_ROLLBACK_DIR LARANODE_INSTALLER_PID LARANODE_INSTALLER_START \
         LARANODE_POLICY_RC_D LARANODE_APACHE_DIR LARANODE_APACHE_MODS_STATE LARANODE_OS_RELEASE_FILE \
-        LARANODE_PVE_DIR LARANODE_CLP_DIR LARANODE_CRON_DIR LARANODE_PROC_NET_DIR LARANODE_PROC_DIR
+        LARANODE_PVE_DIR LARANODE_CLP_DIR LARANODE_CRON_DIR LARANODE_PROC_NET_DIR LARANODE_PROC_DIR         LARANODE_HOST_CONF LARANODE_PHP_POOL_DIR LARANODE_SUDOERS_DIR LARANODE_STASH_PARENT
 fi
 
 export DEBIAN_FRONTEND=noninteractive
@@ -22,6 +22,10 @@ export NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1
 
 # ---- Overridable config (env-var interface — set before sourcing or calling) ----
 LARANODE_REPO="${LARANODE_REPO:-https://github.com/alexandre433/laranode.git}"
+# The ref (branch, tag or commit) a fresh clone checks out. LARANODE_REF (env) wins; otherwise
+# this pinned ref, set when a release of the installer is cut. Never the repository's default
+# branch by accident: with neither set a fresh install is refused (_resolve_ref).
+LARANODE_PINNED_REF=""
 
 # ---- Resolved globals (set by preflight, read by subsequent phases) ----
 DB_ENGINE=""    # mysql | pgsql
@@ -34,6 +38,13 @@ IS_PROXMOX=0    # 1 on a Proxmox VE host (pve-firewall owns the firewall)
 IS_CLOUDPANEL=0 # 1 when CloudPanel is installed (its nginx/php/varnish stay untouched)
 PG_PREEXISTING=0 # PostgreSQL clusters present BEFORE this installer ran
 PANEL_PATH=/home/laranode_ln/panel
+PANEL_REF=""     # resolved clone ref (LARANODE_REF or LARANODE_PINNED_REF)
+# The account the panel's Apache + PHP-FPM run as. www-data normally. On Proxmox, pveproxy and
+# spiceproxy run as www-data: a panel that grants www-data sudo (or group laranode_ln) would hand
+# the Proxmox UI root, and a panel PHP running as www-data reads /etc/pve. There the panel runs as
+# the dedicated laranode_web and www-data gets nothing (_resolve_web_user).
+WEB_USER=www-data
+UFW_ENABLED=1    # 0 = the ufw sudoers drop-in is not installed and the Firewall page is off
 
 # ==============================================================================
 # Helpers
@@ -90,8 +101,8 @@ _probe_available() { _have_ss || [ -r "$(_proc_net)/tcp" ]; }
 # stopping it (the scripts do not), so a host with it off is refused before anything changes,
 # and the installer never flips a kernel setting on a host it does not own.
 _require_protected_hardlinks() {
-  local f; f="$(_proc_dir)/sys/fs/protected_hardlinks"
-  local v; v=$(cat "$f" 2>/dev/null || true)
+  local phl; phl="$(_proc_dir)/sys/fs/protected_hardlinks"
+  local v; v=$(cat "$phl" 2>/dev/null || true)
   [ "$v" = 1 ] || die "fs.protected_hardlinks is '${v:-unreadable}', not 1: tenant hard links could make the root scripts re-own system files. Enable it (sysctl -w fs.protected_hardlinks=1, and persist it in /etc/sysctl.d/) and re-run."
 }
 # _proc_listen_inodes PORT — socket inode of every TCP LISTEN (state 0A) socket on PORT.
@@ -262,7 +273,22 @@ _env_set_inner() {   # runs as the panel user ONLY: _env_set_inner KEY FILE   (v
 }
 env_set() {
   local k="$1" v="$2" f="$3"
+  # one line, no quote: a newline would add a second KEY= line (or cut the value), a '"'
+  # would end the quoted value early
+  case "$v" in *$'
+'*|*$''*|*'"'*) die "refusing to write ${k}: the value holds a newline, CR or double quote" ;; esac
   printf '%s\n' "$v" | _as_panel_user bash -c "$(declare -f _env_set_inner); cd /; _env_set_inner \"\$@\"" _ "$k" "$f"
+}
+
+# _env_get KEY — the value of KEY in the panel .env ('' when absent). Read AS the panel account:
+# a root grep follows a link laranode_ln planted (.env -> /root/.laranode-credentials) and would
+# print root-only lines into the install log. Before the panel user exists (first install,
+# preflight) there is nothing to read and the answer is ''.
+_env_get() {
+  local k="$1" v=""
+  v=$(_as_panel_user cat -- "${PANEL_PATH}/.env" 2>/dev/null | grep -E "^${k}=" | tail -1 | cut -d= -f2-) || v=""
+  v=${v%$'\r'}; v=${v#\"}; v=${v%\"}; v=${v#\'}; v=${v%\'}
+  printf '%s' "$v"
 }
 
 # persist_secret LINE — append to /root/.laranode-credentials (0600)
@@ -551,13 +577,20 @@ preflight() {
   # now, before any change, unless the operator opted in to starting it.
   _refuse_stopped_preexisting
 
+  # ---- The account the panel web stack runs as (Proxmox: laranode_web) -----------
+  _resolve_web_user
+  # ---- The ref a fresh clone checks out (re-run: only verified when LARANODE_REF is set)
+  if [ ! -d "${PANEL_PATH}/laranode-scripts" ] || [ -n "${LARANODE_REF:-}" ]; then
+    _resolve_ref
+  fi
+
   # ---- Refuse impossible installs now, before any mutation ----------------------
   # (these used to abort halfway through the install, after packages were added)
   if [ "$DB_ENGINE" = pgsql ] && [ "${PG_PREEXISTING:-0}" -gt 0 ] && [ -z "${LARANODE_PG_PORT:-}" ]; then
     local _prev_pg_port=""
-    if [ -f "${PANEL_PATH}/.env" ] && grep -q '^DB_CONNECTION="\?pgsql' "${PANEL_PATH}/.env"; then
-      _prev_pg_port=$(grep -E '^DB_PORT=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d "\"' " || true)
-    fi
+    case "$(_env_get DB_CONNECTION)" in
+      pgsql*) _prev_pg_port=$(_env_get DB_PORT | tr -d ' ') ;;
+    esac
     [ -n "$_prev_pg_port" ] \
       || die "PostgreSQL cluster(s) already exist on this host. Set LARANODE_PG_PORT to the cluster the panel may use:"$'\n'"$(pg_lsclusters --no-header 2>/dev/null || true)"
   fi
@@ -602,6 +635,10 @@ preflight() {
   _plan+=" · mysql: ${mysql_note}"
   _plan+=" · pg: ${pg_note}"
   _plan+=" · ufw: ${ufw_note}"
+  _plan+=" · web user: ${WEB_USER}"
+  [ "$WEB_USER" = www-data ] || _plan+=" (www-data gets no sudo and no laranode_ln group)"
+  [ "$UFW_ENABLED" = 1 ] || _plan+=" · Firewall page + ufw sudoers: off (LARANODE_PVE_UFW=1 turns them on)"
+  if [ -n "$PANEL_REF" ]; then _plan+=" · ref: ${PANEL_REF}"; fi
 
   log "PLAN: ${_plan}"
 
@@ -634,20 +671,142 @@ phase_packages() {
 # Phase 2 — Fetch the panel (user + clone)
 # ==============================================================================
 
+# ---- G1: the clone is pinned to a ref -----------------------------------------------------
+# _resolve_ref — PANEL_REF = LARANODE_REF, else the installer's pinned ref. A fresh clone with
+# neither is refused: the repository's default branch moves, and "whatever is on main today"
+# is not a reviewed install. Only a plain ref name is accepted (it becomes a git argument).
+_resolve_ref() {
+  local r="${LARANODE_REF:-${LARANODE_PINNED_REF:-}}"
+  [ -n "$r" ] || die "No ref to install: set LARANODE_REF to the branch, tag or commit to install (e.g. LARANODE_REF=development)."
+  [[ "$r" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]] && [[ "$r" != *..* ]] \
+    || die "LARANODE_REF '${r}' is not a plain branch, tag or commit name"
+  PANEL_REF="$r"
+}
+
+# _ref_commit DIR REF — the commit REF names in the checkout DIR (tag, then origin branch, then
+# a commit id), read as the panel account. Empty when REF names nothing.
+_ref_commit() {
+  local d="$1" r="$2" c=""
+  c=$(_as_panel_user git -C "$d" rev-parse -q --verify "refs/tags/${r}^{commit}" 2>/dev/null) \
+    || c=$(_as_panel_user git -C "$d" rev-parse -q --verify "refs/remotes/origin/${r}^{commit}" 2>/dev/null) \
+    || c=$(_as_panel_user git -C "$d" rev-parse -q --verify "${r}^{commit}" 2>/dev/null) || c=""
+  printf '%s' "$c"
+}
+
+# _head_is_ref DIR REF WANT — HEAD of DIR is WANT; a commit-id REF must also be a prefix of it
+_head_is_ref() {
+  local d="$1" r="$2" want="$3" head=""
+  head=$(_as_panel_user git -C "$d" rev-parse -q --verify HEAD 2>/dev/null) || head=""
+  { [ -n "$want" ] && [ "$head" = "$want" ]; } || return 1
+  if [[ "$r" =~ ^[0-9a-f]{7,40}$ ]] \
+     && ! _as_panel_user git -C "$d" rev-parse -q --verify "refs/remotes/origin/${r}" >/dev/null 2>&1 \
+     && ! _as_panel_user git -C "$d" rev-parse -q --verify "refs/tags/${r}" >/dev/null 2>&1; then
+    [[ "$head" == "$r"* ]] || return 1
+  fi
+  return 0
+}
+
+# _clone_panel — clone LARANODE_REPO into PANEL_PATH at PANEL_REF and prove it: HEAD after the
+# checkout must be exactly the commit the ref names. git runs AS the panel account (it owns the
+# result anyway): root never runs git in, or follows a link at, a path laranode_ln can change.
+_clone_panel() {
+  [ -n "$PANEL_REF" ] || _resolve_ref
+  [ ! -L "$PANEL_PATH" ] || die "${PANEL_PATH} is a symlink: refusing to clone through it"
+  local want=""
+  _as_panel_user git clone --quiet -- "${LARANODE_REPO}" "${PANEL_PATH}" || die "git clone of ${LARANODE_REPO} failed"
+  want=$(_ref_commit "$PANEL_PATH" "$PANEL_REF")
+  [ -n "$want" ] || die "LARANODE_REF '${PANEL_REF}' names no branch, tag or commit in ${LARANODE_REPO}"
+  _as_panel_user git -c advice.detachedHead=false -C "$PANEL_PATH" checkout -q --detach "$want" \
+    || die "git checkout of ${PANEL_REF} failed"
+  _head_is_ref "$PANEL_PATH" "$PANEL_REF" "$want" \
+    || die "checkout is not at ${PANEL_REF} (${want}) after the clone: refusing to install it"
+  log "Panel checked out at ${PANEL_REF} (${want})"
+}
+
+# _verify_checkout_ref — a re-run keeps the existing checkout (it may carry the operator's own
+# updates). With LARANODE_REF set it must BE that ref, or the install stops.
+_verify_checkout_ref() {
+  [ -n "${LARANODE_REF:-}" ] || return 0
+  [ -n "$PANEL_REF" ] || _resolve_ref
+  [ -d "${PANEL_PATH}/.git" ] || die "LARANODE_REF is set but ${PANEL_PATH} has no .git: cannot verify the checkout"
+  local want=""
+  want=$(_ref_commit "$PANEL_PATH" "$PANEL_REF")
+  _head_is_ref "$PANEL_PATH" "$PANEL_REF" "$want" \
+    || die "the existing checkout at ${PANEL_PATH} is not at LARANODE_REF '${PANEL_REF}': check it out as laranode_ln or unset LARANODE_REF"
+}
+
+# ---- G2/G7: the account the panel web stack runs as -----------------------------------------
+# _resolve_web_user — preflight (pure). On Proxmox the panel's Apache + PHP-FPM run as the
+# dedicated laranode_web: www-data is pveproxy's user. That needs an Apache and a php8.4-fpm this
+# installer installs (a pre-existing one's User / pools are its owner's): refused otherwise.
+# ufw: pve-firewall owns a Proxmox host, so no ufw sudoers and no Firewall page there unless the
+# operator opts in (LARANODE_PVE_UFW=1).
+_resolve_web_user() {
+  WEB_USER=www-data; UFW_ENABLED=1
+  [ "$IS_PROXMOX" = 1 ] || return 0
+  [ "${APACHE_OWNED:-1}" = 1 ] \
+    || die "Proxmox host with a pre-existing Apache: the panel must run as its own user (laranode_web), not www-data (pveproxy's user), and an Apache this installer did not install cannot be switched. Remove apache2 or install the panel elsewhere."
+  [ "${PHPFPM_OWNED:-1}" = 1 ] \
+    || die "Proxmox host with a pre-existing php8.4-fpm: the panel needs its own pool as laranode_web and will not reconfigure someone else's php-fpm. Remove php8.4-fpm or install the panel elsewhere."
+  WEB_USER=laranode_web
+  [ "${LARANODE_PVE_UFW:-0}" = 1 ] || UFW_ENABLED=0
+}
+
+# _ensure_web_user — create/verify WEB_USER and give it (only it) the laranode_ln group.
+_ensure_web_user() {
+  if [ "$WEB_USER" = www-data ]; then
+    usermod -aG laranode_ln www-data
+    return 0
+  fi
+  if ! id -u "$WEB_USER" >/dev/null 2>&1; then
+    useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --user-group "$WEB_USER" \
+      || die "could not create the panel web user ${WEB_USER}"
+  fi
+  local uid=""
+  uid=$(id -u "$WEB_USER" 2>/dev/null) || die "panel web user ${WEB_USER} does not exist"
+  { [[ "$uid" =~ ^[0-9]+$ ]] && [ "$uid" -ne 0 ] && [ "$uid" -lt 1000 ]; } \
+    || die "panel web user ${WEB_USER} must be a system account (uid 1-999), found uid ${uid}"
+  if id -nG "$WEB_USER" | tr ' ' '\n' | grep -qx www-data; then
+    die "panel web user ${WEB_USER} is in group www-data (on Proxmox group www-data reads /etc/pve): remove it (gpasswd -d ${WEB_USER} www-data)"
+  fi
+  usermod -aG laranode_ln "$WEB_USER"
+  # an earlier install (the www-data default) put www-data in the panel group: undo that
+  if id -nG www-data 2>/dev/null | tr ' ' '\n' | grep -qx laranode_ln; then
+    gpasswd -d www-data laranode_ln >/dev/null || die "could not remove www-data from group laranode_ln"
+  fi
+}
+
+# _write_host_conf — the root-owned record of the above, read by the sync script (it renders the
+# sudoers drop-ins for WEB_USER, and leaves out laranode-ufw with ufw=0) and by every sudo-able
+# script (lib/validate.sh). Written on every host: on a plain host it says what was always true.
+_host_conf() { echo "${LARANODE_HOST_CONF:-/etc/laranode/host.conf}"; }
+_write_host_conf() {
+  local hc; hc=$(_host_conf)
+  mkdir -p "$(dirname "$hc")"
+  ( umask 022; printf 'web_user=%s\nufw=%s\n' "$WEB_USER" "$UFW_ENABLED" > "${hc}.tmp" )
+  chmod 644 "${hc}.tmp"
+  mv -f "${hc}.tmp" "$hc"
+}
+
 phase_fetch_panel() {
   log "Creating laranode_ln system user"
   useradd -m -s /bin/bash laranode_ln 2>/dev/null || true
-  usermod -aG laranode_ln www-data
+  log "Panel web user: ${WEB_USER}"
+  _ensure_web_user
   # Debian's adduser default is 0755: close the home (and the .env built inside it)
   # to other local users from the start. phase_services settles the final modes.
   chmod 750 /home/laranode_ln
+  # the clone runs as laranode_ln: it must own its home (a pre-made home is root's)
+  chown laranode_ln:laranode_ln /home/laranode_ln
 
-  log "Cloning panel from ${LARANODE_REPO}"
   if [ ! -d "${PANEL_PATH}/laranode-scripts" ]; then
-    git clone "${LARANODE_REPO}" "${PANEL_PATH}"
+    log "Cloning panel from ${LARANODE_REPO} at ${PANEL_REF}"
+    _clone_panel
   else
     echo "Repo already present at ${PANEL_PATH}, skipping clone."
+    _verify_checkout_ref
   fi
+  _write_host_conf
 
   # Everything root renders or installs from the panel later (vhost, systemd units, cron line,
   # the privileged scripts) comes from the ROOT-OWNED copy in ${LN_LIB_DEST}, never from the
@@ -803,8 +962,8 @@ _pgsql_branch() {
   # Port the panel already uses from a previous run of this installer (idempotent
   # re-run): lets a second run keep working with its own cluster.
   local prev_port=""
-  if [ -f "${PANEL_PATH}/.env" ] && grep -q '^DB_CONNECTION="\?pgsql' "${PANEL_PATH}/.env"; then
-    prev_port=$(grep -E '^DB_PORT=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d "\"' " || true)
+  if case "$(_env_get DB_CONNECTION)" in pgsql*) true ;; *) false ;; esac; then
+    prev_port=$(_env_get DB_PORT | tr -d ' ')
   fi
 
   local PG_VER PG_CLUSTER_NAME PG_PORT
@@ -1047,7 +1206,17 @@ _apache_modules() {
 _vhost_render() {
   local tmpl="$1" dest="$2" port="$3" docroot="$4"
   sed -e "s|__PORT__|${port}|g" -e "s|__DOCROOT__|${docroot}|g" "$tmpl" > "$dest"
-  if [ "${APACHE_OWNED:-1}" = 0 ]; then
+  if [ "${WEB_USER:-www-data}" != www-data ]; then
+    # dedicated web user (Proxmox): the panel's PHP goes to its own pool, never the stock
+    # www-data one (_write_panel_pool)
+    sed -i '/^<\/VirtualHost>/d' "$dest"
+    cat >> "$dest" <<'VHOST'
+    <FilesMatch ".+\.ph(?:ar|p|tml)$">
+        SetHandler "proxy:unix:/run/php/laranode-panel.sock|fcgi://localhost"
+    </FilesMatch>
+</VirtualHost>
+VHOST
+  elif [ "${APACHE_OWNED:-1}" = 0 ]; then
     sed -i '/^<\/VirtualHost>/d' "$dest"
     cat >> "$dest" <<'VHOST'
     <FilesMatch ".+\.ph(?:ar|p|tml)$">
@@ -1236,6 +1405,7 @@ phase_webserver() {
   _disable_default_site
 
   _apache_ports_conf "${ad}/ports.conf"
+  _apache_web_user
 
   a2ensite laranode || die "a2ensite laranode failed"
   # A die from here on rolls a pre-existing Apache back (the EXIT hook armed above).
@@ -1287,6 +1457,65 @@ _install_php_packages() {
 # _php_fpm_up — enable and start php8.4-fpm, but only when this installer installed
 # it. A pre-existing php8.4-fpm keeps its boot state and its running process; the
 # services phase reloads it (or, with LARANODE_START_STOPPED=1, starts it).
+# _apache_web_user — with a dedicated web user (Proxmox, Apache installed by this run) the Apache
+# workers run as it: a conf snippet after apache2.conf's own `User ${APACHE_RUN_USER}` (the last
+# User/Group wins), so the packaged envvars conffile is never edited.
+_apache_web_user() {
+  [ "${WEB_USER:-www-data}" != www-data ] || return 0
+  local wu; wu="$(_apache_dir)/conf-available/laranode-web-user.conf"
+  printf '# Managed by laranode-installer.sh: the panel web stack runs as %s, never www-data.\nUser %s\nGroup %s\n' \
+    "$WEB_USER" "$WEB_USER" "$WEB_USER" > "$wu"
+  a2enconf laranode-web-user >/dev/null || die "a2enconf laranode-web-user failed"
+}
+
+# _write_panel_pool — the panel's own php-fpm pool for a dedicated web user: runs as it, and its
+# socket is reachable by it only (0660). The stock www pool (www-data) is never routed to.
+_php_pool_dir() { echo "${LARANODE_PHP_POOL_DIR:-/etc/php/8.4/fpm/pool.d}"; }
+_write_panel_pool() {
+  [ "${WEB_USER:-www-data}" != www-data ] || return 0
+  local d; d=$(_php_pool_dir)
+  mkdir -p "$d"
+  cat > "${d}/laranode-panel.conf" <<POOL
+; Managed by laranode-installer.sh: the panel's own pool (dedicated web user ${WEB_USER}).
+[laranode-panel]
+user = ${WEB_USER}
+group = ${WEB_USER}
+listen = /run/php/laranode-panel.sock
+listen.owner = ${WEB_USER}
+listen.group = ${WEB_USER}
+listen.mode = 0660
+pm = ondemand
+pm.max_children = 10
+pm.process_idle_timeout = 30s
+pm.max_requests = 500
+POOL
+  chmod 644 "${d}/laranode-panel.conf"
+}
+
+# _php_apache_handler — how Apache hands .php to php-fpm. Pre-existing Apache or a dedicated web
+# user: the panel vhost carries its own handler (_vhost_render), nothing global.
+_php_apache_handler() {
+  local ad; ad=$(_apache_dir)
+  if [ "$APACHE_OWNED" = 0 ]; then
+    # Pre-existing Apache: a global conf would route .php for ALL its sites through
+    # php8.4-fpm. The panel vhost carries its own handler instead (_vhost_render).
+    log "Pre-existing Apache: PHP-FPM handler set in the panel vhost only (no global a2enconf)"
+  elif [ "${WEB_USER:-www-data}" != www-data ]; then
+    log "Dedicated web user ${WEB_USER}: PHP-FPM handler (laranode-panel pool) set in the panel vhost only"
+  elif [ -f "${ad}/conf-available/php8.4-fpm.conf" ]; then
+    a2enconf php8.4-fpm
+  else
+    # CloudPanel's php8.4-fpm build does not ship the Apache conf snippet.
+    warn "php8.4-fpm.conf not provided by the package — writing laranode-php-fpm.conf (socket /run/php/php8.4-fpm.sock, verify on this host)"
+    cat > "${ad}/conf-available/laranode-php-fpm.conf" <<'CONF'
+<FilesMatch ".+\.ph(?:ar|p|tml)$">
+    SetHandler "proxy:unix:/run/php/php8.4-fpm.sock|fcgi://localhost"
+</FilesMatch>
+CONF
+    a2enconf laranode-php-fpm
+  fi
+}
+
 _php_fpm_up() {
   if [ "${PHPFPM_OWNED:-1}" = 1 ]; then
     log "Enabling PHP-FPM"
@@ -1360,26 +1589,13 @@ phase_php_node() {
     warn "System 'php' alternative left as ${sys_php}. Panel uses /usr/bin/php8.4 directly."
   fi
 
+  # the panel's own pool (dedicated web user only) exists before php-fpm (re)starts
+  _write_panel_pool
   _php_fpm_up
 
   # php8.4-fpm package provides /etc/apache2/conf-available/php8.4-fpm.conf;
   # a2enconf must run after the package is installed.
-  if [ "$APACHE_OWNED" = 0 ]; then
-    # Pre-existing Apache: a global conf would route .php for ALL its sites through
-    # php8.4-fpm. The panel vhost carries its own handler instead (_vhost_render).
-    log "Pre-existing Apache: PHP-FPM handler set in the panel vhost only (no global a2enconf)"
-  elif [ -f /etc/apache2/conf-available/php8.4-fpm.conf ]; then
-    a2enconf php8.4-fpm
-  else
-    # CloudPanel's php8.4-fpm build does not ship the Apache conf snippet.
-    warn "php8.4-fpm.conf not provided by the package — writing laranode-php-fpm.conf (socket /run/php/php8.4-fpm.sock, verify on this host)"
-    cat > /etc/apache2/conf-available/laranode-php-fpm.conf <<'CONF'
-<FilesMatch ".+\.ph(?:ar|p|tml)$">
-    SetHandler "proxy:unix:/run/php/php8.4-fpm.sock|fcgi://localhost"
-</FilesMatch>
-CONF
-    a2enconf laranode-php-fpm
-  fi
+  _php_apache_handler
 
   # Client tools only: the server package is installed (or reused) by the
   # database phase according to LARANODE_DB_ENGINE.
@@ -1419,8 +1635,12 @@ CONF
 # (storage/), and in the old layout bootstrap/cache was too: PHP planted there by www-data
 # would run as root on the next installer re-run. So composer and artisan run as the panel
 # account (laranode_ln), in the panel directory, never as root.
+# It runs in the panel directory (composer, npm and artisan expect that): root itself never cds
+# into the tree laranode_ln controls, so no root command can resolve a relative path inside it.
 _as_panel_user() {
-  runuser -u laranode_ln -- env HOME=/home/laranode_ln COMPOSER_HOME=/home/laranode_ln/.composer "$@"
+  local cwd=/
+  [ -d "${PANEL_PATH}" ] && cwd="${PANEL_PATH}"
+  runuser -u laranode_ln -- env -C "$cwd" HOME=/home/laranode_ln COMPOSER_HOME=/home/laranode_ln/.composer "$@"
 }
 _artisan() { _as_panel_user /usr/bin/php8.4 artisan "$@"; }
 
@@ -1439,12 +1659,21 @@ _prepare_panel_tree() {
   fi
 }
 
+# _panel_feature_env — the Firewall page follows UFW_ENABLED. This flag is UX only (laranode_ln
+# writes .env): the real gate is that the laranode-ufw sudoers drop-in is not installed.
+_panel_feature_env() {
+  if [ "${UFW_ENABLED:-1}" = 1 ]; then
+    env_set LARANODE_FIREWALL_ENABLED true "${PANEL_PATH}/.env"
+  else
+    env_set LARANODE_FIREWALL_ENABLED false "${PANEL_PATH}/.env"
+  fi
+}
+
 phase_app() {
   log "App provisioning"
 
   [ -f "${PANEL_PATH}/composer.json" ] \
     || die "composer.json not found at ${PANEL_PATH} — repo clone missing or PANEL_PATH wrong"
-  cd "${PANEL_PATH}"
   _prepare_panel_tree
 
   log "Installing PHP dependencies (composer install)"
@@ -1459,7 +1688,7 @@ phase_app() {
   fi
 
   # APP_KEY — generate ONLY when absent/blank; never --force-rotate a valid key.
-  if grep -q '^APP_KEY=base64:' "${PANEL_PATH}/.env"; then
+  if [[ "$(_env_get APP_KEY)" == base64:* ]]; then
     log "APP_KEY already set — preserving (idempotent re-run)"
   else
     log "APP_KEY not set — generating"
@@ -1494,7 +1723,7 @@ phase_app() {
 
   # APP_URL — write only when absent or the Laravel placeholder http://localhost.
   local cur_app_url=""
-  cur_app_url="$(grep -E '^APP_URL=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")" || true
+  cur_app_url="$(_env_get APP_URL)"
   if [ -z "$cur_app_url" ] || [ "$cur_app_url" = "http://localhost" ]; then
     env_set APP_URL "$host_val" "${PANEL_PATH}/.env"
     log "APP_URL set to ${host_val}"
@@ -1505,7 +1734,7 @@ phase_app() {
   # The scripts www-data may run as root live in a ROOT-OWNED copy, never in the panel
   # checkout (which laranode_ln writes). The panel finds them through .env.
   # (the root-owned copy was published in phase_fetch_panel)
-  log "Checking the sudoers drop-ins for www-data"
+  log "Checking the sudoers drop-ins for ${WEB_USER}"
   _install_sudoers
   env_set LARANODE_BIN_PATH "${LN_LIB_DEST}/bin" "${PANEL_PATH}/.env"
   env_set LARANODE_TEMPLATES_PATH "${LN_LIB_DEST}/templates" "${PANEL_PATH}/.env"
@@ -1517,17 +1746,18 @@ phase_app() {
   # One-time installs (idempotent: non-zero on re-run is expected/tolerated).
   _artisan storage:link 2>/dev/null || true
   _artisan reverb:install --no-interaction 2>/dev/null || true
+  [ -n "$(_env_get REVERB_APP_KEY)" ] || warn "REVERB_APP_KEY is empty after reverb:install: live stats will not connect"
 
   # REVERB_HOST / VITE_REVERB_HOST — set only when absent or 'localhost'.
   local cur_reverb=""
-  cur_reverb="$(grep -E '^REVERB_HOST=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")" || true
+  cur_reverb="$(_env_get REVERB_HOST)"
   if [ -z "$cur_reverb" ] || [ "$cur_reverb" = "localhost" ]; then
     env_set REVERB_HOST "$bare_host" "${PANEL_PATH}/.env"; log "REVERB_HOST set to ${bare_host}"
   else
     log "REVERB_HOST already '${cur_reverb}' — preserving"
   fi
   local cur_vite=""
-  cur_vite="$(grep -E '^VITE_REVERB_HOST=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")" || true
+  cur_vite="$(_env_get VITE_REVERB_HOST)"
   if [ -z "$cur_vite" ] || [ "$cur_vite" = "localhost" ]; then
     env_set VITE_REVERB_HOST "$bare_host" "${PANEL_PATH}/.env"; log "VITE_REVERB_HOST set to ${bare_host}"
   else
@@ -1550,6 +1780,9 @@ phase_app() {
   # GPU detection — best-effort.
   _artisan laranode:detect-gpu 2>/dev/null || true
 
+  # Which optional panel features this host allows (Firewall page: off where ufw is gated off).
+  _panel_feature_env
+
   # First-run seed sentinel: seed ONLY when the users table is empty.
   log "Checking first-run seed sentinel (users table row count)"
   local user_count=1
@@ -1560,6 +1793,11 @@ phase_app() {
   else
     log "Users table has ${user_count} row(s) — skipping seed (idempotent re-run)"
   fi
+
+  # A production panel never shows stack traces / env values on an error page (G3). Written
+  # after the one-time installs above, which run the same either way.
+  env_set APP_ENV production "${PANEL_PATH}/.env"
+  env_set APP_DEBUG false "${PANEL_PATH}/.env"
 
   log "Building front-end assets"
   # package-lock.json is gitignored, so each install resolves the registry afresh. npm 10 then
@@ -1775,12 +2013,16 @@ LN_LIB_DEST=/usr/local/lib/laranode
 # (phase_fetch_panel), and that private copy is what runs: laranode_ln cannot swap it between the
 # copy and the run. `cp -P` never follows a link, and the copy must be a regular file.
 LN_SYNC_STASH=""
+_stash_cleanup() { if [ -n "$LN_SYNC_STASH" ]; then rm -rf -- "$LN_SYNC_STASH"; LN_SYNC_STASH=""; fi; }
 _stash_sync_script() {
   local src="${PANEL_PATH}/laranode-scripts/bin/laranode-sync-scripts.sh"
   LN_SYNC_STASH=""
   [ -f "${LN_LIB_DEST}/bin/laranode-sync-scripts.sh" ] && return 0
-  LN_SYNC_STASH=$(mktemp -d) || die "mktemp failed"
+  # under a root-only parent, not $TMPDIR (an inherited TMPDIR may be a directory others write),
+  # and removed on every exit, die included
+  LN_SYNC_STASH=$(mktemp -d "${LARANODE_STASH_PARENT:-/run}/laranode-sync.XXXXXX") || die "mktemp failed"
   chmod 700 "$LN_SYNC_STASH"
+  _add_exit_hook _stash_cleanup
   cp -P --no-preserve=all "$src" "${LN_SYNC_STASH}/sync.sh" 2>/dev/null \
     || { rm -rf "$LN_SYNC_STASH"; LN_SYNC_STASH=""; die "laranode-sync-scripts.sh missing from the panel checkout (laranode-scripts/bin)"; }
   if [ -L "${LN_SYNC_STASH}/sync.sh" ] || [ ! -f "${LN_SYNC_STASH}/sync.sh" ]; then
@@ -1801,13 +2043,19 @@ _install_privileged_scripts() {
   [ "$rc" -eq 0 ] || die "could not install the privileged scripts into ${LN_LIB_DEST}"
 }
 
+# _install_sudoers — check what the sync installed. laranode-ufw only with UFW_ENABLED=1: where
+# ufw is gated off (Proxmox) a drop-in an earlier run left is removed, so the Firewall page has
+# nothing to run whatever the panel .env says.
+_sudoers_dir() { echo "${LARANODE_SUDOERS_DIR:-/etc/sudoers.d}"; }
 _install_sudoers() {
-  local drop
-  for drop in laranode-panel laranode-cron laranode-runtimes laranode-ufw; do
-    [ -f "/etc/sudoers.d/${drop}" ] || die "sudoers drop-in ${drop} was not installed"
-    visudo -c -f "/etc/sudoers.d/${drop}" >/dev/null || die "sudoers drop-in ${drop} failed syntax check"
+  local drop sd; sd=$(_sudoers_dir)
+  local -a need=(laranode-panel laranode-cron laranode-runtimes)
+  if [ "${UFW_ENABLED:-1}" = 1 ]; then need+=(laranode-ufw); else rm -f "${sd}/laranode-ufw"; fi
+  for drop in "${need[@]}"; do
+    [ -f "${sd}/${drop}" ] || die "sudoers drop-in ${drop} was not installed"
+    visudo -c -f "${sd}/${drop}" >/dev/null || die "sudoers drop-in ${drop} failed syntax check"
   done
-  rm -f /etc/sudoers.d/laranode-postgres
+  rm -f "${sd}/laranode-postgres"
 }
 
 _settle_permissions() {
@@ -1913,7 +2161,7 @@ _reassert_sleep_wake() {
 phase_summary() {
   log "Install summary"
   local panel_url=""
-  panel_url="$(grep -E '^APP_URL=' "${PANEL_PATH}/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")" || true
+  panel_url="$(_env_get APP_URL)"
   persist_secret "# Laranode panel — URL: ${panel_url} — DB engine: ${DB_ENGINE}"
 
   echo "========================================================================"

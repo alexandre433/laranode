@@ -29,11 +29,38 @@ PANEL=${1:-${PANEL_PATH:-/home/laranode_ln/panel}}
 SRC="$PANEL/laranode-scripts"
 BASE_DROPINS="laranode-panel laranode-cron laranode-runtimes laranode-ufw"
 PANEL_USER=laranode_ln
+HOST_CONF=${LARANODE_HOST_CONF:-/etc/laranode/host.conf}
+PVE_DIR=${LARANODE_PVE_DIR:-/etc/pve}
 
 die() { echo "laranode-sync-scripts: $*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "must run as root"
 id -u "$PANEL_USER" >/dev/null 2>&1 || die "no $PANEL_USER account to read the checkout as"
+
+# ---- which account the sudoers grants go to (host.conf, written by the installer) ----------
+# The drop-ins in the checkout name www-data. On a Proxmox host www-data is pveproxy's user:
+# granting it sudo hands the Proxmox UI root. There the installer records web_user=laranode_web
+# (the panel's own Apache/PHP-FPM user) and the STAGED, allowlisted drop-ins are rendered for it.
+# ufw=0: the laranode-ufw drop-in is not installed (and one already installed is removed).
+WEB_USER=www-data; UFW=1
+if [ -e "$HOST_CONF" ] || [ -L "$HOST_CONF" ]; then
+    { [ ! -L "$HOST_CONF" ] && [ -f "$HOST_CONF" ] && [ "$(stat -c %u "$HOST_CONF")" = 0 ] \
+        && [ $(( 0$(stat -c %a "$HOST_CONF") & 022 )) -eq 0 ]; } \
+        || die "$HOST_CONF must be a regular root-owned file, not group/world writable"
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            web_user=www-data|web_user=laranode_web) WEB_USER=${line#web_user=} ;;
+            ufw=0|ufw=1) UFW=${line#ufw=} ;;
+            ''|'#'*) : ;;
+            *) die "unexpected line in $HOST_CONF: $line" ;;
+        esac
+    done < "$HOST_CONF"
+fi
+if [ -d "$PVE_DIR" ] || command -v pveversion >/dev/null 2>&1; then
+    [ "$WEB_USER" != www-data ] \
+        || die "Proxmox host: refusing to grant www-data (pveproxy's user) sudo. Run the installer: it sets web_user=laranode_web in $HOST_CONF"
+fi
+[ "$WEB_USER" = www-data ] || id -u "$WEB_USER" >/dev/null 2>&1 || die "panel web user $WEB_USER does not exist"
 [ -d "$SRC/bin" ] && [ -d "$SRC/lib" ] && [ -d "$SRC/templates" ] && [ -d "$SRC/etc/sudoers.d" ] \
     || die "no laranode-scripts tree at $SRC"
 # the destination's parent must be root-owned and not writable by others
@@ -180,6 +207,16 @@ sudoers_line_ok() {   # <line>
     done
     return 1
 }
+# render_for_web_user <staged file>: AFTER the allowlist check, the user column of each grant
+# (exactly `www-data ALL=(ALL)` / `www-data ALL=(www-data)`, nothing else can be there) is
+# rewritten for WEB_USER. A fixed substitution of two fixed names: no checkout text reaches sed.
+render_for_web_user() {
+    local f=$1
+    [ "$WEB_USER" != www-data ] || return 0
+    sed -i -e "s/^www-data ALL=(ALL) NOPASSWD: /$WEB_USER ALL=(ALL) NOPASSWD: /" \
+           -e "s/^www-data ALL=(www-data) NOPASSWD: /$WEB_USER ALL=($WEB_USER) NOPASSWD: /" -- "$f"
+    ! grep -v '^#' -- "$f" | grep -q 'www-data' || die "${f##*/}: www-data still named after rendering for $WEB_USER"
+}
 sudoers_file_ok() {   # <file>
     local f=$1 line n=0
     # NUL bytes cannot live in a bash variable: compare byte counts
@@ -199,7 +236,13 @@ for d in "${SRC_NAMES[@]}"; do
     read_src "$SRC/etc/sudoers.d/$d" "$STAGE/etc/sudoers.d/$d" 644
     visudo -c -f "$STAGE/etc/sudoers.d/$d" >/dev/null || die "sudoers drop-in $d failed syntax check"
     sudoers_file_ok "$STAGE/etc/sudoers.d/$d" || die "sudoers drop-in $d grants more than a laranode script inside $DEST/bin"
+    render_for_web_user "$STAGE/etc/sudoers.d/$d"
+    visudo -c -f "$STAGE/etc/sudoers.d/$d" >/dev/null || die "sudoers drop-in $d failed syntax check after rendering for $WEB_USER"
 done
+if [ -f "$STAGE/bin/laranode-postgres-sudoers" ]; then
+    sudoers_file_ok "$STAGE/bin/laranode-postgres-sudoers" || die "laranode-postgres-sudoers grants more than a laranode script inside $DEST/bin"
+    render_for_web_user "$STAGE/bin/laranode-postgres-sudoers"
+fi
 
 # ---- swap (rename keeps the window where the path is missing to two syscalls) ---------
 if [ -e "$DEST" ]; then
@@ -211,8 +254,11 @@ rm -rf -- "$STAGE.old"
 chown root:root "$DEST"; chmod 755 "$DEST"
 
 # ---- sudoers: base set + any drop-in already installed ------------------------------
+if [ "$UFW" = 0 ]; then rm -f -- "$SUDOERS_DIR/laranode-ufw"; fi
 for f in "$DEST"/etc/sudoers.d/*; do
     d=${f##*/}
+    # ufw gated off (Proxmox, host.conf ufw=0): never installed
+    if [ "$UFW" = 0 ] && [ "$d" = laranode-ufw ]; then continue; fi
     case " $BASE_DROPINS " in
         *" $d "*) : ;;
         *) [ -e "$SUDOERS_DIR/$d" ] || continue ;;

@@ -27,7 +27,7 @@ base() {
   source "$INSTALLER"
   export LARANODE_OS_RELEASE_FILE="${FIX}/os-release.ubuntu-24.04"
   export LARANODE_PVE_DIR=/nonexistent-pve LARANODE_CLP_DIR=/nonexistent-clp
-  export LARANODE_UNATTENDED=1
+  export LARANODE_UNATTENDED=1 LARANODE_REF=unit-test-ref   # preflight resolves the clone ref
   unset LARANODE_DB_ENGINE LARANODE_HTTP_PORT LARANODE_BIND LARANODE_PG_PORT
   have_cmd()    { return 1; }
   port_in_use() { return 1; }
@@ -480,7 +480,8 @@ seed_env_keeps_existing() { base; PANEL_PATH=$(mktemp -d); echo 'KEEP=1' > "$PAN
 no_plain_env_cp() { base; ! declare -f _mysql_branch _pgsql_branch phase_app | grep -E 'cp .*\.env\.example'; }
 home_750() {
   base; PANEL_PATH=$(mktemp -d); mkdir "$PANEL_PATH/laranode-scripts"; MLOG=$(mktemp)
-  useradd() { :; }; usermod() { :; }; chmod() { echo "chmod $*" >> "$MLOG"; }; id() { return 0; }
+  useradd() { :; }; usermod() { :; }; chown() { :; }; chmod() { echo "chmod $*" >> "$MLOG"; }; id() { return 0; }
+  unset LARANODE_REF; export LARANODE_HOST_CONF="$PANEL_PATH/host.conf"
   _prepare_panel_tree() { :; }; _install_privileged_scripts() { :; }; _stash_sync_script() { :; }
   phase_fetch_panel >/dev/null 2>&1
   grep -qx 'chmod 750 /home/laranode_ln' "$MLOG"
@@ -1285,7 +1286,7 @@ priv_artisan_via_runuser() { local out
     runuser() { printf 'runuser %s\n' \"\$*\"; }
     _artisan migrate --force")
   case "$out" in
-    'runuser -u laranode_ln -- env HOME=/home/laranode_ln'*' /usr/bin/php8.4 artisan migrate --force') : ;;
+    'runuser -u laranode_ln -- env -C '*' HOME=/home/laranode_ln'*' /usr/bin/php8.4 artisan migrate --force') : ;;
     *) echo "unexpected command: $out"; return 1 ;;
   esac; }
 priv_no_root_php_lines() { local bad
@@ -1446,13 +1447,37 @@ ROOT_PANEL_ALLOW=(
   "find \"\$p/bootstrap/cache\" -maxdepth 1 -type f -name '*.php' -delete"   # -delete unlinks by name, follows nothing
   'cp -P --no-preserve=all "$src" "${LN_SYNC_STASH}/sync.sh"'  # first-install stash into a root-only dir; -P copies a link as a link, then checked regular
   'bash "$sync" "${PANEL_PATH}"'                             # $sync = root-owned copy or the private stash (priv_sync_* tests); PANEL_PATH is only an argument
+  '-e "s#__PANEL_PATH__#${PANEL_PATH}#g"'                    # the cron sed: PANEL_PATH is the replacement TEXT; it reads the root-owned template
+  'echo "    cd ${PANEL_PATH} '                              # printed hint in the summary, not a command
 )
-priv_no_root_touch_of_panel_paths() { local tv cm rd bad a fixed=()
-  tv='\$\{?(PANEL_PATH|p|h|env|sync|f|src)\}?([^[:alnum:]_]|$)'
-  cm='(^|[;&|(`[:space:]])(cp|mv|sed|chown|chgrp|chmod|install|tee|ln|rm|touch|mkdir|truncate|dd|bash|source|find)[[:space:]]'
-  rd='>>?[[:space:]]*"?\$\{?(PANEL_PATH|p|h|env|sync|f|src)\}?([^[:alnum:]_]|$)'
+# PR B (r4 review): a purely line-by-line grep missed a `cp \` continued on the next line, an alias
+# variable (q="$p/.env"; cp x "$q"), a `cd "$p"` then a relative path, a root command after
+# `_as_panel_user x;` on the same line, and tar/rsync/git. So the scan now (1) joins continuation
+# lines, (2) splits every line into its ; && || commands (each judged alone), (3) treats any
+# variable assigned from a panel-derived one as panel-derived (fixpoint), (4) also flags
+# cd/tar/rsync/git/cat/grep and `<` reads. arch_catches (below) injects each bypass and must see red.
+priv_no_root_touch_of_panel_paths() { local tv cm rd bad a fixed=() names prev code
+  names='PANEL_PATH|p|h|env|sync|f|src'
+  # (1) + (2): one judged command per output line, prefixed with the source line number
+  code=$(installer_root_code | awk '
+    { if (c != "") { $0 = c " " $0; c = "" } }
+    /\\$/ { c = substr($0, 1, length($0) - 1); next }
+    { line = $0; gsub(/\\;/, "\001", line); k = split(line, parts, /;|&&|\|\|/)
+      for (i = 1; i <= k; i++) print NR ": " parts[i] }')
+  # (3) aliases: X="$p/..." / X=${PANEL_PATH} / local X="$env" ... until nothing new
+  while :; do
+    prev=$names
+    for a in $(printf '%s\n' "$code" | grep -oE "(^|[^[:alnum:]_])[A-Za-z_][A-Za-z0-9_]*=\"?\\$\\{?(${names})\\}?([^[:alnum:]_]|\$)" \
+                 | sed -E 's/^[^A-Za-z_]//; s/=.*//' | sort -u); do
+      case "|${names}|" in *"|${a}|"*) : ;; *) names="${names}|${a}" ;; esac
+    done
+    [ "$names" = "$prev" ] && break
+  done
+  tv="\\\$\\{?(${names})\\}?([^[:alnum:]_]|\$)"
+  cm='(^|[;&|(`[:space:]])(cp|mv|sed|chown|chgrp|chmod|install|tee|ln|rm|touch|mkdir|truncate|dd|bash|source|find|cd|tar|rsync|git|cat|grep)[[:space:]]'
+  rd="[<>]>?[[:space:]]*\"?\\\$\\{?(${names})\\}?([^[:alnum:]_]|\$)"
   for a in "${ROOT_PANEL_ALLOW[@]}"; do fixed+=(-e "$a"); done
-  bad=$({ installer_root_code | grep -nE "$cm" | grep -E "$tv"; installer_root_code | grep -nE "$rd"; } \
+  bad=$({ printf '%s\n' "$code" | grep -E "$cm" | grep -E "$tv"; printf '%s\n' "$code" | grep -E "$rd"; } \
           | grep -vE '_as_panel_user|runuser' | grep -vF "${fixed[@]}" || true)
   [ -z "$bad" ] || { echo "root-run command on a panel-derived path (symlink-followable):"; echo "$bad"; return 1; }; }
 t 'no root-run cp/sed/chown/chmod/>/>>/bash on ANY PANEL_PATH-derived path ($p $env $sync ...)' priv_no_root_touch_of_panel_paths
@@ -1511,7 +1536,7 @@ priv_sync_fallback_runs_private_copy() { local d r out
   d=$(mktemp -d); r=$(mktemp -d); mkdir -p "$d/laranode-scripts/bin"; printf 'echo ORIGINAL\n' > "$d/laranode-scripts/bin/laranode-sync-scripts.sh"
   out=$(bash -c "
     source '$INSTALLER'
-    PANEL_PATH='$d'; LN_LIB_DEST='$r/lib'
+    PANEL_PATH='$d'; LN_LIB_DEST='$r/lib'; LARANODE_STASH_PARENT='$r'
     chown() { :; }; chmod() { :; }
     _stash_sync_script
     printf 'echo SWAPPED\n' > '$d/laranode-scripts/bin/laranode-sync-scripts.sh'
@@ -1573,10 +1598,11 @@ t  "preflight resolves the web user after ownership is known, before the confirm
 ewu_run() {  # ewu_run <web user> <id -u answer|missing> <groups of www-data> [useradd rc]
   base; WEB_USER=$1; CALLS=$(mktemp)
   local idu="$2" grp="$3" urc="${4:-0}"
-  eval "useradd() { echo \"useradd \$*\" >> '$CALLS'; return $urc; }"
+  # a successful useradd makes the account exist for the id lookups after it
+  eval "useradd() { echo \"useradd \$*\" >> '$CALLS'; [ $urc = 0 ] && : > '$CALLS.created'; return $urc; }"
   usermod() { echo "usermod $*" >> "$CALLS"; }
   gpasswd() { echo "gpasswd $*" >> "$CALLS"; }
-  eval "id() { case \"\$*\" in '-u laranode_web') [ '$idu' = missing ] && return 1; echo '$idu' ;; '-nG www-data') echo '$grp' ;; '-nG laranode_web') echo 'laranode_web laranode_ln' ;; *) command id \"\$@\" ;; esac; }"
+  eval "id() { case \"\$*\" in '-u laranode_web') if [ '$idu' = missing ]; then [ -e '$CALLS.created' ] || return 1; echo 998; else echo '$idu'; fi ;; '-nG www-data') echo '$grp' ;; '-nG laranode_web') echo 'laranode_web laranode_ln' ;; *) command id \"\$@\" ;; esac; }"
   _ensure_web_user; }
 ewu_pve_ok() { ewu_run laranode_web 998 "www-data laranode_ln"
   grep -q '^usermod -aG laranode_ln laranode_web$' "$CALLS" || { echo "laranode_web not grouped:"; cat "$CALLS"; return 1; }
