@@ -716,9 +716,12 @@ _head_is_ref() {
 # _checkout_clean DIR — no modified, staged or untracked file in DIR (as the panel account). Within
 # the trust model laranode_ln owns the tree and could change it after this check anyway; the check
 # catches what lands BEFORE the install (a stray edit, a planted file), not a hostile panel user.
+# File MODE bits are not compared (core.fileMode=false): _settle_permissions re-modes the whole tree
+# (640/750) on every install, so with modes compared a re-run with LARANODE_REF would always find
+# every tracked file "modified". Content, staged and untracked changes are still refused.
 _checkout_clean() {
   local s
-  s=$(_as_panel_user git -C "$1" status --porcelain 2>/dev/null) || return 1
+  s=$(_as_panel_user git -c core.fileMode=false -C "$1" status --porcelain 2>/dev/null) || return 1
   [ -z "$s" ]
 }
 
@@ -803,10 +806,11 @@ _ensure_web_user() {
 # (pveproxy's user) leaves. Only groups that are a laranode tenant: name {user}_ln, a user of the
 # same name with uid >= 1000 and home /home/{name}. laranode_ln (the panel group) is handled above.
 # An orphan {name}_ln group (its user was removed) has no home: it is skipped, www-data stays in it.
-# ORDER (PR #11 r2): this runs in phase_webserver right before the Apache User switch + reload, NOT
-# with the account setup. Until then Apache still runs as www-data and needs the tenant groups: a die
-# in between (a bad LARANODE_REF, the sudoers check, packages, the database) must not leave the
-# tenant sites without them.
+# ORDER (PR #11 r2, PR #12 r1): this runs in phase_webserver AFTER apachectl configtest, right before
+# the reload that switches Apache to WEB_USER, NOT with the account setup. Until then Apache still
+# runs as www-data and needs the tenant groups: a die in between (a bad LARANODE_REF, the sudoers
+# check, packages, the database, a2enconf/a2ensite, the config test) must not leave the tenant sites
+# without them. Only a failing reload itself can still follow the move.
 _migrate_tenant_groups() {
   [ "$WEB_USER" != www-data ] || return 0
   local g members entry uid home
@@ -1452,7 +1456,6 @@ phase_webserver() {
   _disable_default_site
 
   _apache_ports_conf "${ad}/ports.conf"
-  _migrate_tenant_groups
   _apache_web_user
 
   a2ensite laranode || die "a2ensite laranode failed"
@@ -1460,6 +1463,10 @@ phase_webserver() {
   apachectl configtest || die "Apache config test failed — review ${dest}"
 
   [ "$APACHE_OWNED" = 0 ] || systemctl enable apache2 >/dev/null 2>&1 || true
+  # the tenant groups move only now: a2enconf/a2ensite/configtest have passed, the next step is the
+  # reload that switches Apache to the web user (PR #12 r1: an earlier die left Apache on www-data
+  # with the groups already gone, and an Apache we own has no rollback)
+  _migrate_tenant_groups
   # from here the running Apache may have loaded our config: a rollback must reload it back
   [ "$_WB_ARMED" = 0 ] || : > "$(_journal_dir)/reloaded"
   ( _refresh_service apache2 "$APACHE_OWNED" ) \

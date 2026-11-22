@@ -167,14 +167,18 @@ application-profile name). Options (`-…`) never pass through.
   hostile panel account. `git status --porcelain` does not list git-IGNORED files (`vendor/`,
   `bootstrap/cache/*.php`, `storage/`, `.env`): a planted ignored file survives the check. No root path
   reads or runs them (git, composer, artisan and npm all run as `laranode_ln`), so this stays inside the
-  same trust model. A re-run with `LARANODE_REF` also refuses a tree that a build step rewrote
-  (e.g. `npm install` touching `package-lock.json`): unset `LARANODE_REF` to keep such a checkout.
+  same trust model. The check compares content, staged and untracked files, not file MODE bits
+  (`core.fileMode=false`): the installer itself re-modes the whole tree (640/750) on every install, so
+  comparing modes would make every re-run with `LARANODE_REF` die (PR #12 r1; scenario `rerun`).
+  `package-lock.json`/`composer.lock` are gitignored and do not count. A re-run with `LARANODE_REF`
+  refuses a tree whose tracked files were edited: unset `LARANODE_REF` to keep such a checkout.
   A release process that sets a default pinned ref is a follow-up.
 * The upgrade moves a tenant's `{user}_ln` group only when that user still exists (same-name account,
   uid >= 1000, home `/home/{user}_ln`): an orphan group whose user was removed is skipped and
   `www-data` stays in it. It has no home, so nothing is exposed. The move runs in `phase_webserver`
-  right before Apache is switched to the web user, after the ref and sudoers checks, so a failed re-run
-  leaves the old setup serving.
+  after `apachectl configtest`, right before the reload that switches Apache to the web user, so a
+  failed re-run (bad ref, sudoers, packages, config test) leaves the old setup serving. Only a failing
+  reload itself can follow the move (an Apache this installer owns has no rollback journal).
 * A Proxmox host with a pre-existing Apache/php8.4-fpm cannot get the dedicated web user: refused.
 * The queue worker runs as `laranode_ln`, but sudoers grants `www-data` only: a queued job that
   shells out through sudo would fail. No such job exists today.

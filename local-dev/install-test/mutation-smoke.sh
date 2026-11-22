@@ -139,9 +139,11 @@ MUTATIONS=(
   # PR #11 r1: upgrade from a www-data install moves the tenant groups to the web user
   'upgrade: updated sync not run again (old sync renders www-data grants)|s#^  if \[ -n "\$before" \] \&\& \[ "$(sha256sum < "$inst")" != "\$before" \]; then#  if false; then#'
   'dedicated web user: www-data drop-in left in place|s#if grep -qE .\^\[\[:space:\]\]\*www-data\[\[:space:\]\]. "\$drop"; then#if false; then#'
+  'clean-tree check compares file modes again (a re-run always dirty after the installer chmod)|s#git -c core.fileMode=false -C "$1" status#git -C "$1" status#'
   'tenant groups never migrated|s#^  _migrate_tenant_groups$#  :#'
   'tenant groups migrated with the account setup again (before the ref check)|s#^  usermod -aG laranode_ln "\$WEB_USER"$#&\n  _migrate_tenant_groups#;s#^  _migrate_tenant_groups$#  :#'
-  'tenant groups migrated after the Apache user switch|s#^  _migrate_tenant_groups$#  :#;s#^  _apache_web_user$#&\n  _migrate_tenant_groups#'
+  'tenant groups migrated before the Apache config test again|s#^  _migrate_tenant_groups$#  :#;s#^  _apache_web_user$#  _migrate_tenant_groups\n&#'
+  'tenant groups migrated after the Apache reload|s#^  _migrate_tenant_groups$#  :#;s#^  svc_active apache2 || die .*$#&\n  _migrate_tenant_groups#'
   'www-data kept in tenant groups|s#gpasswd -d www-data "\$g" >/dev/null || die#true || die#'
   'non-tenant group migrated (uid check dropped)|s#\[ "\$uid" -ge 1000 \] \&\& \[ "\$home" = "/home/\$g" \]#true#'
   # PR B G3: production env
