@@ -19,6 +19,11 @@ flunk() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 t() { local n="$1"; shift; if ( "$@" ) >/tmp/laranode-ut.$$ 2>&1; then pass "$n"; else flunk "$n"; sed 's/^/        /' /tmp/laranode-ut.$$; fi; }
 # tf NAME CMD... — PASS when CMD exits non-zero (a refusal)
 tf() { local n="$1"; shift; if ( "$@" ) >/tmp/laranode-ut.$$ 2>&1; then flunk "$n (expected refusal)"; else pass "$n"; fi; }
+# tfm NAME MSG CMD...: refused AND by the guard under test (its message), not by a later step
+tfm() { local n="$1" m="$2"; shift 2
+  if ( "$@" ) >/tmp/laranode-ut.$$ 2>&1; then flunk "$n (expected refusal)"
+  elif grep -qF -- "$m" /tmp/laranode-ut.$$; then pass "$n"
+  else flunk "$n (refused, but not with '$m')"; sed 's/^/        /' /tmp/laranode-ut.$$; fi; }
 trap 'rm -f /tmp/laranode-ut.$$' EXIT
 
 # Common setup for each subshell: fresh installer, plain Ubuntu host, quiet logs.
@@ -1546,15 +1551,17 @@ priv_sync_fallback_runs_private_copy() { local d r out
   case "$out" in *ORIGINAL*) : ;; *) echo "stash copy not run: $out"; return 1 ;; esac; }
 t "first install: root runs a private copy of the sync made before the chown"     priv_sync_fallback_runs_private_copy
 priv_sync_fallback_refuses_symlink() { local d out
-  d=$(mktemp -d); mkdir -p "$d/laranode-scripts/bin"; printf 'echo EVIL\n' > "$d/evil"
+  d=$(mktemp -d); mkdir -p "$d/laranode-scripts/bin" "$d/run"; printf 'echo EVIL\n' > "$d/evil"
   ln -s "$d/evil" "$d/laranode-scripts/bin/laranode-sync-scripts.sh"
   out=$(bash -c "
     source '$INSTALLER'
-    PANEL_PATH='$d'; LN_LIB_DEST='$d/nolib'
+    PANEL_PATH='$d'; LN_LIB_DEST='$d/nolib'; LARANODE_STASH_PARENT='$d/run'
     die() { echo \"DIED: \$*\"; exit 1; }
     _stash_sync_script; echo SURVIVED" 2>&1)
   rm -rf "$d"
-  case "$out" in *DIED*) : ;; *) echo "a symlinked sync script was stashed: $out"; return 1 ;; esac; }
+  # the regular-file check must be what refuses (cp -P copies the link as a link)
+  case "$out" in *"DIED: laranode-sync-scripts.sh in the panel checkout is not a regular file"*) : ;;
+    *) echo "a symlinked sync script was not refused by the regular-file check: $out"; return 1 ;; esac; }
 t "first install: a symlinked sync script in the checkout is refused"             priv_sync_fallback_refuses_symlink
 priv_fetch_stashes_before_chown() { local body a b
   body=$(bash -c "source '$INSTALLER'; declare -f phase_fetch_panel")
@@ -1725,12 +1732,13 @@ t  "LARANODE_REF=<tag> clones the tag"                                          
 t  "LARANODE_REF=<short sha> clones that commit"                                    clone_sha
 tf "LARANODE_REF naming nothing in the repo: refused"                               clone_to no-such-ref
 ref_none() { base; unset LARANODE_REF; LARANODE_PINNED_REF=""; _resolve_ref; }
-tf "no LARANODE_REF and no pinned ref: refused (never the silent default branch)"   ref_none
+tfm "no LARANODE_REF and no pinned ref: refused (never the silent default branch)"  "No ref to install" ref_none
 ref_pinned() { base; unset LARANODE_REF; LARANODE_PINNED_REF=v1; _resolve_ref; expect REF "$PANEL_REF" v1; }
 t  "no LARANODE_REF: the installer's pinned ref is used"                            ref_pinned
-tf "LARANODE_REF starting with '-' refused (option injection)"                      clone_to --upload-pack=x
-tf "LARANODE_REF with '..' refused"                                                 clone_to 'a..b'
-tf "LARANODE_REF with a shell metacharacter refused"                                clone_to 'v1;id'
+tfm "LARANODE_REF starting with '-' refused (option injection)"  "is not a plain branch" clone_to --upload-pack=x
+tfm "LARANODE_REF with '..' refused"                             "is not a plain branch" clone_to 'a..b'
+tfm "LARANODE_REF with a shell metacharacter refused"            "is not a plain branch" clone_to 'v1;id'
+tfm "LARANODE_REF with a space refused"                          "is not a plain branch" clone_to 'v1 x'
 clone_mismatch() { base; d=$(mktemp -d); PANEL_PATH="$d/panel"; LARANODE_REPO="$REF_REPO"; export LARANODE_REF=v1; _resolve_ref
   git() { if [ "${3:-}" = checkout ] || [ "${5:-}" = checkout ]; then return 0; fi; command git "$@"; }   # checkout silently does nothing
   _clone_panel; }
