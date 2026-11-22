@@ -21,6 +21,12 @@
 #
 set -uo pipefail
 umask 022
+# The caller's PATH is never trusted (it would choose the commands root runs). Only the unit
+# tests, outside sudo, may keep the stub directory they prepend.
+if [ "${LARANODE_SLEEP_TEST:-}" != 1 ] || [ -n "${SUDO_UID:-}" ]; then
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+fi
+export PATH
 
 EX_FAIL=1 EX_USAGE=2 EX_REFUSED=3 EX_PRIV=4
 

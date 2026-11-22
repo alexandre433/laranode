@@ -96,5 +96,30 @@ fi
 ph=$(cat /proc/sys/fs/protected_hardlinks 2>/dev/null || echo missing)
 if [ "$ph" = 1 ]; then ok "fs.protected_hardlinks=1"; else bad "fs.protected_hardlinks is '$ph' (must be 1: root chown -R runs over tenant trees)"; fi
 
+# r3 F3: a root script must not run ANY command chosen by the caller's PATH, not even the
+# `dirname` that locates validate.sh (it runs before validate.sh sets its own PATH). Put a trap
+# `dirname`/`cat`/`id` first on PATH and start every installed script with no arguments (each
+# exits at its usage/argument check): none of the traps may fire.
+TRAP=$(mktemp -d); MARK="$TRAP/fired"
+for c in dirname cat id stat readlink grep sed awk tr mkdir flock systemctl; do
+    printf '#!/bin/sh\necho "%s $0" >> "%s"\nPATH=/usr/sbin:/usr/bin:/sbin:/bin exec %s "$@"\n' "$c" "$MARK" "$c" > "$TRAP/$c"
+    chmod 755 "$TRAP/$c"
+done
+n=0
+for s in /usr/local/lib/laranode/bin/laranode-*.sh; do
+    case "${s##*/}" in laranode-sync-scripts.sh|laranode-installer.sh|laranode-managed-register.sh) continue ;; esac
+    n=$((n + 1))
+    # no arguments (usage exit) and, for the sleep script whose usage check comes first, a
+    # well-formed call that reaches its real work
+    for args in "" "reverb wake"; do
+        [ -z "$args" ] || [ "${s##*/}" = laranode-sleep.sh ] || continue
+        # shellcheck disable=SC2086
+        env PATH="$TRAP:/usr/sbin:/usr/bin:/sbin:/bin" timeout 10 bash "$s" $args </dev/null >/dev/null 2>&1 || true
+        if [ -s "$MARK" ]; then bad "${s##*/} ran a command from the caller's PATH before resetting it: $(head -1 "$MARK")"; : > "$MARK"; fi
+    done
+done
+rm -rf "$TRAP"
+[ "$n" -gt 0 ] && [ "$fail" = 0 ] && ok "no installed script ran a caller-PATH command ($n scripts)"
+
 if [ "$fail" = 0 ]; then echo "PERMS: PASS"; else echo "PERMS: FAIL" >&2; fi
 exit "$fail"

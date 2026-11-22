@@ -109,6 +109,44 @@ for b in "${SRC_NAMES[@]}"; do
     run_as_panel test -f "$SRC/templates/$b" || continue
     read_src "$SRC/templates/$b" "$STAGE/templates/$b" 644
 done
+# ---- the four templates the INSTALLER (root) installs verbatim: exact-line allowlist ------
+# Root installs these into systemd (/etc/systemd/system), cron.d and Apache, whose managers parse
+# them with root's authority: a unit that says `User=root` / `ExecStartPre=/tmp/x`, a cron line
+# for root, or an Apache `LoadModule`/`Include` in a template laranode_ln edited in the checkout
+# would be root code execution at the next install. So each staged copy must consist ONLY of lines
+# the shipped file has (as anchored patterns); anything else refuses the whole sync.
+tpl_ok() {   # <name> <regex>...: every line of the staged templates/<name> matches one regex
+    local name=$1 f="$STAGE/templates/$1" line re hit
+    shift
+    [ -f "$f" ] || { echo "laranode-sync-scripts: template $name is missing" >&2; return 1; }
+    [ "$(tr -d '\0\r' <"$f" | wc -c)" -eq "$(wc -c <"$f")" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        hit=0
+        for re in "$@"; do [[ $line =~ $re ]] && { hit=1; break; }; done
+        [ "$hit" = 1 ] || { echo "laranode-sync-scripts: ${f##*/}: line not allowed: $line" >&2; return 1; }
+    done <"$f"
+}
+UNIT_COMMON=('^$' '^#[^\\]*$' '^\[(Unit|Service|Install)\]$' '^Description=[A-Za-z0-9 ._-]+$'
+    '^(After|Wants)=network-online\.target$' '^User=laranode_ln$' '^Group=laranode_ln$'
+    '^Restart=on-failure$' '^RestartSec=5s$' '^WantedBy=multi-user\.target$')
+tpl_ok laranode-queue-worker.service "${UNIT_COMMON[@]}" \
+    '^ExecStart=/usr/bin/php8\.4 /home/laranode_ln/panel/artisan queue:work$' \
+    || die "templates/laranode-queue-worker.service grants more than the shipped unit"
+tpl_ok laranode-reverb.service "${UNIT_COMMON[@]}" \
+    '^ExecStart=/usr/bin/php8\.4 /home/laranode_ln/panel/artisan reverb:start$' \
+    || die "templates/laranode-reverb.service grants more than the shipped unit"
+tpl_ok laranode-schedule.cron '^$' '^#[^\\]*$' \
+    '^\* \* \* \* \* __PANEL_USER__ __PHP__ __PANEL_PATH__/artisan schedule:run >> /dev/null 2>&1$' \
+    || die "templates/laranode-schedule.cron runs more than the scheduler"
+tpl_ok apache-panel.template '^$' \
+    '^<VirtualHost \*:__PORT__>$' '^</VirtualHost>$' \
+    '^    ServerAdmin webmaster@localhost$' '^    DocumentRoot __DOCROOT__$' \
+    '^    <Directory __DOCROOT__>$' '^    </Directory>$' \
+    '^        Options FollowSymLinks$' '^        AllowOverride All$' '^        Require all granted$' \
+    '^    ErrorLog \$\{APACHE_LOG_DIR\}/laranode-error\.log$' \
+    '^    CustomLog \$\{APACHE_LOG_DIR\}/laranode-access\.log combined$' \
+    || die "templates/apache-panel.template holds a directive the shipped vhost does not"
+
 # ---- sudoers drop-ins: a strict ALLOWLIST, checked on the STAGED copy -------------------
 # The drop-in comes from the panel checkout (writable by laranode_ln). Copy it first into the
 # root-only staging dir, then judge the copy: what is checked is exactly what is published,

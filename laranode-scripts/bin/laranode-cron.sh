@@ -31,6 +31,7 @@ SUBCMD="${1:-}"
 SYSTEM_USER="${2:-}"
 
 # ── Validate SYSTEM_USER (existing hosted account, never root/system/panel user) ──
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # before ANY command runs: dirname below must not come from the caller's PATH
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
 LN_ARGC=$#
 ln_argc 2 3 "laranode-cron.sh <set|remove|list> <system_user> [tmp_file]"

@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # before ANY command runs: dirname below must not come from the caller's PATH
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
 # The sleep-state test seam (same rule as laranode-sleep.sh: never honoured under sudo) lets the Pest
 # suite exercise the refusal as a non-root CI user; real calls are always root-checked.

@@ -82,6 +82,18 @@ _proc_net() { echo "${LARANODE_PROC_NET_DIR:-/proc/net}"; }
 _proc_dir() { echo "${LARANODE_PROC_DIR:-/proc}"; }
 # _probe_available — listeners can be read (ss, or /proc/net/tcp).
 _probe_available() { _have_ss || [ -r "$(_proc_net)/tcp" ]; }
+
+# _require_protected_hardlinks — the privileged scripts run `chown -R -h` / `chmod` as root over a
+# tenant's home. A tenant could hard-link a file it cannot write (/etc/shadow, a root-owned
+# script) into its own tree and have root re-own it; fs.protected_hardlinks=1 makes the kernel
+# refuse to link a file the caller neither owns nor can write. That sysctl is the ONLY thing
+# stopping it (the scripts do not), so a host with it off is refused before anything changes,
+# and the installer never flips a kernel setting on a host it does not own.
+_require_protected_hardlinks() {
+  local f; f="$(_proc_dir)/sys/fs/protected_hardlinks"
+  local v; v=$(cat "$f" 2>/dev/null || true)
+  [ "$v" = 1 ] || die "fs.protected_hardlinks is '${v:-unreadable}', not 1: tenant hard links could make the root scripts re-own system files. Enable it (sysctl -w fs.protected_hardlinks=1, and persist it in /etc/sysctl.d/) and re-run."
+}
 # _proc_listen_inodes PORT — socket inode of every TCP LISTEN (state 0A) socket on PORT.
 _proc_listen_inodes() {
   local hex f; hex=$(printf '%04X' "$1")
@@ -625,6 +637,14 @@ phase_fetch_panel() {
   else
     echo "Repo already present at ${PANEL_PATH}, skipping clone."
   fi
+
+  # Everything root renders or installs from the panel later (vhost, systemd units, cron line,
+  # the privileged scripts) comes from the ROOT-OWNED copy in ${LN_LIB_DEST}, never from the
+  # checkout: laranode_ln writes that tree. Publish the copy now, before phase_webserver needs it.
+  # The sync reads the checkout AS laranode_ln, so the tree is handed to it first.
+  _prepare_panel_tree
+  log "Installing the privileged scripts and templates (root-owned copy)"
+  _install_privileged_scripts
 }
 
 # ==============================================================================
@@ -1181,7 +1201,7 @@ phase_webserver() {
   [ -n "${PANEL_PATH:-}" ] || die "PANEL_PATH not set — preflight must run first"
 
   # Render the panel vhost from the template. NEVER writes 000-default.conf.
-  local tmpl="${PANEL_PATH}/laranode-scripts/templates/apache-panel.template"
+  local tmpl="${LN_LIB_DEST}/templates/apache-panel.template"   # root-owned copy, never the checkout
   local dest="${ad}/sites-available/laranode.conf"
   [ -f "$tmpl" ] || die "apache-panel.template missing at ${tmpl}"
   # A pre-existing Apache's own files are restored if anything below fails (modules
@@ -1403,7 +1423,7 @@ _prepare_panel_tree() {
   chown -R -h laranode_ln:laranode_ln "$p"
   if [ -d "$p/bootstrap/cache" ] && [ ! -L "$p/bootstrap/cache" ]; then
     find "$p/bootstrap/cache" -maxdepth 1 -type f -name '*.php' -delete
-    chmod 750 "$p/bootstrap/cache"
+    _as_panel_user chmod 750 "$p/bootstrap/cache"
   fi
 }
 
@@ -1472,8 +1492,8 @@ phase_app() {
 
   # The scripts www-data may run as root live in a ROOT-OWNED copy, never in the panel
   # checkout (which laranode_ln writes). The panel finds them through .env.
-  log "Installing the privileged scripts (root-owned) and sudoers drop-ins for www-data"
-  _install_privileged_scripts
+  # (the root-owned copy was published in phase_fetch_panel)
+  log "Checking the sudoers drop-ins for www-data"
   _install_sudoers
   env_set LARANODE_BIN_PATH "${LN_LIB_DEST}/bin" "${PANEL_PATH}/.env"
   env_set LARANODE_TEMPLATES_PATH "${LN_LIB_DEST}/templates" "${PANEL_PATH}/.env"
@@ -1534,14 +1554,15 @@ phase_app() {
   # crashes in arborist (peer set of vitest 4 vs vitest 5 add-ons: "reading edgesOut").
   # --legacy-peer-deps skips auto-installing peers; the ones the build needs are explicit
   # in package.json (e.g. @testing-library/dom).
-  npm install --legacy-peer-deps
+  # npm runs node build scripts (project code): as the panel user, never as root over its tree
+  _as_panel_user npm install --legacy-peer-deps
   # phase_services `find -type f -exec chmod 660` strips exec bits from npm
   # binaries on a previous install. Restore u+x on bin-script files so that
   # npm run build succeeds on idempotent re-runs. chmod -R silently skips
   # symlinks, so we target the actual files via find.
-  find "${PANEL_PATH}/node_modules" -type f -path "*/bin/*" \
+  _as_panel_user find "${PANEL_PATH}/node_modules" -type f -path "*/bin/*" \
     -exec chmod u+x {} \; 2>/dev/null || true
-  npm run build
+  _as_panel_user npm run build
 }
 
 # ==============================================================================
@@ -1710,7 +1731,7 @@ write_service_manifest() {
 # LARANODE_CRON_DIR is a test seam; default /etc/cron.d.
 _install_scheduler_cron() {
   local dir="${LARANODE_CRON_DIR:-/etc/cron.d}"
-  local tpl="${PANEL_PATH}/laranode-scripts/templates/laranode-schedule.cron"
+  local tpl="${LN_LIB_DEST}/templates/laranode-schedule.cron"   # root-owned copy, never the checkout
   [ -f "$tpl" ] || die "scheduler cron template missing: $tpl"
   mkdir -p "$dir"
   sed -e "s#__PANEL_USER__#laranode_ln#g" \
@@ -1736,10 +1757,17 @@ _install_scheduler_cron() {
 LN_LIB_DEST=/usr/local/lib/laranode
 
 _install_privileged_scripts() {
-  [ -f "${PANEL_PATH}/laranode-scripts/bin/laranode-sync-scripts.sh" ] \
-    || die "laranode-sync-scripts.sh missing from ${PANEL_PATH}/laranode-scripts/bin"
+  local sync="${LN_LIB_DEST}/bin/laranode-sync-scripts.sh"
   mkdir -p /usr/local/lib && chown root:root /usr/local/lib && chmod u=rwx,go=rx /usr/local/lib
-  bash "${PANEL_PATH}/laranode-scripts/bin/laranode-sync-scripts.sh" "${PANEL_PATH}" \
+  if [ ! -f "$sync" ]; then
+    # first install: the tree was just cloned by this installer and there is no root copy yet.
+    # A re-run uses the ROOT-OWNED sync script instead, never the one laranode_ln may have
+    # edited in the checkout (an updated sync script takes effect from the run after the one
+    # that copied it).
+    sync="${PANEL_PATH}/laranode-scripts/bin/laranode-sync-scripts.sh"
+    [ -f "$sync" ] || die "laranode-sync-scripts.sh missing from ${PANEL_PATH}/laranode-scripts/bin"
+  fi
+  bash "$sync" "${PANEL_PATH}" \
     || die "could not install the privileged scripts into ${LN_LIB_DEST}"
 }
 
@@ -1756,21 +1784,24 @@ _settle_permissions() {
   local h=/home/laranode_ln p="${PANEL_PATH}"
   mkdir -p "$h/logs"
   chown -R laranode_ln:laranode_ln "$h"
+  # Every mode change below runs AS the panel user (it owns the whole tree after the chown):
+  # a root `find -exec chmod <path>` follows a symlink the panel account swaps in after find
+  # looked, and would re-mode an arbitrary file. As laranode_ln that chmod simply fails.
   # group (www-data) may read and traverse, never write
-  find "$h" -type d -exec chmod 750 {} +
-  find "$h" -type f -exec chmod 640 {} +
+  _as_panel_user find "$h" -type d -exec chmod 750 {} +
+  _as_panel_user find "$h" -type f -exec chmod 640 {} +
   # the web process writes inside the panel in ONE place (storage/) plus its own log dir.
   # bootstrap/cache is NOT web-writable: Laravel `require`s it on every artisan run, and the
   # caches are prebuilt by composer (package:discover) as the panel account.
-  chmod 770 "$h/logs"
-  find "$h/logs" -type f -exec chmod 660 {} +
+  _as_panel_user chmod 770 "$h/logs"
+  _as_panel_user find "$h/logs" -type f -exec chmod 660 {} +
   if [ -d "$p/storage" ]; then
-    find "$p/storage" -type d -exec chmod 770 {} +
-    find "$p/storage" -type f -exec chmod 660 {} +
+    _as_panel_user find "$p/storage" -type d -exec chmod 770 {} +
+    _as_panel_user find "$p/storage" -type f -exec chmod 660 {} +
   fi
-  [ -f "$p/.env" ] && chmod 640 "$p/.env"
+  [ -f "$p/.env" ] && _as_panel_user chmod 640 "$p/.env"
   # the source copy of the scripts is only ever read (by the root sync): keep it that way
-  find "$p/laranode-scripts/bin" -type f -name '*.sh' -exec chmod 750 {} + 2>/dev/null || true
+  _as_panel_user find "$p/laranode-scripts/bin" -type f -name '*.sh' -exec chmod 750 {} + 2>/dev/null || true
   # the root-owned copy
   if [ -d "${LN_LIB_DEST}" ]; then
     chown -R root:root "${LN_LIB_DEST}"
@@ -1780,9 +1811,10 @@ _settle_permissions() {
 
 phase_services() {
   log "Installing systemd service units"
-  cp "${PANEL_PATH}/laranode-scripts/templates/laranode-queue-worker.service" \
+  # from the root-owned template copy: systemd runs a unit file with root's authority
+  cp "${LN_LIB_DEST}/templates/laranode-queue-worker.service" \
     /etc/systemd/system/laranode-queue-worker.service
-  cp "${PANEL_PATH}/laranode-scripts/templates/laranode-reverb.service" \
+  cp "${LN_LIB_DEST}/templates/laranode-reverb.service" \
     /etc/systemd/system/laranode-reverb.service
 
   log "Setting file permissions"
@@ -1880,6 +1912,8 @@ main() {
   # until the plan has been shown and confirmed: the preflight reads listeners with `ss`, or
   # /proc/net/tcp when iproute2 is absent. preflight runs detect_os again; it is a pure read.
   detect_os
+  # the root scripts rely on this kernel setting: refuse a host that has it off
+  _require_protected_hardlinks
   # A guard left by an installer that was killed (SIGKILL / OOM / power loss) would silently
   # stop every later package install on this host from starting services.
   _policy_guard_clean_stale

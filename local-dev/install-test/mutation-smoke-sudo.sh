@@ -25,6 +25,9 @@ L=lib/validate.sh
 #   ln_sysuser first regex, ln_newuser dash/panel-user (useradd refuses), ln_install_file symlink
 #   (needs a symlink in a root-only dir), ln_siteroot symlink, restore-files user (BASE path check),
 #   file-permissions "..", symlink (fd prefix check), sync script owner (settle chown -R root)
+#   r3 sync: the directory LISTING made as root instead of the panel user (every read is still
+#   made as the panel user, so a listing of a swapped-in /etc only yields names that then fail
+#   to read; the harness cannot tell it apart, and nothing root-only can leak through it)
 #   r3 sync: the `test -f` before each read (a FIFO/dir fails the read itself, bounded by `timeout`)
 #   r2 sync allowlist: a trailing backslash, a CR, a NUL byte (each line is also refused by the
 #   per-line grammar, or is inert inside a comment: defense in depth), the staged-copy symlink check
@@ -70,19 +73,40 @@ mut etc/sudoers.d/laranode-ufw 'sudoers: ufw binary grant back' '' 'www-data ALL
 # --- layout / permissions / sudoers -----------------------------------------------------
 mut bin/laranode-installer.sh 'installer: panel dirs left group-writable' 'find "$h" -type d -exec chmod 750 {} +' 'find "$h" -type d -exec chmod 770 {} +'
 mut bin/laranode-installer.sh 'installer: panel files group-writable' 'find "$h" -type f -exec chmod 640 {} +' 'find "$h" -type f -exec chmod 660 {} +'
-mut bin/laranode-installer.sh 'installer: .env group-writable' '[ -f "$p/.env" ] && chmod 640 "$p/.env"' '[ -f "$p/.env" ] && chmod 660 "$p/.env"'
+mut bin/laranode-installer.sh 'installer: .env group-writable' '[ -f "$p/.env" ] && _as_panel_user chmod 640 "$p/.env"' '[ -f "$p/.env" ] && _as_panel_user chmod 660 "$p/.env"'
 mut bin/laranode-sync-scripts.sh 'sync: script copy group-writable' 'read_src "$SRC/bin/$b" "$STAGE/bin/$b" 755' 'read_src "$SRC/bin/$b" "$STAGE/bin/$b" 775'
 mut bin/laranode-sync-scripts.sh 'sync: lib copy world-writable' 'read_src "$SRC/lib/$b" "$STAGE/lib/$b" 644' 'read_src "$SRC/lib/$b" "$STAGE/lib/$b" 666'
 # --- r3 F1: the checkout is read AS the panel account, never as root -------------------------
 mut bin/laranode-sync-scripts.sh 'sync: every read/list runs as root (parent-dir swap leaks root-only files)'     'run_as_panel() { timeout 30 runuser -u "$PANEL_USER" -- "$@"; }' 'run_as_panel() { timeout 30 "$@"; }'
 mut bin/laranode-sync-scripts.sh 'sync: file bytes read as root'     'run_as_panel cat -- "$1" |' 'cat -- "$1" |'
-mut bin/laranode-sync-scripts.sh 'sync: directory listing made as root'     'run_as_panel find "$1" -mindepth 1' 'find "$1" -mindepth 1'
 mut bin/laranode-sync-scripts.sh 'sync: file size cap dropped'     '| head -c 2097152 > "$2"' '> "$2"'
 mut bin/laranode-sync-scripts.sh 'sync: hostile lib/template names accepted'     'safe_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }' 'safe_name() { true; }'
 mut etc/sudoers.d/laranode-panel 'sudoers: rm glob grant back' '' 'www-data ALL=(ALL) NOPASSWD: /usr/bin/rm /etc/apache2/sites-available/*.conf'
 mut etc/sudoers.d/laranode-panel 'sudoers: script from the writable panel tree' '' 'www-data ALL=(ALL) NOPASSWD: /home/laranode_ln/panel/laranode-scripts/bin/laranode-cron.sh'
 mut etc/sudoers.d/laranode-panel 'sudoers: any-args a2dissite back' '' 'www-data ALL=(ALL) NOPASSWD: /usr/sbin/a2dissite'
 mut etc/sudoers.d/laranode-panel 'sudoers: wildcard over the script directory' '' 'www-data ALL=(ALL) NOPASSWD: /usr/local/lib/laranode/bin/*'
+# --- r3 F2: the four templates the installer installs as root are judged line by line --------
+mut bin/laranode-sync-scripts.sh 'sync: unit template may run as any User=' \
+    "'^User=laranode_ln\$'" "'^User=.*\$'"
+mut bin/laranode-sync-scripts.sh 'sync: queue unit may run any ExecStart / ExecStartPre' \
+    "'^ExecStart=/usr/bin/php8\\.4 /home/laranode_ln/panel/artisan queue:work\$'" "'^Exec.*\$'"
+mut bin/laranode-sync-scripts.sh 'sync: cron template may run any command for any user' \
+    "'^\\* \\* \\* \\* \\* __PANEL_USER__ __PHP__ __PANEL_PATH__/artisan schedule:run >> /dev/null 2>&1\$'" "'^\\* \\* \\* \\* \\* .*\$'"
+mut bin/laranode-sync-scripts.sh 'sync: panel vhost may carry any indented directive (LoadModule, Include)' \
+    "'^    ErrorLog \\\$\\{APACHE_LOG_DIR\\}/laranode-error\\.log\$'" "'^ +.*\$'"
+mut bin/laranode-sync-scripts.sh 'sync: a template line matching no pattern is accepted' \
+    '[ "$hit" = 1 ] || { echo "laranode-sync-scripts: ${f##*/}: line not allowed: $line" >&2; return 1; }' ':'
+mut bin/laranode-sync-scripts.sh 'sync: a refused unit template does not stop the sync' \
+    '|| die "templates/laranode-reverb.service grants more than the shipped unit"' '|| :'
+mut bin/laranode-sync-scripts.sh 'sync: a refused cron template does not stop the sync' \
+    '|| die "templates/laranode-schedule.cron runs more than the scheduler"' '|| :'
+# --- r3 F3: a root script never runs a command chosen by the caller's PATH -------------------
+mut bin/laranode-php-list.sh 'php-list: dirname resolved through the caller PATH' \
+    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # before ANY command runs" ': # before ANY command runs'
+mut bin/laranode-cron.sh 'cron: dirname resolved through the caller PATH' \
+    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # before ANY command runs" ': # before ANY command runs'
+mut bin/laranode-sleep.sh 'sleep: caller PATH trusted' \
+    'if [ "${LARANODE_SLEEP_TEST:-}" != 1 ] || [ -n "${SUDO_UID:-}" ]; then' 'if false; then'
 # --- r2: sync-scripts sudoers allowlist (each bypass of review r1 + the new parse rules) ---
 S=bin/laranode-sync-scripts.sh
 mut $S 'sync: any line not matching a grant shape passes (NOPASSWD: ALL)' \
@@ -107,7 +131,7 @@ mut bin/laranode-php-uninstall.sh 'php-uninstall: removes the php that runs the 
 mut $L 'ln_open9_under opens a FIFO (root hangs for ever)' \
     '{ [ -f "$1" ] || [ -d "$1" ]; } && [ ! -p "$1" ] || ln_die "not a regular file or directory"' ':'
 mut bin/laranode-installer.sh 'installer: settle step makes bootstrap/cache web-writable' \
-    '  chmod 770 "$h/logs"' '  chmod 770 "$h/logs" "$p/bootstrap/cache"'
+    '  _as_panel_user chmod 770 "$h/logs"' '  _as_panel_user chmod 770 "$h/logs" "$p/bootstrap/cache"'
 
 IMG=laranode-sudo-fast
 docker build -q -t "$IMG" - >/dev/null <<'DF'

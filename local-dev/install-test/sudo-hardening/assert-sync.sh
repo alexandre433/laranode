@@ -147,6 +147,31 @@ refuse_case 'template name starting with -'    setup_dash_template
 refuse_case 'template over 2 MiB'              setup_big_template
 refuse_case 'a directory named like a script'  setup_dir_script
 
+# F2 (review r3): the installer installs four templates verbatim as root (systemd units, the
+# scheduler cron line, the panel vhost). A tampered copy in the checkout must not reach the root copy.
+setup_unit_root()   { sed -i 's/^User=laranode_ln$/User=root/' templates/laranode-queue-worker.service; }
+setup_unit_pre()    { echo 'ExecStartPre=/bin/sh -c "id > /tmp/pwned"' >> templates/laranode-reverb.service; }
+setup_unit_exec()   { sed -i 's#^ExecStart=.*#ExecStart=/tmp/evil#' templates/laranode-reverb.service; }
+setup_qunit_exec()  { sed -i 's#^ExecStart=.*#ExecStart=/tmp/evil#' templates/laranode-queue-worker.service; }
+setup_qunit_pre()   { echo 'ExecStartPre=/bin/sh -c "id > /tmp/pwned"' >> templates/laranode-queue-worker.service; }
+setup_cron_root()   { echo '* * * * * root /tmp/evil' >> templates/laranode-schedule.cron; }
+setup_cron_user()   { sed -i 's/__PANEL_USER__/root/' templates/laranode-schedule.cron; }
+setup_vhost_mod()   { echo 'LoadModule evil_module /tmp/evil.so' >> templates/apache-panel.template; }
+setup_vhost_inc()   { echo '    Include /tmp/evil.conf' >> templates/apache-panel.template; }
+setup_unit_cont()   { printf '%s\n' '# harmless \' 'ExecStartPre=/tmp/x' >> templates/laranode-queue-worker.service; }
+setup_tpl_missing() { rm templates/laranode-reverb.service; }
+refuse_case 'queue unit: User=root'                      setup_unit_root
+refuse_case 'reverb unit: ExecStartPre injected'         setup_unit_pre
+refuse_case 'reverb unit: ExecStart replaced'            setup_unit_exec
+refuse_case 'queue unit: ExecStart replaced'             setup_qunit_exec
+refuse_case 'queue unit: ExecStartPre injected'          setup_qunit_pre
+refuse_case 'cron: extra root line appended'             setup_cron_root
+refuse_case 'cron: scheduler line runs as root'          setup_cron_user
+refuse_case 'panel vhost: LoadModule injected'           setup_vhost_mod
+refuse_case 'panel vhost: Include injected'              setup_vhost_inc
+refuse_case 'unit: backslash-continued comment smuggles a directive' setup_unit_cont
+refuse_case 'a required installer template is missing'   setup_tpl_missing
+
 # the real race: swap a NON-last component ($SRC/templates) between a real dir and a link to a
 # root-only dir while the sync runs. Whatever the timing, no root-only byte may reach the copy.
 race_case() {

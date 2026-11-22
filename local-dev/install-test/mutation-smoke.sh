@@ -70,10 +70,25 @@ MUTATIONS=(
   # sudo review r1: root never runs PHP from the panel tree
   'artisan runs as root again|s#^_artisan() { _as_panel_user /usr/bin/php8.4 artisan "\$@"; }#_artisan() { /usr/bin/php8.4 artisan "$@"; }#'
   'composer runs as root again|s#_as_panel_user /usr/bin/php8.4 /usr/local/bin/composer#/usr/bin/php8.4 /usr/local/bin/composer#'
-  'settle makes bootstrap/cache web-writable again|s#^  chmod 770 "\$h/logs"$#  chmod 770 "$h/logs" "$p/bootstrap/cache"#'
+  'settle makes bootstrap/cache web-writable again|s#^  _as_panel_user chmod 770 "\$h/logs"$#  _as_panel_user chmod 770 "$h/logs" "$p/bootstrap/cache"#'
   'panel tree not chowned before the first PHP run|s#chown -R -h laranode_ln:laranode_ln "\$p"#:#'
   'planted bootstrap caches kept|s# -delete$# -print#'
   'tree never prepared before the first composer/artisan run|s#^  _prepare_panel_tree$#  :#'
+  # sudo review r3 F2: root-run steps never read the writable panel tree
+  'npm install runs as root again|s#_as_panel_user npm install#npm install#'
+  'npm run build runs as root again|s#_as_panel_user npm run build#npm run build#'
+  'node_modules chmod walked as root again|s#_as_panel_user find "${PANEL_PATH}/node_modules"#find "${PANEL_PATH}/node_modules"#'
+  'scheduler cron rendered from the panel tree again|s#local tpl="${LN_LIB_DEST}/templates/laranode-schedule.cron"#local tpl="${PANEL_PATH}/laranode-scripts/templates/laranode-schedule.cron"#'
+  'queue unit copied from the panel tree again|s#cp "${LN_LIB_DEST}/templates/laranode-queue-worker.service"#cp "${PANEL_PATH}/laranode-scripts/templates/laranode-queue-worker.service"#'
+  'reverb unit copied from the panel tree again|s#cp "${LN_LIB_DEST}/templates/laranode-reverb.service"#cp "${PANEL_PATH}/laranode-scripts/templates/laranode-reverb.service"#'
+  'panel vhost rendered from the panel tree again|s#local tmpl="${LN_LIB_DEST}/templates/apache-panel.template"#local tmpl="${PANEL_PATH}/laranode-scripts/templates/apache-panel.template"#'
+  'a re-run syncs with the checkout sync script, not the root-owned one|s#if \[ ! -f "$sync" \]; then#if true; then#'
+  'root-owned copy not published in phase_fetch_panel|s#^  _install_privileged_scripts$#  :#'
+  'settle chmods the tree as root again|s#_as_panel_user find "$h" -type d -exec chmod 750#find "$h" -type d -exec chmod 750#'
+  'storage chmod run as root again|s#_as_panel_user find "$p/storage" -type d#find "$p/storage" -type d#'
+  # sudo review r3 F3
+  'protected_hardlinks=0 accepted|s#\[ "$v" = 1 \] || die "fs.protected_hardlinks#true || die "fs.protected_hardlinks#'
+  'protected_hardlinks never checked by main|s#^  _require_protected_hardlinks$#  :#'
 )
 
 fail=0

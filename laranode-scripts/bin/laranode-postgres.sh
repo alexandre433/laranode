@@ -12,6 +12,7 @@
 #   laranode-postgres.sh update-user-password <user>  (password via stdin)
 
 set -euo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # before ANY command runs: dirname below must not come from the caller's PATH
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
 ln_need_root
 

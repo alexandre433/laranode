@@ -31,10 +31,16 @@ sudo -u laranode_ln git -C /home/laranode_ln/panel pull
 sudo /usr/local/lib/laranode/bin/laranode-sync-scripts.sh      # re-copies scripts, lib, templates, drop-ins
 ```
 
-Never run git as root in the checkout. The sync script is root-only. It copies every file with
-`cp -P` (no symlink is followed) into a root-only staging directory and judges the COPY, so the
-panel account cannot swap a file between the check and the install. It `bash -n`s every script,
-validates each sudoers drop-in with `visudo -c`, and then applies a strict allowlist: a drop-in
+Never run git as root in the checkout. The sync script is root-only, but root never opens a path in
+the checkout itself: every directory listing and file read runs as `laranode_ln` (`runuser`), so a
+`laranode_ln` that races a symlink swap (`templates -> /etc`) can only hand over what it could read
+anyway, never a root-only file. Root writes the bytes (names checked, size capped at 2 MiB) into a
+root-only staging directory and judges the COPY, so the panel account cannot swap a file between
+the check and the install. It `bash -n`s every script, validates each sudoers drop-in with
+`visudo -c`, holds the four templates the installer installs verbatim as root (the queue and reverb
+systemd units, the scheduler cron line, the panel Apache vhost) to an exact-line allowlist (a unit
+with `User=root`/`ExecStartPre=`, a cron line for root, a `LoadModule`/`Include` in the vhost refuses
+the sync), and then applies a strict allowlist to the sudoers drop-ins: a drop-in
 may only hold blank lines, plain comments (never `#include`/`#includedir`, never a trailing ``),
 `Defaults!<dest>/bin/laranode-<name>.sh !requiretty`, and
 `www-data ALL=(ALL|www-data) NOPASSWD: <dest>/bin/laranode-<name>.sh` (optionally followed by `""`).
@@ -50,9 +56,21 @@ runs the project's scripts. So the installer and the upgrade path run `composer`
 as `laranode_ln` (`_as_panel_user` / `_artisan` in the installer), never as root; the tree is
 `chown`ed to `laranode_ln` and the generated `bootstrap/cache/*.php` deleted and rebuilt before the
 first PHP run, and `bootstrap/cache` stays 750 / 640. The `.env` file is owned by `laranode_ln`.
-Run admin commands the same way: `sudo -u laranode_ln php8.4 artisan …`. Remaining root step: the
-installer's `npm install`/`npm run build` still run as root over the `laranode_ln`-owned tree (see
-Known limits).
+Run admin commands the same way: `sudo -u laranode_ln php8.4 artisan …`. The same holds for
+`npm install`/`npm run build` (node build scripts run project code) and for every `find -exec chmod`
+over the tree (a root `chmod <path>` follows a symlink swapped in after `find` looked): all run as
+`laranode_ln`.
+
+Root-run installer steps render only from the root-owned copy in `/usr/local/lib/laranode/templates`
+(the scheduler cron line, the systemd units, the panel vhost), never from the checkout.
+`phase_fetch_panel` publishes that copy (through the sync, which judges it) before `phase_webserver`
+needs it; a re-run uses the already installed, root-owned sync script, the first install falls back
+to the one in the fresh clone. A unit test fails when any root step reads or runs something under
+the panel tree.
+
+The installer also refuses a host with `fs.protected_hardlinks` other than 1 (see Known limits), and
+every sudo-able script resets `PATH` before its first command (`dirname`), not only inside
+`validate.sh`.
 
 ## What every script enforces (`lib/validate.sh`)
 
@@ -80,9 +98,11 @@ application-profile name). Options (`-…`) never pass through.
   throwaway `debian:13` container, then
   * `assert-perms.sh`: every sudo-granted path is root-owned and not group/other-writable; `.env`
     is <= 640; nothing under the panel home is group/other-writable outside storage and logs, `www-data` cannot
-    create or write in `bootstrap/cache`, `fs.protected_hardlinks` is 1;
+    create or write in `bootstrap/cache`, `fs.protected_hardlinks` is 1, and no installed script runs
+    a command from a hostile caller PATH (trap binaries first on PATH must never fire);
   * `assert-sync.sh`: `laranode-sync-scripts.sh` publishes a clean tree and refuses each hostile
-    drop-in / symlinked source / bad script (one case per allowlist rule);
+    drop-in / symlinked source / bad script / hostile template line (one case per allowlist rule),
+    and keeps root-only files out of the published tree while a symlink swap races the sync;
   * `assert-hostile.sh`: for every sudo'd script, hostile arguments (root, `../`, newline, spaces,
     sed metacharacters, globs, option injection, symlinks) run as `www-data`; each must exit
     non-zero AND leave a host-state snapshot unchanged; valid PHP-shaped calls must still work.
@@ -94,17 +114,17 @@ application-profile name). Options (`-…`) never pass through.
 
 * Time-of-check/time-of-use against a tenant is mitigated (fd/`runuser`), not eliminated, for the
   root scripts that must touch tenant-controlled paths.
-* The installer trusts the tree it has just cloned; a re-run trusts the checkout as `laranode_ln`
-  left it. Pin the clone ref (follow-up).
+* The installer trusts the tree it has just cloned. Residuals of the root-owned-copy model: the
+  installer file itself, when started from the checkout, is the admin's choice (run it from a fresh
+  download); the other templates (site vhost, php-fpm pool) still pass through the sync without a
+  line allowlist (follow-up); a changed sync script takes effect one run later (a run uses the
+  installed copy). Pin the clone ref (follow-up).
 * On Proxmox hosts `www-data` is still the web user; a dedicated panel web user is a follow-up.
 * The queue worker runs as `laranode_ln`, but sudoers grants `www-data` only: a queued job that
   shells out through sudo would fail. No such job exists today.
-* The installer's `npm install` / `npm run build` still run as root over the `laranode_ln`-owned
-  tree (node build scripts execute project code): a compromised `laranode_ln` (queue worker, cron)
-  can therefore reach root on the next install/upgrade. Moving the build to `laranode_ln` is a
-  follow-up.
 * `create-directory.sh` runs `chown -R -h` as root over a tenant tree; hard-link tricks are blocked
-  by `fs.protected_hardlinks=1` (asserted by `assert-perms.sh`), not by the script.
+  by `fs.protected_hardlinks=1` (asserted by `assert-perms.sh`, and the installer dies where it is
+  not 1), not by the script.
 * `laranode-php-uninstall.sh` refuses `8.4` (the version that runs the panel); other versions can
   be removed.
 * Opening a path that a tenant controls is refused unless it is a regular file or directory (a FIFO
