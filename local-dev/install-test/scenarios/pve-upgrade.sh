@@ -67,6 +67,21 @@ export PRESETUP='
     tar -C /tmp/new-panel -cf - . | runuser -u laranode_ln -- tar -C /home/laranode_ln/panel --no-same-owner -xf -
     rm -rf /tmp/new-panel
     rm -f /home/laranode_ln/panel/bootstrap/cache/*.php
+
+    echo "[pve-upgrade] === a re-run that dies on a bad LARANODE_REF must leave the old setup serving (PR #11 r2) ==="
+    # the injected checkout has no .git: with LARANODE_REF set the ref check dies. Before PR #11 r2 the
+    # tenant-group migration ran BEFORE that check: www-data left upgr_ln while Apache still ran as www-data.
+    if LARANODE_UNATTENDED=1 LARANODE_HTTP_PORT=80 LARANODE_REF=v0.0.0-no-such-tag COMPOSER_CACHE_DIR=/composer-cache \
+        bash /home/laranode_ln/panel/laranode-scripts/bin/laranode-installer.sh > /tmp/badref-run.log 2>&1; then
+        fail "the re-run with a bad LARANODE_REF succeeded"
+    fi
+    grep -qE "LARANODE_REF is set but .* has no .git|is not a tag" /tmp/badref-run.log \
+        || { tail -15 /tmp/badref-run.log >&2; fail "the re-run died, but not on the ref check"; }
+    id -nG www-data | tr " " "\n" | grep -qx upgr_ln \
+        || fail "bad-ref re-run stripped www-data from upgr_ln while Apache still runs as www-data"
+    out=$(curl -s -H "Host: tenant.test" http://127.0.0.1/index.php)
+    case "$out" in "TENANT-OK upgr_ln"*) : ;; *) fail "tenant site down after the failed bad-ref re-run: ${out:0:200}" ;; esac
+    echo "PASS: bad-ref re-run died on the ref check; www-data still in upgr_ln, tenant site still serves"
 '
 # the re-run keeps the panel where the first run put it (unset, it would see its own :80 and fall back)
 export INSTALLER_ENV="LARANODE_UNATTENDED=1 LARANODE_HTTP_PORT=80"

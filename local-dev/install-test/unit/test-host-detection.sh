@@ -1656,8 +1656,30 @@ mtg_pve() { mtg_run laranode_web
 t  "upgrade to laranode_web: every tenant group gains laranode_web and loses www-data" mtg_pve
 mtg_plain() { mtg_run www-data; [ ! -s "$CALLS" ] || { echo "plain host touched groups:"; cat "$CALLS"; return 1; }; }
 t  "plain host (www-data): no tenant group is touched"                             mtg_plain
-mtg_called() { bash -c "source '$INSTALLER'; declare -f _ensure_web_user" | grep -q '_migrate_tenant_groups'; }
-t  "_ensure_web_user migrates the tenant groups on the dedicated web user"         mtg_called
+# PR #11 r2 (availability): the migration drops www-data from every tenant group while Apache still
+# runs as www-data. It must happen only once nothing can die before the Apache user switch: NOT in
+# _ensure_web_user (phase_fetch_panel: before the LARANODE_REF check and the sudoers die), but in
+# phase_webserver right before _apache_web_user (the User snippet) and the Apache reload.
+mtg_not_early() { ! bash -c "source '$INSTALLER'; declare -f _ensure_web_user phase_fetch_panel" | grep -q '_migrate_tenant_groups'; }
+t  "tenant groups are NOT migrated in _ensure_web_user / phase_fetch_panel (before the ref check)" mtg_not_early
+# PR #12 r1: not even before a2ensite / apachectl configtest (a die there leaves Apache on www-data
+# with no rollback on an Apache we own): after the config test, right before the reload/restart.
+mtg_in_webserver() { local body a b c d
+  body=$(bash -c "source '$INSTALLER'; declare -f phase_webserver")
+  a=$(printf '%s\n' "$body" | grep -n '^ *_migrate_tenant_groups;*$' | head -1 | cut -d: -f1)
+  b=$(printf '%s\n' "$body" | grep -n '^ *_apache_web_user;*$' | head -1 | cut -d: -f1)
+  c=$(printf '%s\n' "$body" | grep -n 'apachectl configtest' | head -1 | cut -d: -f1)
+  d=$(printf '%s\n' "$body" | grep -n '_refresh_service apache2' | head -1 | cut -d: -f1)
+  [ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ -n "$d" ] && [ "$b" -lt "$c" ] && [ "$c" -lt "$a" ] && [ "$a" -lt "$d" ] \
+    && [ $((d - a)) -le 6 ]; }
+t  "phase_webserver migrates the tenant groups after the Apache config test, right before the reload" mtg_in_webserver
+mtg_after_ref() { local body a b
+  body=$(bash -c "source '$INSTALLER'; declare -f main")
+  a=$(printf '%s\n' "$body" | grep -n '^ *phase_fetch_panel;*$' | head -1 | cut -d: -f1)
+  b=$(printf '%s\n' "$body" | grep -n '^ *phase_webserver;*$' | head -1 | cut -d: -f1)
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ] \
+    && bash -c "source '$INSTALLER'; declare -f phase_fetch_panel" | grep -q '_verify_checkout_ref'; }
+t  "the ref is verified in phase_fetch_panel, which main runs before phase_webserver (the migration)" mtg_after_ref
 mtg_fail() { mtg_run laranode_web; gpasswd() { return 1; }; _migrate_tenant_groups; }
 tfm "a tenant group that cannot be migrated stops the install" "could not remove www-data from tenant group" mtg_fail
 tf "Proxmox: refused when laranode_web is a regular (uid >= 1000) account"         ewu_run laranode_web 1001 "www-data"
@@ -1811,8 +1833,23 @@ clone_dirty() { base; d=$(mktemp -d); PANEL_PATH="$d/panel"; LARANODE_REPO="$REF
   git() { command git "$@"; local rc=$?; case " $* " in *" checkout "*) echo planted > "$PANEL_PATH/planted.php" ;; esac; return $rc; }
   _clone_panel; }
 tfm "clone at the ref but with a file planted in the tree: refused (status --porcelain)" "is not clean" clone_dirty
-clone_clean_as_panel_user() { bash -c "source '$INSTALLER'; declare -f _checkout_clean" | grep -qE '_as_panel_user git -C "\$1" status --porcelain'; }
+clone_clean_as_panel_user() { bash -c "source '$INSTALLER'; declare -f _checkout_clean" | grep -qE '_as_panel_user git -c core.fileMode=false -C "\$1" status --porcelain'; }
 t  "the clean-tree check runs git status --porcelain AS the panel user"             clone_clean_as_panel_user
+# PR #12 r1 (product bug): _settle_permissions re-modes every file of the tree (640/750), so with
+# core.fileMode on EVERY tracked file reads as modified and a re-run with LARANODE_REF could never
+# pass. The check compares content (and untracked/staged files), not the mode bits the installer sets.
+cc_repo() { base; d=$(mktemp -d); command git -C "$d" init -q -b main; echo a > "$d/f.sh"; echo b > "$d/g.php"
+  command git -C "$d" add -A; command git -C "$d" -c user.email=t@t -c user.name=t commit -q -m c; }
+cc_mode_ok() { cc_repo; chmod 750 "$d/f.sh"; chmod 640 "$d/g.php"; _checkout_clean "$d"; }
+t  "clean-tree check: a mode-only change (the installer's own 640/750 settle) stays clean" cc_mode_ok
+cc_content_dirty() { cc_repo; echo changed >> "$d/g.php"; _checkout_clean "$d"; }
+tf "clean-tree check: a content edit is still refused"                                  cc_content_dirty
+cc_mode_and_content() { cc_repo; chmod 640 "$d/f.sh"; echo changed >> "$d/g.php"; _checkout_clean "$d"; }
+tf "clean-tree check: mode change + content edit refused"                               cc_mode_and_content
+cc_untracked() { cc_repo; chmod 640 "$d/f.sh"; echo x > "$d/planted.php"; _checkout_clean "$d"; }
+tf "clean-tree check: an untracked file is still refused"                               cc_untracked
+cc_staged() { cc_repo; echo changed >> "$d/g.php"; command git -C "$d" add g.php; _checkout_clean "$d"; }
+tf "clean-tree check: a staged edit is still refused"                                   cc_staged
 ref_none() { base; unset LARANODE_REF; LARANODE_PINNED_REF=""; _resolve_ref; }
 tfm "no LARANODE_REF and no pinned ref: refused (never the silent default branch)"  "No ref to install" ref_none
 ref_pinned() { base; unset LARANODE_REF; LARANODE_PINNED_REF=v1; _resolve_ref; expect REF "$PANEL_REF" v1; }
