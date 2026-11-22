@@ -89,7 +89,7 @@ echo "=== preflight ==="
   have_cmd()    { return 1; }
   pkg_installed() { return 1; }   # hermetic: a runner with apache2/php installed must not leak in
   svc_active()    { return 1; }
-  export LARANODE_UNATTENDED=1
+  export LARANODE_UNATTENDED=1 LARANODE_REF=unit-test-ref
   unset LARANODE_DB_ENGINE LARANODE_HTTP_PORT
   preflight
   [ "$DB_ENGINE"  = "mysql" ] || { echo "FAIL T5: expected DB_ENGINE=mysql, got $DB_ENGINE"; exit 1; }
@@ -106,7 +106,7 @@ echo "=== preflight ==="
   have_cmd()    { return 1; }
   pkg_installed() { return 1; }   # hermetic: a runner with apache2/php installed must not leak in
   svc_active()    { return 1; }
-  export LARANODE_UNATTENDED=1 LARANODE_DB_ENGINE=pgsql
+  export LARANODE_UNATTENDED=1 LARANODE_REF=unit-test-ref LARANODE_DB_ENGINE=pgsql
   unset LARANODE_HTTP_PORT
   preflight
   [ "$DB_ENGINE" = "pgsql" ] || { echo "FAIL T6: expected DB_ENGINE=pgsql, got $DB_ENGINE"; exit 1; }
@@ -122,7 +122,7 @@ echo "=== preflight ==="
   have_cmd()    { return 1; }
   pkg_installed() { return 1; }   # hermetic: a runner with apache2/php installed must not leak in
   svc_active()    { return 1; }
-  export LARANODE_UNATTENDED=1
+  export LARANODE_UNATTENDED=1 LARANODE_REF=unit-test-ref
   unset LARANODE_DB_ENGINE LARANODE_HTTP_PORT
   preflight
   [ "$HTTP_PORT" = "8080" ] || { echo "FAIL T7: expected HTTP_PORT=8080, got $HTTP_PORT"; exit 1; }
@@ -138,7 +138,7 @@ echo "=== preflight ==="
   have_cmd()    { return 1; }
   pkg_installed() { return 1; }   # hermetic: a runner with apache2/php installed must not leak in
   svc_active()    { return 1; }
-  export LARANODE_UNATTENDED=1 LARANODE_HTTP_PORT=9000
+  export LARANODE_UNATTENDED=1 LARANODE_REF=unit-test-ref LARANODE_HTTP_PORT=9000
   unset LARANODE_DB_ENGINE
   preflight
   [ "$HTTP_PORT" = "9000" ] || { echo "FAIL T8: expected HTTP_PORT=9000, got $HTTP_PORT"; exit 1; }

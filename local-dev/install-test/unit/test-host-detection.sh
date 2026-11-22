@@ -19,6 +19,11 @@ flunk() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 t() { local n="$1"; shift; if ( "$@" ) >/tmp/laranode-ut.$$ 2>&1; then pass "$n"; else flunk "$n"; sed 's/^/        /' /tmp/laranode-ut.$$; fi; }
 # tf NAME CMD... — PASS when CMD exits non-zero (a refusal)
 tf() { local n="$1"; shift; if ( "$@" ) >/tmp/laranode-ut.$$ 2>&1; then flunk "$n (expected refusal)"; else pass "$n"; fi; }
+# tfm NAME MSG CMD...: refused AND by the guard under test (its message), not by a later step
+tfm() { local n="$1" m="$2"; shift 2
+  if ( "$@" ) >/tmp/laranode-ut.$$ 2>&1; then flunk "$n (expected refusal)"
+  elif grep -qF -- "$m" /tmp/laranode-ut.$$; then pass "$n"
+  else flunk "$n (refused, but not with '$m')"; sed 's/^/        /' /tmp/laranode-ut.$$; fi; }
 trap 'rm -f /tmp/laranode-ut.$$' EXIT
 
 # Common setup for each subshell: fresh installer, plain Ubuntu host, quiet logs.
@@ -27,7 +32,7 @@ base() {
   source "$INSTALLER"
   export LARANODE_OS_RELEASE_FILE="${FIX}/os-release.ubuntu-24.04"
   export LARANODE_PVE_DIR=/nonexistent-pve LARANODE_CLP_DIR=/nonexistent-clp
-  export LARANODE_UNATTENDED=1
+  export LARANODE_UNATTENDED=1 LARANODE_REF=unit-test-ref   # preflight resolves the clone ref
   unset LARANODE_DB_ENGINE LARANODE_HTTP_PORT LARANODE_BIND LARANODE_PG_PORT
   have_cmd()    { return 1; }
   port_in_use() { return 1; }
@@ -480,7 +485,8 @@ seed_env_keeps_existing() { base; PANEL_PATH=$(mktemp -d); echo 'KEEP=1' > "$PAN
 no_plain_env_cp() { base; ! declare -f _mysql_branch _pgsql_branch phase_app | grep -E 'cp .*\.env\.example'; }
 home_750() {
   base; PANEL_PATH=$(mktemp -d); mkdir "$PANEL_PATH/laranode-scripts"; MLOG=$(mktemp)
-  useradd() { :; }; usermod() { :; }; chmod() { echo "chmod $*" >> "$MLOG"; }; id() { return 0; }
+  useradd() { :; }; usermod() { :; }; chown() { :; }; chmod() { echo "chmod $*" >> "$MLOG"; }; id() { return 0; }
+  unset LARANODE_REF; export LARANODE_HOST_CONF="$PANEL_PATH/host.conf"
   _prepare_panel_tree() { :; }; _install_privileged_scripts() { :; }; _stash_sync_script() { :; }
   phase_fetch_panel >/dev/null 2>&1
   grep -qx 'chmod 750 /home/laranode_ln' "$MLOG"
@@ -1285,7 +1291,7 @@ priv_artisan_via_runuser() { local out
     runuser() { printf 'runuser %s\n' \"\$*\"; }
     _artisan migrate --force")
   case "$out" in
-    'runuser -u laranode_ln -- env HOME=/home/laranode_ln'*' /usr/bin/php8.4 artisan migrate --force') : ;;
+    'runuser -u laranode_ln -- env -C '*' HOME=/home/laranode_ln'*' /usr/bin/php8.4 artisan migrate --force') : ;;
     *) echo "unexpected command: $out"; return 1 ;;
   esac; }
 priv_no_root_php_lines() { local bad
@@ -1446,13 +1452,37 @@ ROOT_PANEL_ALLOW=(
   "find \"\$p/bootstrap/cache\" -maxdepth 1 -type f -name '*.php' -delete"   # -delete unlinks by name, follows nothing
   'cp -P --no-preserve=all "$src" "${LN_SYNC_STASH}/sync.sh"'  # first-install stash into a root-only dir; -P copies a link as a link, then checked regular
   'bash "$sync" "${PANEL_PATH}"'                             # $sync = root-owned copy or the private stash (priv_sync_* tests); PANEL_PATH is only an argument
+  '-e "s#__PANEL_PATH__#${PANEL_PATH}#g"'                    # the cron sed: PANEL_PATH is the replacement TEXT; it reads the root-owned template
+  'echo "    cd ${PANEL_PATH} '                              # printed hint in the summary, not a command
 )
-priv_no_root_touch_of_panel_paths() { local tv cm rd bad a fixed=()
-  tv='\$\{?(PANEL_PATH|p|h|env|sync|f|src)\}?([^[:alnum:]_]|$)'
-  cm='(^|[;&|(`[:space:]])(cp|mv|sed|chown|chgrp|chmod|install|tee|ln|rm|touch|mkdir|truncate|dd|bash|source|find)[[:space:]]'
-  rd='>>?[[:space:]]*"?\$\{?(PANEL_PATH|p|h|env|sync|f|src)\}?([^[:alnum:]_]|$)'
+# PR B (r4 review): a purely line-by-line grep missed a `cp \` continued on the next line, an alias
+# variable (q="$p/.env"; cp x "$q"), a `cd "$p"` then a relative path, a root command after
+# `_as_panel_user x;` on the same line, and tar/rsync/git. So the scan now (1) joins continuation
+# lines, (2) splits every line into its ; && || commands (each judged alone), (3) treats any
+# variable assigned from a panel-derived one as panel-derived (fixpoint), (4) also flags
+# cd/tar/rsync/git/cat/grep and `<` reads. arch_catches (below) injects each bypass and must see red.
+priv_no_root_touch_of_panel_paths() { local tv cm rd bad a fixed=() names prev code
+  names='PANEL_PATH|p|h|env|sync|f|src'
+  # (1) + (2): one judged command per output line, prefixed with the source line number
+  code=$(installer_root_code | awk '
+    { if (c != "") { $0 = c " " $0; c = "" } }
+    /\\$/ { c = substr($0, 1, length($0) - 1); next }
+    { line = $0; gsub(/\\;/, "\001", line); k = split(line, parts, /;|&&|\|\|/)
+      for (i = 1; i <= k; i++) print NR ": " parts[i] }')
+  # (3) aliases: X="$p/..." / X=${PANEL_PATH} / local X="$env" ... until nothing new
+  while :; do
+    prev=$names
+    for a in $(printf '%s\n' "$code" | grep -oE "(^|[^[:alnum:]_])[A-Za-z_][A-Za-z0-9_]*=\"?\\$\\{?(${names})\\}?([^[:alnum:]_]|\$)" \
+                 | sed -E 's/^[^A-Za-z_]//; s/=.*//' | sort -u); do
+      case "|${names}|" in *"|${a}|"*) : ;; *) names="${names}|${a}" ;; esac
+    done
+    [ "$names" = "$prev" ] && break
+  done
+  tv="\\\$\\{?(${names})\\}?([^[:alnum:]_]|\$)"
+  cm='(^|[;&|(`[:space:]])(cp|mv|sed|chown|chgrp|chmod|install|tee|ln|rm|touch|mkdir|truncate|dd|bash|source|find|cd|tar|rsync|git|cat|grep)[[:space:]]'
+  rd="[<>]>?[[:space:]]*\"?\\\$\\{?(${names})\\}?([^[:alnum:]_]|\$)"
   for a in "${ROOT_PANEL_ALLOW[@]}"; do fixed+=(-e "$a"); done
-  bad=$({ installer_root_code | grep -nE "$cm" | grep -E "$tv"; installer_root_code | grep -nE "$rd"; } \
+  bad=$({ printf '%s\n' "$code" | grep -E "$cm" | grep -E "$tv"; printf '%s\n' "$code" | grep -E "$rd"; } \
           | grep -vE '_as_panel_user|runuser' | grep -vF "${fixed[@]}" || true)
   [ -z "$bad" ] || { echo "root-run command on a panel-derived path (symlink-followable):"; echo "$bad"; return 1; }; }
 t 'no root-run cp/sed/chown/chmod/>/>>/bash on ANY PANEL_PATH-derived path ($p $env $sync ...)' priv_no_root_touch_of_panel_paths
@@ -1511,7 +1541,7 @@ priv_sync_fallback_runs_private_copy() { local d r out
   d=$(mktemp -d); r=$(mktemp -d); mkdir -p "$d/laranode-scripts/bin"; printf 'echo ORIGINAL\n' > "$d/laranode-scripts/bin/laranode-sync-scripts.sh"
   out=$(bash -c "
     source '$INSTALLER'
-    PANEL_PATH='$d'; LN_LIB_DEST='$r/lib'
+    PANEL_PATH='$d'; LN_LIB_DEST='$r/lib'; LARANODE_STASH_PARENT='$r'
     chown() { :; }; chmod() { :; }
     _stash_sync_script
     printf 'echo SWAPPED\n' > '$d/laranode-scripts/bin/laranode-sync-scripts.sh'
@@ -1521,15 +1551,17 @@ priv_sync_fallback_runs_private_copy() { local d r out
   case "$out" in *ORIGINAL*) : ;; *) echo "stash copy not run: $out"; return 1 ;; esac; }
 t "first install: root runs a private copy of the sync made before the chown"     priv_sync_fallback_runs_private_copy
 priv_sync_fallback_refuses_symlink() { local d out
-  d=$(mktemp -d); mkdir -p "$d/laranode-scripts/bin"; printf 'echo EVIL\n' > "$d/evil"
+  d=$(mktemp -d); mkdir -p "$d/laranode-scripts/bin" "$d/run"; printf 'echo EVIL\n' > "$d/evil"
   ln -s "$d/evil" "$d/laranode-scripts/bin/laranode-sync-scripts.sh"
   out=$(bash -c "
     source '$INSTALLER'
-    PANEL_PATH='$d'; LN_LIB_DEST='$d/nolib'
+    PANEL_PATH='$d'; LN_LIB_DEST='$d/nolib'; LARANODE_STASH_PARENT='$d/run'
     die() { echo \"DIED: \$*\"; exit 1; }
     _stash_sync_script; echo SURVIVED" 2>&1)
   rm -rf "$d"
-  case "$out" in *DIED*) : ;; *) echo "a symlinked sync script was stashed: $out"; return 1 ;; esac; }
+  # the regular-file check must be what refuses (cp -P copies the link as a link)
+  case "$out" in *"DIED: laranode-sync-scripts.sh in the panel checkout is not a regular file"*) : ;;
+    *) echo "a symlinked sync script was not refused by the regular-file check: $out"; return 1 ;; esac; }
 t "first install: a symlinked sync script in the checkout is refused"             priv_sync_fallback_refuses_symlink
 priv_fetch_stashes_before_chown() { local body a b
   body=$(bash -c "source '$INSTALLER'; declare -f phase_fetch_panel")
@@ -1541,6 +1573,339 @@ priv_settle_mkdir_as_panel_user() { local body
   body=$(bash -c "source '$INSTALLER'; declare -f _settle_permissions" | grep -E '(^|[[:space:]])mkdir ' | grep -vE '_as_panel_user' || true)
   [ -z "$body" ] || { echo "root mkdir in _settle_permissions: $body"; return 1; }; }
 t "_settle_permissions creates logs/ as the panel user"                          priv_settle_mkdir_as_panel_user
+
+# ==== PR B: Proxmox dedicated web user (G2/G7) ======================================================
+# pveproxy/spiceproxy run as www-data on Proxmox: a panel that gives www-data sudo (or group
+# laranode_ln) hands the Proxmox UI root, and a panel PHP running as www-data reads /etc/pve keys.
+# So on Proxmox the panel's Apache + PHP-FPM run as a dedicated user and www-data gets nothing.
+echo "=== PR B: Proxmox web user ==="
+wu_run() {  # wu_run <proxmox 0|1> <apache_owned> <fpm_owned> [ufw opt-in]
+  base; IS_PROXMOX=$1; APACHE_OWNED=$2; PHPFPM_OWNED=$3
+  [ -z "${4:-}" ] || export LARANODE_PVE_UFW="$4"
+  _resolve_web_user; }
+wu_pve_dedicated()   { wu_run 1 1 1; expect WEB_USER "$WEB_USER" laranode_web && expect UFW_ENABLED "$UFW_ENABLED" 0; }
+wu_plain_unchanged() { wu_run 0 1 1; expect WEB_USER "$WEB_USER" www-data && expect UFW_ENABLED "$UFW_ENABLED" 1; }
+wu_plain_preapache() { wu_run 0 0 0; expect WEB_USER "$WEB_USER" www-data; }
+wu_pve_ufw_optin()   { wu_run 1 1 1 1; expect WEB_USER "$WEB_USER" laranode_web && expect UFW_ENABLED "$UFW_ENABLED" 1; }
+t  "Proxmox: panel web user is the dedicated laranode_web, ufw gated off"          wu_pve_dedicated
+t  "plain host: web user stays www-data, ufw sudoers kept (behaviour unchanged)"   wu_plain_unchanged
+t  "plain host with a pre-existing Apache/php-fpm: still www-data"                 wu_plain_preapache
+t  "Proxmox + LARANODE_PVE_UFW=1: ufw sudoers opted back in"                       wu_pve_ufw_optin
+tf "Proxmox + pre-existing Apache: refused (its User cannot be changed)"           wu_run 1 0 1
+tf "Proxmox + pre-existing php8.4-fpm: refused (no dedicated pool on it)"          wu_run 1 1 0
+wu_preflight_order() { local body a b
+  body=$(bash -c "source '$INSTALLER'; declare -f preflight")
+  a=$(printf '%s\n' "$body" | grep -n 'capture_preexisting' | head -1 | cut -d: -f1)
+  b=$(printf '%s\n' "$body" | grep -n '_resolve_web_user' | head -1 | cut -d: -f1)
+  c=$(printf '%s\n' "$body" | grep -n 'confirm "Proceed' | head -1 | cut -d: -f1)
+  [ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ "$a" -lt "$b" ] && [ "$b" -lt "$c" ]; }
+t  "preflight resolves the web user after ownership is known, before the confirm"  wu_preflight_order
+
+# _ensure_web_user: account calls recorded through stubs (never real useradd in a unit test)
+ewu_run() {  # ewu_run <web user> <id -u answer|missing> <groups of www-data> [useradd rc]
+  base; WEB_USER=$1; CALLS=$(mktemp)
+  local idu="$2" grp="$3" urc="${4:-0}"
+  # a successful useradd makes the account exist for the id lookups after it
+  eval "useradd() { echo \"useradd \$*\" >> '$CALLS'; [ $urc = 0 ] && : > '$CALLS.created'; return $urc; }"
+  usermod() { echo "usermod $*" >> "$CALLS"; }
+  gpasswd() { echo "gpasswd $*" >> "$CALLS"; }
+  eval "id() { case \"\$*\" in '-u laranode_web') if [ '$idu' = missing ]; then [ -e '$CALLS.created' ] || return 1; echo 998; else echo '$idu'; fi ;; '-nG www-data') echo '$grp' ;; '-nG laranode_web') echo 'laranode_web laranode_ln' ;; *) command id \"\$@\" ;; esac; }"
+  _ensure_web_user; }
+ewu_pve_ok() { ewu_run laranode_web 998 "www-data laranode_ln"
+  grep -q '^usermod -aG laranode_ln laranode_web$' "$CALLS" || { echo "laranode_web not grouped:"; cat "$CALLS"; return 1; }
+  grep -q 'usermod -aG laranode_ln www-data' "$CALLS" && { echo "www-data grouped with laranode_ln"; return 1; }
+  grep -q '^gpasswd -d www-data laranode_ln$' "$CALLS" || { echo "www-data not removed from laranode_ln:"; cat "$CALLS"; return 1; }; }
+ewu_pve_creates() { ewu_run laranode_web missing "www-data" 0; grep -q '^useradd .*laranode_web' "$CALLS"; }
+ewu_plain() { ewu_run www-data 33 "www-data"; grep -q '^usermod -aG laranode_ln www-data$' "$CALLS"; }
+t  "Proxmox: laranode_web grouped with laranode_ln, www-data removed, never added" ewu_pve_ok
+t  "Proxmox: a missing laranode_web is created"                                    ewu_pve_creates
+t  "plain host: www-data grouped with laranode_ln as before"                       ewu_plain
+tf "Proxmox: refused when laranode_web cannot be created"                          ewu_run laranode_web missing "www-data" 1
+tf "Proxmox: refused when laranode_web is uid 0"                                   ewu_run laranode_web 0 "www-data"
+
+# r1 review (important): upgrade of an earlier (www-data) Proxmox install. laranode-user-manager.sh
+# put www-data in every hosted user's group (homes 0770, pool sockets 0660 user:user); the switch
+# to laranode_web must move each LARANODE tenant group over: + laranode_web, - www-data. A tenant
+# group = <x>_ln (not laranode_ln) whose same-name account is a regular user with home /home/<x>_ln.
+mtg_run() {  # mtg_run <web user>: stubbed getent group/passwd, usermod/gpasswd recorded
+  base; WEB_USER=$1; CALLS=$(mktemp)
+  getent() {
+    case "$1 ${2:-}" in
+      "group ")  printf '%s\n' 'root:x:0:' 'www-data:x:33:' 'laranode_ln:x:999:www-data' \
+                   'alice_ln:x:1001:www-data' 'bob_ln:x:1002:' 'carol_ln:x:1003:www-data,laranode_web' \
+                   'sys_ln:x:998:www-data' 'odd_ln:x:1004:www-data' 'ghost_ln:x:1005:www-data' \
+                   'notatenant:x:1006:www-data' 'Bad_ln:x:1007:www-data' ;;
+      "passwd alice_ln") echo 'alice_ln:x:1001:1001::/home/alice_ln:/usr/sbin/nologin' ;;
+      "passwd bob_ln")   echo 'bob_ln:x:1002:1002::/home/bob_ln:/bin/bash' ;;
+      "passwd carol_ln") echo 'carol_ln:x:1003:1003::/home/carol_ln:/usr/sbin/nologin' ;;
+      "passwd sys_ln")   echo 'sys_ln:x:998:998::/home/sys_ln:/usr/sbin/nologin' ;;
+      "passwd odd_ln")   echo 'odd_ln:x:1004:1004::/srv/odd:/usr/sbin/nologin' ;;
+      "passwd notatenant") echo 'notatenant:x:1006:1006::/home/notatenant:/bin/sh' ;;
+      "passwd Bad_ln")   echo 'Bad_ln:x:1007:1007::/home/Bad_ln:/bin/sh' ;;
+      *) return 2 ;;
+    esac; }
+  usermod() { echo "usermod $*" >> "$CALLS"; }
+  gpasswd() { echo "gpasswd $*" >> "$CALLS"; }
+  _migrate_tenant_groups; }
+mtg_pve() { mtg_run laranode_web
+  local want got
+  want=$(printf '%s\n' 'usermod -aG alice_ln laranode_web' 'gpasswd -d www-data alice_ln' \
+    'usermod -aG bob_ln laranode_web' 'usermod -aG carol_ln laranode_web' 'gpasswd -d www-data carol_ln')
+  got=$(cat "$CALLS")
+  [ "$got" = "$want" ] || { echo "want:"; echo "$want"; echo "got:"; echo "$got"; return 1; }; }
+t  "upgrade to laranode_web: every tenant group gains laranode_web and loses www-data" mtg_pve
+mtg_plain() { mtg_run www-data; [ ! -s "$CALLS" ] || { echo "plain host touched groups:"; cat "$CALLS"; return 1; }; }
+t  "plain host (www-data): no tenant group is touched"                             mtg_plain
+mtg_called() { bash -c "source '$INSTALLER'; declare -f _ensure_web_user" | grep -q '_migrate_tenant_groups'; }
+t  "_ensure_web_user migrates the tenant groups on the dedicated web user"         mtg_called
+mtg_fail() { mtg_run laranode_web; gpasswd() { return 1; }; _migrate_tenant_groups; }
+tfm "a tenant group that cannot be migrated stops the install" "could not remove www-data from tenant group" mtg_fail
+tf "Proxmox: refused when laranode_web is a regular (uid >= 1000) account"         ewu_run laranode_web 1001 "www-data"
+ewu_in_wwwdata() { base; WEB_USER=laranode_web
+  useradd() { :; }; usermod() { :; }; gpasswd() { :; }
+  id() { case "$*" in '-u laranode_web') echo 998 ;; '-nG laranode_web') echo 'laranode_web www-data' ;; *) echo www-data ;; esac; }
+  _ensure_web_user; }
+tf "Proxmox: refused when laranode_web is in group www-data (/etc/pve keys)"       ewu_in_wwwdata
+
+# host.conf: the root-owned record the sync script and validate.sh read
+hc_run() { base; d=$(mktemp -d); export LARANODE_HOST_CONF="$d/host.conf"; WEB_USER=$1; UFW_ENABLED=$2; _write_host_conf; }
+hc_pve() { hc_run laranode_web 0; grep -qx 'web_user=laranode_web' "$LARANODE_HOST_CONF" && grep -qx 'ufw=0' "$LARANODE_HOST_CONF" \
+  && [ "$(stat -c %a "$LARANODE_HOST_CONF")" = 644 ]; }
+hc_plain() { hc_run www-data 1; grep -qx 'web_user=www-data' "$LARANODE_HOST_CONF" && grep -qx 'ufw=1' "$LARANODE_HOST_CONF"; }
+t  "host.conf records web_user=laranode_web ufw=0 on Proxmox (0644)"              hc_pve
+t  "host.conf records web_user=www-data ufw=1 on a plain host"                    hc_plain
+hc_fetch_order() { local body a b c
+  body=$(bash -c "source '$INSTALLER'; declare -f phase_fetch_panel")
+  a=$(printf '%s\n' "$body" | grep -n '_ensure_web_user' | head -1 | cut -d: -f1)
+  b=$(printf '%s\n' "$body" | grep -n '_write_host_conf' | head -1 | cut -d: -f1)
+  c=$(printf '%s\n' "$body" | grep -n '_install_privileged_scripts' | head -1 | cut -d: -f1)
+  [ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ "$b" -lt "$c" ] && [ "$a" -lt "$c" ]; }
+t  "phase_fetch_panel sets the web user + host.conf before the sync renders sudoers" hc_fetch_order
+hc_no_literal_usermod() { ! bash -c "source '$INSTALLER'; declare -f phase_fetch_panel" | grep -q 'usermod -aG laranode_ln www-data'; }
+t  "phase_fetch_panel no longer hard-codes 'usermod -aG laranode_ln www-data'"    hc_no_literal_usermod
+
+# Apache + PHP-FPM run as the web user
+vh_render() { base; d=$(mktemp -d); WEB_USER=$1; APACHE_OWNED=$2
+  printf '<VirtualHost *:__PORT__>\n    DocumentRoot __DOCROOT__\n</VirtualHost>\n' > "$d/t"
+  _vhost_render "$d/t" "$d/out" 80 /x/public; cat "$d/out"; }
+vh_pve_socket()   { vh_render laranode_web 1 | grep -q 'SetHandler "proxy:unix:/run/php/laranode-panel.sock|fcgi://localhost"'; }
+vh_plain_nohdl()  { ! vh_render www-data 1 | grep -q SetHandler; }
+vh_preapache()    { vh_render www-data 0 | grep -q 'proxy:unix:/run/php/php8.4-fpm.sock'; }
+t  "Proxmox: panel vhost hands PHP to the dedicated laranode-panel.sock"         vh_pve_socket
+t  "plain host, our Apache: no handler in the vhost (global conf, unchanged)"     vh_plain_nohdl
+t  "pre-existing Apache: vhost handler still the stock php8.4-fpm socket"         vh_preapache
+pool_pve() { base; d=$(mktemp -d); export LARANODE_PHP_POOL_DIR="$d"; WEB_USER=laranode_web; _write_panel_pool; f="$d/laranode-panel.conf"
+  grep -qx 'user = laranode_web' "$f" && grep -qx 'group = laranode_web' "$f" && grep -qx 'listen = /run/php/laranode-panel.sock' "$f" \
+  && grep -qx 'listen.owner = laranode_web' "$f" && grep -qx 'listen.group = laranode_web' "$f" && grep -qx 'listen.mode = 0660' "$f" \
+  && ! grep -q 'www-data' "$f"; }
+pool_plain() { base; d=$(mktemp -d); export LARANODE_PHP_POOL_DIR="$d"; WEB_USER=www-data; _write_panel_pool; [ ! -e "$d/laranode-panel.conf" ]; }
+t  "Proxmox: dedicated php-fpm pool runs as laranode_web, socket 0660 to it only" pool_pve
+t  "plain host: no extra pool (stock www pool, unchanged)"                       pool_plain
+ah_run() { base; d=$(mktemp -d); export LARANODE_APACHE_DIR="$d"; mkdir -p "$d/conf-available"; WEB_USER=$1; APACHE_OWNED=1; CALLS=$(mktemp)
+  a2enconf() { echo "a2enconf $*" >> "$CALLS"; }; _php_apache_handler; }
+ah_pve()   { ah_run laranode_web; ! grep -q 'a2enconf php8.4-fpm' "$CALLS"; }
+ah_plain() { ah_run www-data; touch "$LARANODE_APACHE_DIR/conf-available/php8.4-fpm.conf"; _php_apache_handler; grep -q 'a2enconf php8.4-fpm' "$CALLS"; }
+t  "Proxmox: no global a2enconf php8.4-fpm (www-data pool never routed to)"        ah_pve
+t  "plain host: global a2enconf php8.4-fpm as before"                             ah_plain
+au_run() { base; d=$(mktemp -d); export LARANODE_APACHE_DIR="$d"; mkdir -p "$d/conf-available"; WEB_USER=$1; CALLS=$(mktemp)
+  a2enconf() { echo "a2enconf $*" >> "$CALLS"; }; _apache_web_user; }
+au_pve()   { au_run laranode_web; f="$LARANODE_APACHE_DIR/conf-available/laranode-web-user.conf"
+  grep -qx 'User laranode_web' "$f" && grep -qx 'Group laranode_web' "$f" && grep -qx 'a2enconf laranode-web-user' "$CALLS"; }
+au_plain() { au_run www-data; [ ! -e "$LARANODE_APACHE_DIR/conf-available/laranode-web-user.conf" ] && [ ! -s "$CALLS" ]; }
+t  "Proxmox: Apache workers switched to laranode_web (conf snippet, no envvars edit)" au_pve
+t  "plain host: Apache user untouched"                                            au_plain
+au_order() { local body a b
+  body=$(bash -c "source '$INSTALLER'; declare -f phase_webserver")
+  a=$(printf '%s\n' "$body" | grep -n '_apache_web_user' | head -1 | cut -d: -f1)
+  b=$(printf '%s\n' "$body" | grep -n 'apachectl configtest' | head -1 | cut -d: -f1)
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]; }
+t  "phase_webserver sets the Apache user before the configtest"                    au_order
+pp_order() { local body
+  body=$(bash -c "source '$INSTALLER'; declare -f phase_php_node")
+  printf '%s\n' "$body" | grep -q '_write_panel_pool' && printf '%s\n' "$body" | grep -q '_php_apache_handler' \
+    && [ "$(printf '%s\n' "$body" | grep -n '_write_panel_pool' | cut -d: -f1)" -lt "$(printf '%s\n' "$body" | grep -n '_php_fpm_up' | cut -d: -f1)" ]; }
+t  "phase_php_node writes the panel pool before php-fpm is brought up"            pp_order
+
+# sudoers: ufw drop-in only with UFW_ENABLED=1; the check names the web user
+su_run() { base; d=$(mktemp -d); export LARANODE_SUDOERS_DIR="$d"; UFW_ENABLED=$1
+  for x in laranode-panel laranode-cron laranode-runtimes; do : > "$d/$x"; done
+  [ "$1" = 1 ] && : > "$d/laranode-ufw"; [ "$1" = 0 ] && : > "$d/laranode-ufw"   # a previous run's drop-in
+  [ "${2:-}" = noufw ] && rm -f "$d/laranode-ufw"
+  visudo() { return 0; }; _install_sudoers; }
+su_pve()   { su_run 0; [ ! -e "$LARANODE_SUDOERS_DIR/laranode-ufw" ]; }
+su_plain() { su_run 1; [ -e "$LARANODE_SUDOERS_DIR/laranode-ufw" ]; }
+t  "ufw gated off: a previous laranode-ufw drop-in is removed"                     su_pve
+t  "ufw on (plain host): laranode-ufw drop-in kept"                                su_plain
+tf "ufw on but laranode-ufw missing: refused as before"                            su_run 1 noufw
+# PR #11 r2: an upgrade from a www-data install must not leave pveproxy's user a root grant
+su_www() { base; d=$(mktemp -d); export LARANODE_SUDOERS_DIR="$d"; UFW_ENABLED=0; WEB_USER=$1
+  for x in laranode-panel laranode-cron laranode-runtimes; do echo "$1 ALL=(root) NOPASSWD: /usr/local/lib/laranode/bin/x.sh" > "$d/$x"; done
+  echo 'www-data ALL=(root) NOPASSWD: /usr/local/lib/laranode/bin/laranode-sleep.sh' > "$d/laranode-sleep"
+  visudo() { return 0; }; _install_sudoers; }
+tfm "dedicated web user: a drop-in still granting www-data stops the install"  "still granted www-data" su_www laranode_web
+su_www_gone() { local d; d=$(mktemp -d); ( base; export LARANODE_SUDOERS_DIR="$d"; UFW_ENABLED=0; WEB_USER=laranode_web
+    for x in laranode-panel laranode-cron laranode-runtimes; do : > "$d/$x"; done
+    echo 'www-data ALL=(root) NOPASSWD: /bin/true' > "$d/laranode-sleep"
+    visudo() { return 0; }; _install_sudoers ) >/dev/null 2>&1
+  [ ! -e "$d/laranode-sleep" ] && [ -e "$d/laranode-panel" ]; }
+t  "dedicated web user: the www-data drop-in is removed before the install stops" su_www_gone
+t  "plain host (www-data): www-data grants are the expected ones, kept"         su_www www-data
+# an upgrade runs the previously installed sync; when that run replaced it, the new root-owned
+# copy runs once more (it renders the grants for host.conf's web user)
+priv_sync_rerun_when_updated() { local r out
+  r=$(mktemp -d); mkdir -p "$r/lib/bin"; echo old > "$r/lib/bin/laranode-sync-scripts.sh"
+  out=$(bash -c "
+    source '$INSTALLER'
+    PANEL_PATH='/nonexistent-panel'; LN_LIB_DEST='$r/lib'
+    mkdir() { :; }; chown() { :; }; chmod() { :; }; log() { :; }
+    bash() { printf 'bash %s\n' \"\$*\"; echo new > '$r/lib/bin/laranode-sync-scripts.sh'; }
+    _install_privileged_scripts")
+  rm -rf "$r"
+  [ "$(printf '%s\n' "$out" | grep -c "^bash $r/lib/bin/laranode-sync-scripts.sh /nonexistent-panel$")" = 2 ] \
+    || { echo "updated sync not run a second time: $out"; return 1; }; }
+t  "upgrade: a sync run that replaced the installed sync runs the new copy once more" priv_sync_rerun_when_updated
+fw_env() { base; CALLS=$(mktemp); env_set() { echo "$1=$2" >> "$CALLS"; }; UFW_ENABLED=$1; _panel_feature_env; cat "$CALLS"; }
+fw_env_pve()   { fw_env 0 | grep -qx 'LARANODE_FIREWALL_ENABLED=false'; }
+fw_env_plain() { fw_env 1 | grep -qx 'LARANODE_FIREWALL_ENABLED=true'; }
+t  "ufw gated off: panel .env LARANODE_FIREWALL_ENABLED=false (Firewall page off)" fw_env_pve
+t  "ufw on: LARANODE_FIREWALL_ENABLED=true"                                        fw_env_plain
+fw_env_called() { bash -c "source '$INSTALLER'; declare -f phase_app" | grep -q '_panel_feature_env'; }
+t  "phase_app writes the panel feature env"                                       fw_env_called
+seam_hostconf() { grep -qE 'unset .*LARANODE_HOST_CONF' <(installer_code | sed -n '1,30p' | tr '\n' ' '); }
+t  "LARANODE_HOST_CONF / pool / sudoers / stash seams dropped from the inherited env" bash -c "
+  sed -n '1,30p' '$INSTALLER' | tr '\n' ' ' | grep -qE 'LARANODE_HOST_CONF' &&
+  sed -n '1,30p' '$INSTALLER' | tr '\n' ' ' | grep -qE 'LARANODE_PHP_POOL_DIR' &&
+  sed -n '1,30p' '$INSTALLER' | tr '\n' ' ' | grep -qE 'LARANODE_SUDOERS_DIR' &&
+  sed -n '1,30p' '$INSTALLER' | tr '\n' ' ' | grep -qE 'LARANODE_STASH_PARENT'"
+
+# ==== PR B: G1 clone pinned to a ref ================================================================
+echo "=== PR B: clone ref pin ==="
+# a local origin: main = A -> B, tag v1 = A, branch feat = B -> C
+ref_repo() { local r; r=$(mktemp -d); git -C "$r" init -q -b main
+  git -C "$r" -c user.email=t@t -c user.name=t commit -q --allow-empty -m A; git -C "$r" tag v1
+  git -C "$r" tag fedcba9876543210fedcba9876543210fedcba98   # a 40-hex TAG name on A, not that commit
+  git -C "$r" -c user.email=t@t -c user.name=t commit -q --allow-empty -m B
+  git -C "$r" checkout -q -b feat; git -C "$r" -c user.email=t@t -c user.name=t commit -q --allow-empty -m C
+  git -C "$r" checkout -q main; echo "$r"; }
+REF_REPO=$(ref_repo)
+REF_A=$(git -C "$REF_REPO" rev-parse v1); REF_C=$(git -C "$REF_REPO" rev-parse feat)
+clone_to() { base; d=$(mktemp -d); PANEL_PATH="$d/panel"; LARANODE_REPO="$REF_REPO"; export LARANODE_REF="$1"; _resolve_ref; _clone_panel; git -C "$PANEL_PATH" rev-parse HEAD; }
+clone_tag()    { [ "$(clone_to v1 | tail -1)" = "$REF_A" ]; }
+clone_sha()    { [ "$(clone_to "$REF_C" | tail -1)" = "$REF_C" ]; }
+t  "LARANODE_REF=<tag> clones the tag"                                              clone_tag
+t  "LARANODE_REF=<full 40-hex commit id> clones exactly that commit"                clone_sha
+# r1 review: only a tag or a full commit id pins; a branch, HEAD or a short id is a moving or
+# ambiguous name, refused (agent pick, PR #11 r1 nit 4)
+tfm "LARANODE_REF=<branch> refused (a branch moves)"            "is not a tag"            clone_to feat
+tfm "LARANODE_REF=main (the default branch) refused"            "is not a tag"            clone_to main
+tfm "LARANODE_REF=HEAD refused (the remote's moving default)"   "is a moving reference"   clone_to HEAD
+tfm "LARANODE_REF=FETCH_HEAD refused"                           "is a moving reference"   clone_to FETCH_HEAD
+tfm "LARANODE_REF=origin/main refused"                          "is a moving reference"   clone_to origin/main
+tfm "LARANODE_REF=refs/heads/main refused"                      "is a moving reference"   clone_to refs/heads/main
+tfm "LARANODE_REF=<short sha> refused (ambiguous)"              "short commit id"         clone_to "${REF_A:0:10}"
+tfm "LARANODE_REF=<40-hex naming no commit> refused"            "is not a tag"            clone_to 0123456789abcdef0123456789abcdef01234567
+tfm "LARANODE_REF=<40-hex that is only a tag name> refused"   "is not a tag"            clone_to fedcba9876543210fedcba9876543210fedcba98
+tfm "LARANODE_REF naming nothing in the repo: refused"          "is not a tag"            clone_to no-such-ref
+# the clone must also be CLEAN: git status --porcelain empty (as laranode_ln)
+clone_dirty() { base; d=$(mktemp -d); PANEL_PATH="$d/panel"; LARANODE_REPO="$REF_REPO"; export LARANODE_REF=v1; _resolve_ref
+  git() { command git "$@"; local rc=$?; case " $* " in *" checkout "*) echo planted > "$PANEL_PATH/planted.php" ;; esac; return $rc; }
+  _clone_panel; }
+tfm "clone at the ref but with a file planted in the tree: refused (status --porcelain)" "is not clean" clone_dirty
+clone_clean_as_panel_user() { bash -c "source '$INSTALLER'; declare -f _checkout_clean" | grep -qE '_as_panel_user git -C "\$1" status --porcelain'; }
+t  "the clean-tree check runs git status --porcelain AS the panel user"             clone_clean_as_panel_user
+ref_none() { base; unset LARANODE_REF; LARANODE_PINNED_REF=""; _resolve_ref; }
+tfm "no LARANODE_REF and no pinned ref: refused (never the silent default branch)"  "No ref to install" ref_none
+ref_pinned() { base; unset LARANODE_REF; LARANODE_PINNED_REF=v1; _resolve_ref; expect REF "$PANEL_REF" v1; }
+t  "no LARANODE_REF: the installer's pinned ref is used"                            ref_pinned
+tfm "LARANODE_REF starting with '-' refused (option injection)"  "is not a plain tag" clone_to --upload-pack=x
+tfm "LARANODE_REF with '..' refused"                             "is not a plain tag" clone_to 'a..b'
+tfm "LARANODE_REF with a shell metacharacter refused"            "is not a plain tag" clone_to 'v1;id'
+tfm "LARANODE_REF with a space refused"                          "is not a plain tag" clone_to 'v1 x'
+clone_mismatch() { base; d=$(mktemp -d); PANEL_PATH="$d/panel"; LARANODE_REPO="$REF_REPO"; export LARANODE_REF=v1; _resolve_ref
+  git() { if [ "${3:-}" = checkout ] || [ "${5:-}" = checkout ]; then return 0; fi; command git "$@"; }   # checkout silently does nothing
+  _clone_panel; }
+tf "HEAD after the checkout differs from the ref: refused (rev-parse verify)"        clone_mismatch
+clone_symlink() { base; d=$(mktemp -d); mkdir "$d/elsewhere"; ln -s "$d/elsewhere" "$d/panel"; PANEL_PATH="$d/panel"
+  LARANODE_REPO="$REF_REPO"; export LARANODE_REF=v1; _resolve_ref; _clone_panel; }
+tf "PANEL_PATH is a symlink: refused before the root git clone (r4 nit 4)"           clone_symlink
+verify_rerun() { base; d=$(mktemp -d); PANEL_PATH="$d/panel"; git clone -q "$REF_REPO" "$PANEL_PATH"; git -C "$PANEL_PATH" checkout -q --detach "$REF_C"
+  export LARANODE_REF="$1"; _verify_checkout_ref; }
+t  "re-run: an existing checkout at LARANODE_REF (full commit id) is accepted"       verify_rerun "$REF_C"
+tf "re-run: an existing checkout NOT at LARANODE_REF is refused"                     verify_rerun v1
+tfm "re-run: LARANODE_REF=<branch> refused even when HEAD is its tip"   "is not a tag" verify_rerun feat
+verify_rerun_dirty() { base; d=$(mktemp -d); PANEL_PATH="$d/panel"; git clone -q "$REF_REPO" "$PANEL_PATH"; git -C "$PANEL_PATH" checkout -q --detach "$REF_C"
+  echo planted > "$PANEL_PATH/planted.php"; export LARANODE_REF="$REF_C"; _verify_checkout_ref; }
+tfm "re-run: checkout at the ref but with local changes refused"        "is not clean" verify_rerun_dirty
+verify_rerun_unset() { base; d=$(mktemp -d); PANEL_PATH="$d/panel"; mkdir -p "$PANEL_PATH"; unset LARANODE_REF; _verify_checkout_ref; }
+t  "re-run without LARANODE_REF: the existing checkout is kept as it is"             verify_rerun_unset
+verify_as_panel_user() { bash -c "source '$INSTALLER'; declare -f _verify_checkout_ref" | grep -E '(^|[^_[:alnum:]])git ' | grep -vq '_as_panel_user' && return 1; return 0; }
+t  "re-run verify runs git AS the panel user (never root git in its checkout)"      verify_as_panel_user
+fetch_uses_clone() { bash -c "source '$INSTALLER'; declare -f phase_fetch_panel" | grep -q '_clone_panel' \
+  && ! bash -c "source '$INSTALLER'; declare -f phase_fetch_panel" | grep -qE 'git clone "\$\{LARANODE_REPO\}"'; }
+t  "phase_fetch_panel clones through _clone_panel (ref + verify)"                    fetch_uses_clone
+pre_resolves_ref() { bash -c "source '$INSTALLER'; declare -f preflight" | grep -q '_resolve_ref'; }
+t  "preflight resolves the ref before the confirm (refuses before any change)"       pre_resolves_ref
+
+# ==== PR B: G3 production env ==========================================================================
+echo "=== PR B: APP_ENV / APP_DEBUG ==="
+g3_body() { bash -c "source '$INSTALLER'; declare -f phase_app"; }
+g3_env() { g3_body | grep -qE 'env_set APP_ENV "?production"?' && g3_body | grep -qE 'env_set APP_DEBUG "?false"?'; }
+g3_after_install() { local a b
+  a=$(g3_body | grep -n 'reverb:install' | head -1 | cut -d: -f1); b=$(g3_body | grep -n 'env_set APP_ENV' | head -1 | cut -d: -f1)
+  [ -n "$a" ] && [ -n "$b" ] && [ "$b" -gt "$a" ]; }
+t  "phase_app writes APP_ENV=production and APP_DEBUG=false"                         g3_env
+t  "... after the one-time artisan installs (their behaviour unchanged)"            g3_after_install
+
+# ==== PR B: PR A review r4 nits ========================================================================
+echo "=== PR B: r4 nits ==="
+envset_val() { base; d=$(mktemp -d); : > "$d/.env"; env_set K "$1" "$d/.env"; }
+t  "env_set accepts a plain value"                                                   envset_val 'http://1.2.3.4:8080'
+tf "env_set refuses a value with a newline (no second KEY= line, no truncation)"    envset_val $'a\nAPP_DEBUG=true'
+tf "env_set refuses a value with a double quote"                                    envset_val 'a"b'
+tf "env_set refuses a value with a carriage return"                                 envset_val $'a\rb'
+stash_parent() { local d p s out
+  d=$(mktemp -d); p=$(mktemp -d); mkdir -p "$d/laranode-scripts/bin"; printf 'echo X\n' > "$d/laranode-scripts/bin/laranode-sync-scripts.sh"
+  out=$(bash -c "
+    source '$INSTALLER'
+    PANEL_PATH='$d'; LN_LIB_DEST='$d/nolib'; LARANODE_STASH_PARENT='$p'; TMPDIR=/nonexistent-tmp
+    _stash_sync_script; ls -d \"\$LN_SYNC_STASH\"; die 'boom'" 2>&1)
+  s=$(ls -A "$p"); rm -rf "$d" "$p"
+  case "$out" in "$p"/*) : ;; *) echo "stash not under the root-only parent: $out"; return 1 ;; esac
+  [ -z "$s" ] || { echo "stash leaked after a die: $s"; return 1; }; }
+t  "sync stash lives under a root-only parent (not \$TMPDIR) and is removed on die"  stash_parent
+# root never reads the panel .env itself (a symlinked .env -> root file would leak lines)
+envread_as_panel() { local bad
+  bad=$(installer_root_code | grep -nE '(grep|cat|cut|head|sed -n)[^|]*(\.env"|\.env$|\.env |/\.env)' | grep -vE '_as_panel_user|\.env\.example' || true)
+  [ -z "$bad" ] || { echo "root reads the panel .env:"; echo "$bad"; return 1; }; }
+t  "root never greps/reads the panel .env (reads go through _env_get as laranode_ln)" envread_as_panel
+envget_missing_user() { base; d=$(mktemp -d); PANEL_PATH="$d"; _as_panel_user() { return 1; }; [ -z "$(_env_get APP_URL)" ]; }
+t  "_env_get on a first install (no .env, no panel user yet) yields nothing, no error" envget_missing_user
+envget_value() { base; d=$(mktemp -d); PANEL_PATH="$d"; printf 'APP_URL="http://x"\nAPP_URLX=no\n' > "$d/.env"; expect v "$(_env_get APP_URL)" 'http://x'; }
+t  "_env_get returns the unquoted value of exactly that key"                         envget_value
+
+# the arch test itself must catch the bypasses the r4 reviewer reproduced (each would slip a root
+# write past a purely line-by-line grep). Inject each into a copy of the installer, run the arch test.
+ARCH_BYPASSES=(
+  'multi-line cp|  cp /x \\\n    "$p/.env"'
+  'alias variable|  q="$p/.env"; cp /x "$q"'
+  'cd + relative path|  cd "$p" \&\& chmod 777 .env'
+  'same line after _as_panel_user|  _as_panel_user true; cp /x "$p/.env"'
+  'tar into the tree|  tar -C "$p" -xf /x'
+  'rsync into the tree|  rsync -a /x/ "$p/"'
+  'root git in the tree|  git -C "$p" pull'
+)
+arch_catches() { local m name ins w rc out
+  w=$(mktemp -d)
+  for m in "${ARCH_BYPASSES[@]}"; do
+    name="${m%%|*}"; ins="${m#*|}"
+    cp "$INSTALLER" "$w/i.sh"
+    sed -i "/^_settle_permissions() {$/,/^}/ s#^  local h=/home/laranode_ln p=\"\${PANEL_PATH}\"\$#&\n${ins}#" "$w/i.sh"
+    cmp -s "$INSTALLER" "$w/i.sh" && { echo "injection failed: $name"; rm -rf "$w"; return 1; }
+    out=$(INSTALLER="$w/i.sh" bash -c "$(declare -f installer_code installer_root_code priv_no_root_touch_of_panel_paths); PANEL_USER_BODIES='$PANEL_USER_BODIES'; $(declare -p ROOT_PANEL_ALLOW); priv_no_root_touch_of_panel_paths" 2>&1); rc=$?
+    [ "$rc" -ne 0 ] || { echo "arch test MISSED: $name"; rm -rf "$w"; return 1; }
+  done
+  rm -rf "$w"; }
+t  "arch test catches multi-line, alias, cd+relative, same-line, tar/rsync/git bypasses" arch_catches
 echo ""
 echo "Results: passed=$PASS  failed=$FAIL"
 [ "$FAIL" -eq 0 ] && echo "ALL PASS" && exit 0

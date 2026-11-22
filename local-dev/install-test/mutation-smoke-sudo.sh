@@ -6,11 +6,19 @@
 #   bash local-dev/install-test/mutation-smoke-sudo.sh            # all mutations, 4 in parallel
 #   JOBS=2 bash local-dev/install-test/mutation-smoke-sudo.sh     # fewer parallel containers
 #   bash local-dev/install-test/mutation-smoke-sudo.sh "ln_secret"  # only names containing the text
+#   SHARD=2/3 bash local-dev/install-test/mutation-smoke-sudo.sh  # one third (CI runs 3 shards)
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 JOBS="${JOBS:-4}"
 FILTER="${1:-}"
+SHARD="${SHARD:-}"   # k/n, e.g. SHARD=2/3 (CI matrix); empty = all
+SHARD_K=1; SHARD_N=1
+if [ -n "$SHARD" ]; then
+    [[ $SHARD =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] && [ "${BASH_REMATCH[1]}" -le "${BASH_REMATCH[2]}" ] \
+        || { echo "SHARD must be k/n with 1 <= k <= n, got '$SHARD'" >&2; exit 2; }
+    SHARD_K=${BASH_REMATCH[1]}; SHARD_N=${BASH_REMATCH[2]}
+fi
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 case "$(uname -s)" in MINGW*|MSYS*) win() { (cd "$1" && pwd -W); }; export MSYS_NO_PATHCONV=1 ;; *) win() { echo "$1"; } ;; esac
@@ -81,6 +89,7 @@ mut bin/laranode-sync-scripts.sh 'sync: every read/list runs as root (parent-dir
 mut bin/laranode-sync-scripts.sh 'sync: file bytes read as root'     'run_as_panel cat -- "$1" |' 'cat -- "$1" |'
 mut bin/laranode-sync-scripts.sh 'sync: file size cap dropped'     '| head -c 2097152 > "$2"' '> "$2"'
 mut bin/laranode-sync-scripts.sh 'sync: hostile lib/template names accepted'     'safe_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }' 'safe_name() { true; }'
+mut bin/laranode-sync-scripts.sh 'sync: env moves the trusted paths outside test mode (PR #11 r1)'     'if [ "${LARANODE_INSTALLER_TEST:-0}" = 1 ]; then' 'if true; then'
 mut etc/sudoers.d/laranode-panel 'sudoers: rm glob grant back' '' 'www-data ALL=(ALL) NOPASSWD: /usr/bin/rm /etc/apache2/sites-available/*.conf'
 mut etc/sudoers.d/laranode-panel 'sudoers: script from the writable panel tree' '' 'www-data ALL=(ALL) NOPASSWD: /home/laranode_ln/panel/laranode-scripts/bin/laranode-cron.sh'
 mut etc/sudoers.d/laranode-panel 'sudoers: any-args a2dissite back' '' 'www-data ALL=(ALL) NOPASSWD: /usr/sbin/a2dissite'
@@ -110,7 +119,7 @@ mut bin/laranode-sleep.sh 'sleep: caller PATH trusted' \
 # --- r2: sync-scripts sudoers allowlist (each bypass of review r1 + the new parse rules) ---
 S=bin/laranode-sync-scripts.sh
 mut $S 'sync: any line not matching a grant shape passes (NOPASSWD: ALL)' \
-    $'    done\n    return 1\n}\nsudoers_file_ok()' $'    done\n    return 0\n}\nsudoers_file_ok()'
+    $'    done\n    return 1\n}\n# render_for_web_user' $'    done\n    return 0\n}\n# render_for_web_user'
 mut $S 'sync: comma list after the script allowed' \
     '[[ $rest =~ ^laranode-[a-z0-9-]+\.sh(\ \"\")?$ ]] && return 0' '[[ $rest =~ ^laranode- ]] && return 0'
 mut $S 'sync: Defaults line may carry anything after the script' \
@@ -140,6 +149,35 @@ mut bin/laranode-installer.sh 'installer: _seed_env copies .env.example as root 
 mut bin/laranode-installer.sh 'installer: env_set edits .env as root (follows a planted link)' \
     '  printf '"'"'%s\n'"'"' "$v" | _as_panel_user bash -c "$(declare -f _env_set_inner)' \
     '  printf '"'"'%s\n'"'"' "$v" | bash -c "$(declare -f _env_set_inner)'
+
+# --- PR B: host.conf web user (Proxmox: laranode_web, never www-data) + ufw gate (assert-sync.sh) --
+# Not listed: the post-render "www-data still named" grep (the render's two fixed substitutions
+# are each caught; the grep only refuses a drop-in the allowlist already refused), user-manager's
+# usermod/gpasswd of $LN_WEB_USER (www-data on the fast harness host: an equivalent mutant there;
+# the pve-webuser container scenario covers it)
+mut $S 'sync: grants never rendered for the host.conf web user' \
+    '    render_for_web_user "$STAGE/etc/sudoers.d/$d"' '    :'
+mut $S 'sync: Proxmox host may grant www-data (pveproxy) sudo' \
+    'if [ -d "$PVE_DIR" ] || command -v pveversion >/dev/null 2>&1; then' 'if false; then'
+mut $S 'sync: untrusted host.conf (symlink, not root, writable) accepted' \
+    '|| die "$HOST_CONF must be a regular root-owned file' '|| true "$HOST_CONF must be a regular root-owned file'
+mut $S 'sync: unknown host.conf line ignored' \
+    '            *) die "unexpected line in $HOST_CONF: $line" ;;' '            *) : ;;'
+mut $S 'sync: missing web user accepted' \
+    '|| die "panel web user $WEB_USER does not exist"' '|| true'
+mut $S 'sync: ufw=0 still installs laranode-ufw' \
+    '    if [ "$UFW" = 0 ] && [ "$d" = laranode-ufw ]; then continue; fi' '    :'
+mut $S 'sync: ufw=0 leaves an installed laranode-ufw in place' \
+    'if [ "$UFW" = 0 ]; then rm -f -- "$SUDOERS_DIR/laranode-ufw"; fi' ':'
+mut $S 'sync: runas column (www-data) not rendered' \
+    $'           -e "s/^www-data ALL=(www-data) NOPASSWD: /$WEB_USER ALL=($WEB_USER) NOPASSWD: /" -- "$f"' \
+    $'           -e "s/^www-data ALL=(www-data) NOPASSWD: /$WEB_USER ALL=(www-data) NOPASSWD: /" -- "$f"'
+mut $L 'validate.sh: Proxmox host with LN_WEB_USER=www-data accepted' \
+    '    if [ -d /etc/pve ] && [ "$LN_WEB_USER" = www-data ]; then' '    if false; then'
+mut $L 'validate.sh: untrusted host.conf accepted' \
+    '|| ln_die "$f must be a regular root-owned file' '|| true "$f must be a regular root-owned file'
+mut $L 'validate.sh: unknown host.conf value ignored' \
+    '                *) ln_die "unexpected line in $f" ;;' '                *) : ;;'
 
 IMG=laranode-sudo-fast
 docker build -q -t "$IMG" - >/dev/null <<'DF'
@@ -181,8 +219,13 @@ idxs=()
 for i in "${!MUT_NAME[@]}"; do
     n=${MUT_NAME[$i]}
     [ -z "$FILTER" ] || [[ $n == *"$FILTER"* ]] || continue
+    # SHARD=k/n: only every n-th mutation starting at k (1-based), so CI can split the run
+    # over parallel jobs; the shards together cover every mutation exactly once
+    if [ -n "$SHARD" ] && [ $(( i % SHARD_N )) -ne $(( SHARD_K - 1 )) ]; then continue; fi
     idxs+=("$i")
 done
+[ "${#idxs[@]}" -gt 0 ] || { echo "no mutation selected (FILTER='$FILTER' SHARD='$SHARD')" >&2; exit 2; }
+echo "== mutations selected: ${#idxs[@]} of ${#MUT_NAME[@]}${SHARD:+ (shard $SHARD)} =="
 running=0
 for i in "${idxs[@]}"; do
     run_one "$i" &

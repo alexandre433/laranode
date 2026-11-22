@@ -44,8 +44,8 @@ create_user() {
 
   chmod 770 "/home/$USERNAME"
 
-  # add this user group to www-data group too
-  usermod -aG "$USERNAME" www-data
+  # the panel web user (www-data, or laranode_web on Proxmox: lib/validate.sh) joins this user's group
+  usermod -aG "$USERNAME" "$LN_WEB_USER"
 
   # create /home/{user}/logs directory
   mkdir -p "/home/$USERNAME/logs"
@@ -62,8 +62,8 @@ create_user() {
 delete_user() {
   ln_sysuser "$1" USERNAME   # existing, uid >= 1000, home /home/<user>, never the panel user
 
-  # remove this user from www-data's groups
-  gpasswd -d www-data "$USERNAME" >/dev/null 2>&1 || true   # gpasswd ships with passwd; deluser needs the adduser package
+  # remove the panel web user from this user's group
+  gpasswd -d "$LN_WEB_USER" "$USERNAME" >/dev/null 2>&1 || true   # gpasswd ships with passwd; deluser needs the adduser package
 
   # Delete the user and their home directory
   userdel -r -- "$USERNAME"

@@ -25,6 +25,31 @@ LN_WEB_USER=www-data
 
 ln_die() { echo "laranode: $*" >&2; exit 2; }
 
+# The account the panel web stack runs as: www-data, or laranode_web on a Proxmox host (where
+# www-data is pveproxy's user and must never be handed a panel file or group). The installer
+# records it in the root-owned /etc/laranode/host.conf (a fixed path: no environment override in a
+# root script). Trusted only as a regular root-owned file nobody else can write, and only with an
+# allowlisted value. No file = an install from before this record: www-data, except on Proxmox.
+ln_load_host_conf() {
+    local f=/etc/laranode/host.conf line
+    if [ -e "$f" ] || [ -L "$f" ]; then
+        { [ ! -L "$f" ] && [ -f "$f" ] && [ "$(stat -c %u "$f")" = 0 ] \
+            && [ $(( 0$(stat -c %a "$f") & 022 )) -eq 0 ]; } \
+            || ln_die "$f must be a regular root-owned file, not group/world writable"
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+                web_user=www-data|web_user=laranode_web) LN_WEB_USER=${line#web_user=} ;;
+                ufw=0|ufw=1|''|'#'*) : ;;
+                *) ln_die "unexpected line in $f" ;;
+            esac
+        done < "$f"
+    fi
+    if [ -d /etc/pve ] && [ "$LN_WEB_USER" = www-data ]; then
+        ln_die "Proxmox host: the panel web user must be laranode_web (www-data is pveproxy's user); re-run the installer"
+    fi
+}
+ln_load_host_conf
+
 ln_need_root() { [ "$(id -u)" -eq 0 ] || ln_die "must run as root"; }
 
 # ln_argc <min> <max> <usage>  (uses the caller's "$@" count via LN_ARGC)

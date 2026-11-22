@@ -14,7 +14,7 @@ bad() { echo "FAIL: $*" >&2; fail=1; }
 ok()  { echo "  ok: $*"; }
 
 mapfile -t RULES < <(ln_sudo_rules)
-[ "${#RULES[@]}" -gt 0 ] || { echo "FAIL: sudo -l -U www-data lists no commands" >&2; exit 1; }
+[ "${#RULES[@]}" -gt 0 ] || { echo "FAIL: sudo -l -U $LN_WEB lists no commands" >&2; exit 1; }
 
 # path_ok PATH — every component of the resolved path is root-owned and not g/o-writable
 path_ok() {
@@ -47,7 +47,7 @@ done
 BIN=$(ln_bin_dir) || { bad "no laranode-*.sh script in the sudo rules"; exit 1; }
 TPL=$(ln_tpl_dir)
 LIBD="$(cd "$BIN/.." && pwd)/lib"
-for u in www-data laranode_ln; do
+for u in www-data "$LN_WEB" laranode_ln; do
     id "$u" >/dev/null 2>&1 || continue
     for t in "$BIN" "$TPL" "$LIBD" "$BIN"/laranode-*.sh "$TPL"/* "$LIBD"/*; do
         [ -e "$t" ] || continue
@@ -79,12 +79,12 @@ if [ -d "$H/panel" ]; then
     if [ -n "$loose" ]; then bad "group/other-writable under $H outside storage and logs: $(echo $loose)"
     else ok "nothing under $H is group/other-writable except storage and logs"; fi
     if [ -d "$H/panel/bootstrap/cache" ]; then
-        if runuser -u www-data -- sh -c ": > '$H/panel/bootstrap/cache/.probe-www'" 2>/dev/null; then
-            rm -f "$H/panel/bootstrap/cache/.probe-www"; bad "www-data can create files in $H/panel/bootstrap/cache"
-        else ok "www-data cannot write bootstrap/cache"; fi
+        if runuser -u "$LN_WEB" -- sh -c ": > '$H/panel/bootstrap/cache/.probe-www'" 2>/dev/null; then
+            rm -f "$H/panel/bootstrap/cache/.probe-www"; bad "$LN_WEB can create files in $H/panel/bootstrap/cache"
+        else ok "$LN_WEB cannot write bootstrap/cache"; fi
         for f in "$H"/panel/bootstrap/cache/*.php; do
             [ -e "$f" ] || continue
-            if runuser -u www-data -- test -w "$f" 2>/dev/null; then bad "www-data can write $f"; fi
+            if runuser -u "$LN_WEB" -- test -w "$f" 2>/dev/null; then bad "$LN_WEB can write $f"; fi
         done
     fi
 fi

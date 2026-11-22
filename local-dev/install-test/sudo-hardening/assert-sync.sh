@@ -23,9 +23,9 @@ fresh() {   # fresh <name>: a private copy of the scripts tree + empty dest/sudo
     cp -a "$PANEL/laranode-scripts" "$T/panel/laranode-scripts"
     D="$T/lib"                       # DEST (does not exist yet); its parent $T is root 755
     # the repo drop-ins name /usr/local/lib/laranode; point them at this case's dest
-    sed -i "s|/usr/local/lib/laranode|$D|g" "$T"/panel/laranode-scripts/etc/sudoers.d/*
+    sed -i "s|/usr/local/lib/laranode|$D|g" "$T"/panel/laranode-scripts/etc/sudoers.d/* "$T"/panel/laranode-scripts/bin/laranode-postgres-sudoers
 }
-run_sync() { LARANODE_LIB_DEST="$D" LARANODE_SUDOERS_DIR="$T/sudoers.d" bash "$SYNC" "$T/panel" 2>&1; }
+run_sync() { LARANODE_INSTALLER_TEST=1 LARANODE_LIB_DEST="$D" LARANODE_SUDOERS_DIR="$T/sudoers.d" bash "$SYNC" "$T/panel" 2>&1; }
 
 echo "== sync-scripts: clean tree publishes =="
 fresh clean
@@ -172,6 +172,107 @@ refuse_case 'panel vhost: Include injected'              setup_vhost_inc
 refuse_case 'unit: backslash-continued comment smuggles a directive' setup_unit_cont
 refuse_case 'a required installer template is missing'   setup_tpl_missing
 
+# ---- host.conf: which account the grants go to (Proxmox: laranode_web, never www-data) -------
+# run_sync_hc <host.conf text or -> [pve]: '-' = no host.conf; pve = a fake /etc/pve exists
+run_sync_hc() {
+    local text="$1" pve="${2:-}" hc="$T/host.conf" pd="$T/no-pve"
+    rm -f "$hc"
+    [ "$text" = - ] || { printf '%s' "$text" > "$hc"; chown root:root "$hc"; chmod 644 "$hc"; }
+    [ -n "$HC_MODE" ] && chmod "$HC_MODE" "$hc"
+    [ -n "$HC_OWNER" ] && chown "$HC_OWNER" "$hc"
+    [ -n "$HC_LINK" ] && { mv "$hc" "$hc.real"; ln -s "$hc.real" "$hc"; }
+    [ "$pve" = pve ] && { pd="$T/pve"; mkdir -p "$pd"; }
+    LARANODE_INSTALLER_TEST=1 LARANODE_HOST_CONF="$hc" LARANODE_PVE_DIR="$pd" LARANODE_LIB_DEST="$D" LARANODE_SUDOERS_DIR="$T/sudoers.d" \
+        bash "$SYNC" "$T/panel" 2>&1
+}
+HC_MODE=''; HC_OWNER=''; HC_LINK=''
+hc_refuse() {   # <label> <host.conf text or -> [pve]
+    local label="$1" out rc
+    fresh "hc$n"
+    out=$(run_sync_hc "$2" "${3:-}"); rc=$?
+    n=$((n + 1))
+    if [ "$rc" -eq 0 ]; then bad "sync ACCEPTED: $label"
+    elif [ -e "$D" ] || ls "$T/sudoers.d" 2>/dev/null | grep -q .; then bad "sync refused ($label) but had already published something"
+    else ok "refused: $label"; fi
+}
+grants_of() { grep -hv '^#' "$T"/sudoers.d/* 2>/dev/null | sed -n 's/^\([^ ]*\) ALL=.*/\1/p' | sort -u | tr '\n' ' '; }
+
+echo "== sync-scripts: host.conf web user + ufw gate =="
+userdel laranode_web >/dev/null 2>&1 || true
+hc_refuse 'Proxmox host without host.conf (would grant www-data = pveproxy)' - pve
+hc_refuse 'Proxmox host with web_user=www-data'                    "web_user=www-data${NL}ufw=0${NL}" pve
+hc_refuse 'web_user=laranode_web but the account does not exist'   "web_user=laranode_web${NL}ufw=1${NL}"
+getent passwd laranode_web >/dev/null || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --user-group laranode_web
+hc_refuse 'host.conf names another user'                           "web_user=root${NL}"
+hc_refuse 'host.conf with an unknown line'                         "web_user=laranode_web${NL}evil=1${NL}"
+hc_refuse 'host.conf ufw value not 0/1'                            "web_user=laranode_web${NL}ufw=yes${NL}"
+HC_MODE=664; hc_refuse 'host.conf group-writable'                  "web_user=laranode_web${NL}"; HC_MODE=''
+HC_OWNER=laranode_ln; hc_refuse 'host.conf not owned by root'      "web_user=laranode_web${NL}"; HC_OWNER=''
+HC_LINK=1; hc_refuse 'host.conf is a symlink'                      "web_user=laranode_web${NL}"; HC_LINK=''
+
+fresh hcweb
+out=$(run_sync_hc "web_user=laranode_web${NL}ufw=1${NL}" pve); rc=$?
+n=$((n + 1))
+if [ "$rc" -ne 0 ]; then bad "web_user=laranode_web on Proxmox refused (rc=$rc): ${out:0:300}"
+elif grep -v '^#' "$T"/sudoers.d/* | grep -q 'www-data'; then bad "laranode_web render: www-data still named: $(grep -l www-data "$T"/sudoers.d/* | tr '\n' ' ')"
+elif [ "$(grants_of)" != "laranode_web " ]; then bad "laranode_web render: grants go to [$(grants_of)], want [laranode_web ]"
+elif ! grep -q "^laranode_web ALL=(laranode_web) NOPASSWD: " "$T"/sudoers.d/*; then bad "laranode_web render: no ALL=(laranode_web) runas line (the www-data runas column was not rendered)"
+elif ! [ -f "$T/sudoers.d/laranode-ufw" ]; then bad "ufw=1: laranode-ufw drop-in not installed"
+else
+    vbad=0; for f in "$T"/sudoers.d/*; do visudo -c -f "$f" >/dev/null 2>&1 || { vbad=1; bad "rendered drop-in fails visudo: ${f##*/}"; }; done
+    [ "$vbad" = 0 ] && ok "web_user=laranode_web: every grant names laranode_web, none www-data, visudo clean"
+fi
+
+fresh hcufw
+: > "$T/sudoers.d/laranode-ufw"; chmod 440 "$T/sudoers.d/laranode-ufw"   # left by an earlier ufw=1 run
+out=$(run_sync_hc "web_user=laranode_web${NL}ufw=0${NL}" pve); rc=$?
+n=$((n + 1))
+if [ "$rc" -ne 0 ]; then bad "ufw=0 refused (rc=$rc): ${out:0:300}"
+elif [ -e "$T/sudoers.d/laranode-ufw" ]; then bad "ufw=0: laranode-ufw drop-in still present (installed or not removed)"
+elif ! [ -f "$T/sudoers.d/laranode-panel" ]; then bad "ufw=0: the other drop-ins were not installed"
+else ok "ufw=0: laranode-ufw removed and not installed, the rest published"; fi
+
+fresh hcplain
+out=$(run_sync_hc -); rc=$?
+n=$((n + 1))
+if [ "$rc" -ne 0 ]; then bad "plain host without host.conf refused (rc=$rc): ${out:0:300}"
+elif [ "$(grants_of)" != "www-data " ]; then bad "plain host: grants go to [$(grants_of)], want [www-data ] (unchanged)"
+else ok "plain host without host.conf: unchanged www-data grants"; fi
+
+# lib/validate.sh: every sudo-able script takes LN_WEB_USER from the fixed /etc/laranode/host.conf
+echo "== lib/validate.sh: LN_WEB_USER from host.conf =="
+VAL="$PANEL/laranode-scripts/lib/validate.sh"
+HCR=/etc/laranode/host.conf
+mkdir -p /etc/laranode
+had_hc=0; [ -e "$HCR" ] && { had_hc=1; cp -a "$HCR" "$W/host.conf.saved"; }
+had_pve=0; [ -e /etc/pve ] && had_pve=1
+lnweb() { bash -c '. "$1" && echo "$LN_WEB_USER"' _ "$VAL" 2>&1; }
+val_case() {   # <label> <want: user or REFUSED> <host.conf text or -> [mode] [pve]
+    local label="$1" want="$2" text="$3" mode="${4:-644}" pve="${5:-}" got rc
+    rm -f "$HCR"
+    [ "$text" = - ] || { printf '%s' "$text" > "$HCR"; chmod "$mode" "$HCR"; }
+    [ "$pve" = pve ] && [ "$had_pve" = 0 ] && mkdir -p /etc/pve
+    got=$(lnweb); rc=$?
+    [ "$pve" = pve ] && [ "$had_pve" = 0 ] && rmdir /etc/pve
+    n=$((n + 1))
+    if [ "$want" = REFUSED ]; then
+        if [ "$rc" -ne 0 ]; then ok "validate.sh refuses: $label"; else bad "validate.sh ACCEPTED ($label): LN_WEB_USER=$got"; fi
+    elif [ "$rc" -eq 0 ] && [ "$got" = "$want" ]; then ok "validate.sh: $label -> $want"
+    else bad "validate.sh ($label): got [$got] rc=$rc, want $want"; fi
+}
+if [ "$had_pve" = 0 ]; then
+    val_case 'no host.conf'                     www-data     -
+    val_case 'web_user=laranode_web'            laranode_web "web_user=laranode_web${NL}ufw=0${NL}"
+    val_case 'web_user=root'                    REFUSED      "web_user=root${NL}"
+    val_case 'group-writable host.conf'         REFUSED      "web_user=laranode_web${NL}" 664
+    val_case 'Proxmox, no host.conf'            REFUSED      - 644 pve
+    val_case 'Proxmox, web_user=www-data'       REFUSED      "web_user=www-data${NL}" 644 pve
+    val_case 'Proxmox, web_user=laranode_web'   laranode_web "web_user=laranode_web${NL}" 644 pve
+else
+    echo "  (skipped: /etc/pve exists on this host)"
+fi
+rm -f "$HCR"; [ "$had_hc" = 1 ] && cp -a "$W/host.conf.saved" "$HCR"
+
 # the real race: swap a NON-last component ($SRC/templates) between a real dir and a link to a
 # root-only dir while the sync runs. Whatever the timing, no root-only byte may reach the copy.
 race_case() {
@@ -206,6 +307,25 @@ race_case() {
     if [ "$leaks" -gt 0 ]; then bad "RACE: root copied root-only files through a swapped parent directory ($leaks of 60 syncs leaked)"
     else ok "race: 60 syncs against a swapping templates/ parent, no root-only byte copied ($published published; refusals: $(printf '%s' "$reasons" | tr '|' '\n' | sort | uniq -c | tr '\n' ';'))"; fi
 }
+# ---- PR #11 r1 nit: run as root, the sync must not let its environment move a trusted path ---
+# Outside test mode LARANODE_HOST_CONF / LARANODE_PVE_DIR / LARANODE_LIB_DEST / LARANODE_SUDOERS_DIR
+# are ignored. Here they point at a fake Proxmox (/etc/pve dir, no host.conf: honoured = refused)
+# and at private dest/sudoers dirs (honoured = written there); ignored = a normal sync of the real
+# paths (this host: no /etc/pve, so www-data, as the installer set it up).
+env_case() {
+    T="$W/envcase"; mkdir -p "$T/panel" "$T/pve"; chmod 755 "$T"
+    cp -a "$PANEL/laranode-scripts" "$T/panel/laranode-scripts"
+    local out rc
+    out=$(env -u LARANODE_INSTALLER_TEST LARANODE_HOST_CONF="$T/no-host.conf" LARANODE_PVE_DIR="$T/pve" \
+          LARANODE_LIB_DEST="$T/evil-dest" LARANODE_SUDOERS_DIR="$T/evil-sudoers" bash "$SYNC" "$T/panel" 2>&1); rc=$?
+    n=$((n + 1))
+    if [ -e "$T/evil-dest" ] || [ -e "$T/evil-sudoers" ]; then bad "outside test mode the sync wrote to an env-chosen path"
+    elif [ "$rc" -ne 0 ]; then bad "outside test mode the sync honoured LARANODE_PVE_DIR/LARANODE_HOST_CONF (rc=$rc): ${out##*$NL}"
+    else ok "outside test mode LARANODE_HOST_CONF / PVE_DIR / LIB_DEST / SUDOERS_DIR are ignored"; fi
+}
+echo "== sync-scripts: env path overrides ignored outside test mode =="
+env_case
+
 echo "== sync-scripts: a parent directory swapped during the run leaks nothing =="
 race_case
 
