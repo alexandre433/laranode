@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Mutation smoke: re-introduce each reviewed bug into a COPY of the installer and
 # require the host-detection unit tests to go red. A guard whose test cannot fail is
-# not a guard. Runs on Linux/CI in about a minute; never touches the real installer.
+# not a guard. One run of the unit tests per mutation (minutes on a laptop, CI shards it in 2);
+# never touches the real installer.
 #
 #   bash local-dev/install-test/mutation-smoke.sh
 #   SHARD=2/2 bash local-dev/install-test/mutation-smoke.sh   # every 2nd mutation from #2 (CI runs 2 shards)
@@ -139,6 +140,8 @@ MUTATIONS=(
   'upgrade: updated sync not run again (old sync renders www-data grants)|s#^  if \[ -n "\$before" \] \&\& \[ "$(sha256sum < "$inst")" != "\$before" \]; then#  if false; then#'
   'dedicated web user: www-data drop-in left in place|s#if grep -qE .\^\[\[:space:\]\]\*www-data\[\[:space:\]\]. "\$drop"; then#if false; then#'
   'tenant groups never migrated|s#^  _migrate_tenant_groups$#  :#'
+  'tenant groups migrated with the account setup again (before the ref check)|s#^  usermod -aG laranode_ln "\$WEB_USER"$#&\n  _migrate_tenant_groups#;s#^  _migrate_tenant_groups$#  :#'
+  'tenant groups migrated after the Apache user switch|s#^  _migrate_tenant_groups$#  :#;s#^  _apache_web_user$#&\n  _migrate_tenant_groups#'
   'www-data kept in tenant groups|s#gpasswd -d www-data "\$g" >/dev/null || die#true || die#'
   'non-tenant group migrated (uid check dropped)|s#\[ "\$uid" -ge 1000 \] \&\& \[ "\$home" = "/home/\$g" \]#true#'
   # PR B G3: production env

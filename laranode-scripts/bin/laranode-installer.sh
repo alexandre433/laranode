@@ -795,7 +795,6 @@ _ensure_web_user() {
   if id -nG www-data 2>/dev/null | tr ' ' '\n' | grep -qx laranode_ln; then
     gpasswd -d www-data laranode_ln >/dev/null || die "could not remove www-data from group laranode_ln"
   fi
-  _migrate_tenant_groups
 }
 
 # _migrate_tenant_groups — an install that ran as www-data (before the dedicated web user) put
@@ -803,6 +802,11 @@ _ensure_web_user() {
 # switch to WEB_USER, WEB_USER joins each of them (the tenant sites keep working) and www-data
 # (pveproxy's user) leaves. Only groups that are a laranode tenant: name {user}_ln, a user of the
 # same name with uid >= 1000 and home /home/{name}. laranode_ln (the panel group) is handled above.
+# An orphan {name}_ln group (its user was removed) has no home: it is skipped, www-data stays in it.
+# ORDER (PR #11 r2): this runs in phase_webserver right before the Apache User switch + reload, NOT
+# with the account setup. Until then Apache still runs as www-data and needs the tenant groups: a die
+# in between (a bad LARANODE_REF, the sudoers check, packages, the database) must not leave the
+# tenant sites without them.
 _migrate_tenant_groups() {
   [ "$WEB_USER" != www-data ] || return 0
   local g members entry uid home
@@ -1448,6 +1452,7 @@ phase_webserver() {
   _disable_default_site
 
   _apache_ports_conf "${ad}/ports.conf"
+  _migrate_tenant_groups
   _apache_web_user
 
   a2ensite laranode || die "a2ensite laranode failed"
