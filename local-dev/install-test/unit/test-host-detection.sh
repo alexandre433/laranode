@@ -1833,8 +1833,23 @@ clone_dirty() { base; d=$(mktemp -d); PANEL_PATH="$d/panel"; LARANODE_REPO="$REF
   git() { command git "$@"; local rc=$?; case " $* " in *" checkout "*) echo planted > "$PANEL_PATH/planted.php" ;; esac; return $rc; }
   _clone_panel; }
 tfm "clone at the ref but with a file planted in the tree: refused (status --porcelain)" "is not clean" clone_dirty
-clone_clean_as_panel_user() { bash -c "source '$INSTALLER'; declare -f _checkout_clean" | grep -qE '_as_panel_user git -C "\$1" status --porcelain'; }
+clone_clean_as_panel_user() { bash -c "source '$INSTALLER'; declare -f _checkout_clean" | grep -qE '_as_panel_user git -c core.fileMode=false -C "\$1" status --porcelain'; }
 t  "the clean-tree check runs git status --porcelain AS the panel user"             clone_clean_as_panel_user
+# PR #12 r1 (product bug): _settle_permissions re-modes every file of the tree (640/750), so with
+# core.fileMode on EVERY tracked file reads as modified and a re-run with LARANODE_REF could never
+# pass. The check compares content (and untracked/staged files), not the mode bits the installer sets.
+cc_repo() { base; d=$(mktemp -d); command git -C "$d" init -q -b main; echo a > "$d/f.sh"; echo b > "$d/g.php"
+  command git -C "$d" add -A; command git -C "$d" -c user.email=t@t -c user.name=t commit -q -m c; }
+cc_mode_ok() { cc_repo; chmod 750 "$d/f.sh"; chmod 640 "$d/g.php"; _checkout_clean "$d"; }
+t  "clean-tree check: a mode-only change (the installer's own 640/750 settle) stays clean" cc_mode_ok
+cc_content_dirty() { cc_repo; echo changed >> "$d/g.php"; _checkout_clean "$d"; }
+tf "clean-tree check: a content edit is still refused"                                  cc_content_dirty
+cc_mode_and_content() { cc_repo; chmod 640 "$d/f.sh"; echo changed >> "$d/g.php"; _checkout_clean "$d"; }
+tf "clean-tree check: mode change + content edit refused"                               cc_mode_and_content
+cc_untracked() { cc_repo; chmod 640 "$d/f.sh"; echo x > "$d/planted.php"; _checkout_clean "$d"; }
+tf "clean-tree check: an untracked file is still refused"                               cc_untracked
+cc_staged() { cc_repo; echo changed >> "$d/g.php"; command git -C "$d" add g.php; _checkout_clean "$d"; }
+tf "clean-tree check: a staged edit is still refused"                                   cc_staged
 ref_none() { base; unset LARANODE_REF; LARANODE_PINNED_REF=""; _resolve_ref; }
 tfm "no LARANODE_REF and no pinned ref: refused (never the silent default branch)"  "No ref to install" ref_none
 ref_pinned() { base; unset LARANODE_REF; LARANODE_PINNED_REF=v1; _resolve_ref; expect REF "$PANEL_REF" v1; }
