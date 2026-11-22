@@ -16,6 +16,8 @@
 #   EXPECT_INSTALLER_FAIL  regex: the installer must refuse (non-zero, message matches)
 #                   and POST_ASSERTS_CMD then checks nothing was changed
 #   KEEP            1 = leave container after run for manual inspection (default: 0)
+#   UPGRADE_FROM_TAR  host path of a tar of an older panel tree; copied to /root/upgrade-from.tar
+#                   in the container before PRESETUP (upgrade scenarios install it first)
 
 set -uo pipefail
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
@@ -82,6 +84,12 @@ run_scenario() {
     # Drop any stale cached config from the host so the fresh .env actually takes effect
     docker exec "$cname" bash -c \
         'rm -f /home/laranode_ln/panel/bootstrap/cache/*.php' || true
+
+    # UPGRADE_FROM_TAR=<host tar>: an older panel tree (git archive of the base ref) copied to
+    # /root/upgrade-from.tar (not /tmp: a tmpfs docker cp cannot write into), for PRESETUP to install first
+    if [ -n "${UPGRADE_FROM_TAR:-}" ]; then
+        docker cp "$UPGRADE_FROM_TAR" "$cname:/root/upgrade-from.tar" || _fail "could not copy $UPGRADE_FROM_TAR"
+    fi
 
     if [ -n "$presetup" ]; then
         echo "[$scenario][3/6] Running PRESETUP..."

@@ -6,11 +6,19 @@
 #   bash local-dev/install-test/mutation-smoke-sudo.sh            # all mutations, 4 in parallel
 #   JOBS=2 bash local-dev/install-test/mutation-smoke-sudo.sh     # fewer parallel containers
 #   bash local-dev/install-test/mutation-smoke-sudo.sh "ln_secret"  # only names containing the text
+#   SHARD=2/3 bash local-dev/install-test/mutation-smoke-sudo.sh  # one third (CI runs 3 shards)
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 JOBS="${JOBS:-4}"
 FILTER="${1:-}"
+SHARD="${SHARD:-}"   # k/n, e.g. SHARD=2/3 (CI matrix); empty = all
+SHARD_K=1; SHARD_N=1
+if [ -n "$SHARD" ]; then
+    [[ $SHARD =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] && [ "${BASH_REMATCH[1]}" -le "${BASH_REMATCH[2]}" ] \
+        || { echo "SHARD must be k/n with 1 <= k <= n, got '$SHARD'" >&2; exit 2; }
+    SHARD_K=${BASH_REMATCH[1]}; SHARD_N=${BASH_REMATCH[2]}
+fi
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 case "$(uname -s)" in MINGW*|MSYS*) win() { (cd "$1" && pwd -W); }; export MSYS_NO_PATHCONV=1 ;; *) win() { echo "$1"; } ;; esac
@@ -81,6 +89,7 @@ mut bin/laranode-sync-scripts.sh 'sync: every read/list runs as root (parent-dir
 mut bin/laranode-sync-scripts.sh 'sync: file bytes read as root'     'run_as_panel cat -- "$1" |' 'cat -- "$1" |'
 mut bin/laranode-sync-scripts.sh 'sync: file size cap dropped'     '| head -c 2097152 > "$2"' '> "$2"'
 mut bin/laranode-sync-scripts.sh 'sync: hostile lib/template names accepted'     'safe_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }' 'safe_name() { true; }'
+mut bin/laranode-sync-scripts.sh 'sync: env moves the trusted paths outside test mode (PR #11 r1)'     'if [ "${LARANODE_INSTALLER_TEST:-0}" = 1 ]; then' 'if true; then'
 mut etc/sudoers.d/laranode-panel 'sudoers: rm glob grant back' '' 'www-data ALL=(ALL) NOPASSWD: /usr/bin/rm /etc/apache2/sites-available/*.conf'
 mut etc/sudoers.d/laranode-panel 'sudoers: script from the writable panel tree' '' 'www-data ALL=(ALL) NOPASSWD: /home/laranode_ln/panel/laranode-scripts/bin/laranode-cron.sh'
 mut etc/sudoers.d/laranode-panel 'sudoers: any-args a2dissite back' '' 'www-data ALL=(ALL) NOPASSWD: /usr/sbin/a2dissite'
@@ -210,8 +219,13 @@ idxs=()
 for i in "${!MUT_NAME[@]}"; do
     n=${MUT_NAME[$i]}
     [ -z "$FILTER" ] || [[ $n == *"$FILTER"* ]] || continue
+    # SHARD=k/n: only every n-th mutation starting at k (1-based), so CI can split the run
+    # over parallel jobs; the shards together cover every mutation exactly once
+    if [ -n "$SHARD" ] && [ $(( i % SHARD_N )) -ne $(( SHARD_K - 1 )) ]; then continue; fi
     idxs+=("$i")
 done
+[ "${#idxs[@]}" -gt 0 ] || { echo "no mutation selected (FILTER='$FILTER' SHARD='$SHARD')" >&2; exit 2; }
+echo "== mutations selected: ${#idxs[@]} of ${#MUT_NAME[@]}${SHARD:+ (shard $SHARD)} =="
 running=0
 for i in "${idxs[@]}"; do
     run_one "$i" &

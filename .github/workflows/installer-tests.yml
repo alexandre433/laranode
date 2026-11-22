@@ -48,20 +48,31 @@ jobs:
         run: bash local-dev/install-test/sudo-hardening/run-fast.sh
 
   mutation-smoke-sudo:
-    name: mutation smoke, sudo guards (each guard must go red)
+    # 74+ mutations x one full fast harness each outgrew one 45-min job (PR #11 r1): 3 shards in
+    # parallel, each must end with its own verdict (ALL KILLED) well inside the timeout
+    name: mutation smoke, sudo guards ${{ matrix.shard }}/3 (each guard must go red)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
-      - run: JOBS=4 bash local-dev/install-test/mutation-smoke-sudo.sh
+      - run: SHARD=${{ matrix.shard }}/3 JOBS=4 bash local-dev/install-test/mutation-smoke-sudo.sh
 
   mutation-smoke:
-    name: mutation smoke (each guard must go red)
+    # 103 mutations took 28 of 30 min (PR #11 r1); 113+ would not fit: 2 shards in parallel
+    name: mutation smoke ${{ matrix.shard }}/2 (each guard must go red)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v4
-      - run: bash local-dev/install-test/mutation-smoke.sh
+      - run: SHARD=${{ matrix.shard }}/2 bash local-dev/install-test/mutation-smoke.sh
 
   scenario:
     name: scenario ${{ matrix.scenario }}
@@ -74,6 +85,7 @@ jobs:
         # wall time is the slowest single scenario, not the sum).
         #   clean room: baseline, mysql-rootpw, pgsql, rerun, debian13
         #   host guards: pve, pve-webuser, cloudpanel
+        #   upgrade: pve-upgrade (installs an older ref first: needs the full history)
         #   pre-existing services: nginx80, apache80, apache-stopped, phpfpm-live, port-busy
         scenario:
           - baseline
@@ -84,6 +96,7 @@ jobs:
           - debian13
           - pve
           - pve-webuser
+          - pve-upgrade
           - cloudpanel
           - apache80
           - port-busy
@@ -93,6 +106,9 @@ jobs:
           - apache-badconf
     steps:
       - uses: actions/checkout@v4
+        with:
+          # pve-upgrade git-archives the older ref it upgrades from
+          fetch-depth: ${{ matrix.scenario == 'pve-upgrade' && '0' || '1' }}
       - name: run scenario
         env:
           LARANODE_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

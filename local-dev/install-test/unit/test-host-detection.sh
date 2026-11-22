@@ -1622,6 +1622,44 @@ t  "Proxmox: a missing laranode_web is created"                                 
 t  "plain host: www-data grouped with laranode_ln as before"                       ewu_plain
 tf "Proxmox: refused when laranode_web cannot be created"                          ewu_run laranode_web missing "www-data" 1
 tf "Proxmox: refused when laranode_web is uid 0"                                   ewu_run laranode_web 0 "www-data"
+
+# r1 review (important): upgrade of an earlier (www-data) Proxmox install. laranode-user-manager.sh
+# put www-data in every hosted user's group (homes 0770, pool sockets 0660 user:user); the switch
+# to laranode_web must move each LARANODE tenant group over: + laranode_web, - www-data. A tenant
+# group = <x>_ln (not laranode_ln) whose same-name account is a regular user with home /home/<x>_ln.
+mtg_run() {  # mtg_run <web user>: stubbed getent group/passwd, usermod/gpasswd recorded
+  base; WEB_USER=$1; CALLS=$(mktemp)
+  getent() {
+    case "$1 ${2:-}" in
+      "group ")  printf '%s\n' 'root:x:0:' 'www-data:x:33:' 'laranode_ln:x:999:www-data' \
+                   'alice_ln:x:1001:www-data' 'bob_ln:x:1002:' 'carol_ln:x:1003:www-data,laranode_web' \
+                   'sys_ln:x:998:www-data' 'odd_ln:x:1004:www-data' 'ghost_ln:x:1005:www-data' \
+                   'notatenant:x:1006:www-data' 'Bad_ln:x:1007:www-data' ;;
+      "passwd alice_ln") echo 'alice_ln:x:1001:1001::/home/alice_ln:/usr/sbin/nologin' ;;
+      "passwd bob_ln")   echo 'bob_ln:x:1002:1002::/home/bob_ln:/bin/bash' ;;
+      "passwd carol_ln") echo 'carol_ln:x:1003:1003::/home/carol_ln:/usr/sbin/nologin' ;;
+      "passwd sys_ln")   echo 'sys_ln:x:998:998::/home/sys_ln:/usr/sbin/nologin' ;;
+      "passwd odd_ln")   echo 'odd_ln:x:1004:1004::/srv/odd:/usr/sbin/nologin' ;;
+      "passwd notatenant") echo 'notatenant:x:1006:1006::/home/notatenant:/bin/sh' ;;
+      "passwd Bad_ln")   echo 'Bad_ln:x:1007:1007::/home/Bad_ln:/bin/sh' ;;
+      *) return 2 ;;
+    esac; }
+  usermod() { echo "usermod $*" >> "$CALLS"; }
+  gpasswd() { echo "gpasswd $*" >> "$CALLS"; }
+  _migrate_tenant_groups; }
+mtg_pve() { mtg_run laranode_web
+  local want got
+  want=$(printf '%s\n' 'usermod -aG alice_ln laranode_web' 'gpasswd -d www-data alice_ln' \
+    'usermod -aG bob_ln laranode_web' 'usermod -aG carol_ln laranode_web' 'gpasswd -d www-data carol_ln')
+  got=$(cat "$CALLS")
+  [ "$got" = "$want" ] || { echo "want:"; echo "$want"; echo "got:"; echo "$got"; return 1; }; }
+t  "upgrade to laranode_web: every tenant group gains laranode_web and loses www-data" mtg_pve
+mtg_plain() { mtg_run www-data; [ ! -s "$CALLS" ] || { echo "plain host touched groups:"; cat "$CALLS"; return 1; }; }
+t  "plain host (www-data): no tenant group is touched"                             mtg_plain
+mtg_called() { bash -c "source '$INSTALLER'; declare -f _ensure_web_user" | grep -q '_migrate_tenant_groups'; }
+t  "_ensure_web_user migrates the tenant groups on the dedicated web user"         mtg_called
+mtg_fail() { mtg_run laranode_web; gpasswd() { return 1; }; _migrate_tenant_groups; }
+tfm "a tenant group that cannot be migrated stops the install" "could not remove www-data from tenant group" mtg_fail
 tf "Proxmox: refused when laranode_web is a regular (uid >= 1000) account"         ewu_run laranode_web 1001 "www-data"
 ewu_in_wwwdata() { base; WEB_USER=laranode_web
   useradd() { :; }; usermod() { :; }; gpasswd() { :; }
@@ -1699,6 +1737,33 @@ su_plain() { su_run 1; [ -e "$LARANODE_SUDOERS_DIR/laranode-ufw" ]; }
 t  "ufw gated off: a previous laranode-ufw drop-in is removed"                     su_pve
 t  "ufw on (plain host): laranode-ufw drop-in kept"                                su_plain
 tf "ufw on but laranode-ufw missing: refused as before"                            su_run 1 noufw
+# PR #11 r2: an upgrade from a www-data install must not leave pveproxy's user a root grant
+su_www() { base; d=$(mktemp -d); export LARANODE_SUDOERS_DIR="$d"; UFW_ENABLED=0; WEB_USER=$1
+  for x in laranode-panel laranode-cron laranode-runtimes; do echo "$1 ALL=(root) NOPASSWD: /usr/local/lib/laranode/bin/x.sh" > "$d/$x"; done
+  echo 'www-data ALL=(root) NOPASSWD: /usr/local/lib/laranode/bin/laranode-sleep.sh' > "$d/laranode-sleep"
+  visudo() { return 0; }; _install_sudoers; }
+tfm "dedicated web user: a drop-in still granting www-data stops the install"  "still granted www-data" su_www laranode_web
+su_www_gone() { local d; d=$(mktemp -d); ( base; export LARANODE_SUDOERS_DIR="$d"; UFW_ENABLED=0; WEB_USER=laranode_web
+    for x in laranode-panel laranode-cron laranode-runtimes; do : > "$d/$x"; done
+    echo 'www-data ALL=(root) NOPASSWD: /bin/true' > "$d/laranode-sleep"
+    visudo() { return 0; }; _install_sudoers ) >/dev/null 2>&1
+  [ ! -e "$d/laranode-sleep" ] && [ -e "$d/laranode-panel" ]; }
+t  "dedicated web user: the www-data drop-in is removed before the install stops" su_www_gone
+t  "plain host (www-data): www-data grants are the expected ones, kept"         su_www www-data
+# an upgrade runs the previously installed sync; when that run replaced it, the new root-owned
+# copy runs once more (it renders the grants for host.conf's web user)
+priv_sync_rerun_when_updated() { local r out
+  r=$(mktemp -d); mkdir -p "$r/lib/bin"; echo old > "$r/lib/bin/laranode-sync-scripts.sh"
+  out=$(bash -c "
+    source '$INSTALLER'
+    PANEL_PATH='/nonexistent-panel'; LN_LIB_DEST='$r/lib'
+    mkdir() { :; }; chown() { :; }; chmod() { :; }; log() { :; }
+    bash() { printf 'bash %s\n' \"\$*\"; echo new > '$r/lib/bin/laranode-sync-scripts.sh'; }
+    _install_privileged_scripts")
+  rm -rf "$r"
+  [ "$(printf '%s\n' "$out" | grep -c "^bash $r/lib/bin/laranode-sync-scripts.sh /nonexistent-panel$")" = 2 ] \
+    || { echo "updated sync not run a second time: $out"; return 1; }; }
+t  "upgrade: a sync run that replaced the installed sync runs the new copy once more" priv_sync_rerun_when_updated
 fw_env() { base; CALLS=$(mktemp); env_set() { echo "$1=$2" >> "$CALLS"; }; UFW_ENABLED=$1; _panel_feature_env; cat "$CALLS"; }
 fw_env_pve()   { fw_env 0 | grep -qx 'LARANODE_FIREWALL_ENABLED=false'; }
 fw_env_plain() { fw_env 1 | grep -qx 'LARANODE_FIREWALL_ENABLED=true'; }
@@ -1718,27 +1783,44 @@ echo "=== PR B: clone ref pin ==="
 # a local origin: main = A -> B, tag v1 = A, branch feat = B -> C
 ref_repo() { local r; r=$(mktemp -d); git -C "$r" init -q -b main
   git -C "$r" -c user.email=t@t -c user.name=t commit -q --allow-empty -m A; git -C "$r" tag v1
+  git -C "$r" tag fedcba9876543210fedcba9876543210fedcba98   # a 40-hex TAG name on A, not that commit
   git -C "$r" -c user.email=t@t -c user.name=t commit -q --allow-empty -m B
   git -C "$r" checkout -q -b feat; git -C "$r" -c user.email=t@t -c user.name=t commit -q --allow-empty -m C
   git -C "$r" checkout -q main; echo "$r"; }
 REF_REPO=$(ref_repo)
 REF_A=$(git -C "$REF_REPO" rev-parse v1); REF_C=$(git -C "$REF_REPO" rev-parse feat)
 clone_to() { base; d=$(mktemp -d); PANEL_PATH="$d/panel"; LARANODE_REPO="$REF_REPO"; export LARANODE_REF="$1"; _resolve_ref; _clone_panel; git -C "$PANEL_PATH" rev-parse HEAD; }
-clone_branch() { [ "$(clone_to feat | tail -1)" = "$REF_C" ]; }
 clone_tag()    { [ "$(clone_to v1 | tail -1)" = "$REF_A" ]; }
-clone_sha()    { [ "$(clone_to "${REF_A:0:10}" | tail -1)" = "$REF_A" ]; }
-t  "LARANODE_REF=<branch> clones exactly that branch's tip (not the default branch)" clone_branch
+clone_sha()    { [ "$(clone_to "$REF_C" | tail -1)" = "$REF_C" ]; }
 t  "LARANODE_REF=<tag> clones the tag"                                              clone_tag
-t  "LARANODE_REF=<short sha> clones that commit"                                    clone_sha
-tf "LARANODE_REF naming nothing in the repo: refused"                               clone_to no-such-ref
+t  "LARANODE_REF=<full 40-hex commit id> clones exactly that commit"                clone_sha
+# r1 review: only a tag or a full commit id pins; a branch, HEAD or a short id is a moving or
+# ambiguous name, refused (agent pick, PR #11 r1 nit 4)
+tfm "LARANODE_REF=<branch> refused (a branch moves)"            "is not a tag"            clone_to feat
+tfm "LARANODE_REF=main (the default branch) refused"            "is not a tag"            clone_to main
+tfm "LARANODE_REF=HEAD refused (the remote's moving default)"   "is a moving reference"   clone_to HEAD
+tfm "LARANODE_REF=FETCH_HEAD refused"                           "is a moving reference"   clone_to FETCH_HEAD
+tfm "LARANODE_REF=origin/main refused"                          "is a moving reference"   clone_to origin/main
+tfm "LARANODE_REF=refs/heads/main refused"                      "is a moving reference"   clone_to refs/heads/main
+tfm "LARANODE_REF=<short sha> refused (ambiguous)"              "short commit id"         clone_to "${REF_A:0:10}"
+tfm "LARANODE_REF=<40-hex naming no commit> refused"            "is not a tag"            clone_to 0123456789abcdef0123456789abcdef01234567
+tfm "LARANODE_REF=<40-hex that is only a tag name> refused"   "is not a tag"            clone_to fedcba9876543210fedcba9876543210fedcba98
+tfm "LARANODE_REF naming nothing in the repo: refused"          "is not a tag"            clone_to no-such-ref
+# the clone must also be CLEAN: git status --porcelain empty (as laranode_ln)
+clone_dirty() { base; d=$(mktemp -d); PANEL_PATH="$d/panel"; LARANODE_REPO="$REF_REPO"; export LARANODE_REF=v1; _resolve_ref
+  git() { command git "$@"; local rc=$?; case " $* " in *" checkout "*) echo planted > "$PANEL_PATH/planted.php" ;; esac; return $rc; }
+  _clone_panel; }
+tfm "clone at the ref but with a file planted in the tree: refused (status --porcelain)" "is not clean" clone_dirty
+clone_clean_as_panel_user() { bash -c "source '$INSTALLER'; declare -f _checkout_clean" | grep -qE '_as_panel_user git -C "\$1" status --porcelain'; }
+t  "the clean-tree check runs git status --porcelain AS the panel user"             clone_clean_as_panel_user
 ref_none() { base; unset LARANODE_REF; LARANODE_PINNED_REF=""; _resolve_ref; }
 tfm "no LARANODE_REF and no pinned ref: refused (never the silent default branch)"  "No ref to install" ref_none
 ref_pinned() { base; unset LARANODE_REF; LARANODE_PINNED_REF=v1; _resolve_ref; expect REF "$PANEL_REF" v1; }
 t  "no LARANODE_REF: the installer's pinned ref is used"                            ref_pinned
-tfm "LARANODE_REF starting with '-' refused (option injection)"  "is not a plain branch" clone_to --upload-pack=x
-tfm "LARANODE_REF with '..' refused"                             "is not a plain branch" clone_to 'a..b'
-tfm "LARANODE_REF with a shell metacharacter refused"            "is not a plain branch" clone_to 'v1;id'
-tfm "LARANODE_REF with a space refused"                          "is not a plain branch" clone_to 'v1 x'
+tfm "LARANODE_REF starting with '-' refused (option injection)"  "is not a plain tag" clone_to --upload-pack=x
+tfm "LARANODE_REF with '..' refused"                             "is not a plain tag" clone_to 'a..b'
+tfm "LARANODE_REF with a shell metacharacter refused"            "is not a plain tag" clone_to 'v1;id'
+tfm "LARANODE_REF with a space refused"                          "is not a plain tag" clone_to 'v1 x'
 clone_mismatch() { base; d=$(mktemp -d); PANEL_PATH="$d/panel"; LARANODE_REPO="$REF_REPO"; export LARANODE_REF=v1; _resolve_ref
   git() { if [ "${3:-}" = checkout ] || [ "${5:-}" = checkout ]; then return 0; fi; command git "$@"; }   # checkout silently does nothing
   _clone_panel; }
@@ -1748,8 +1830,12 @@ clone_symlink() { base; d=$(mktemp -d); mkdir "$d/elsewhere"; ln -s "$d/elsewher
 tf "PANEL_PATH is a symlink: refused before the root git clone (r4 nit 4)"           clone_symlink
 verify_rerun() { base; d=$(mktemp -d); PANEL_PATH="$d/panel"; git clone -q "$REF_REPO" "$PANEL_PATH"; git -C "$PANEL_PATH" checkout -q --detach "$REF_C"
   export LARANODE_REF="$1"; _verify_checkout_ref; }
-t  "re-run: an existing checkout at LARANODE_REF is accepted"                        verify_rerun feat
+t  "re-run: an existing checkout at LARANODE_REF (full commit id) is accepted"       verify_rerun "$REF_C"
 tf "re-run: an existing checkout NOT at LARANODE_REF is refused"                     verify_rerun v1
+tfm "re-run: LARANODE_REF=<branch> refused even when HEAD is its tip"   "is not a tag" verify_rerun feat
+verify_rerun_dirty() { base; d=$(mktemp -d); PANEL_PATH="$d/panel"; git clone -q "$REF_REPO" "$PANEL_PATH"; git -C "$PANEL_PATH" checkout -q --detach "$REF_C"
+  echo planted > "$PANEL_PATH/planted.php"; export LARANODE_REF="$REF_C"; _verify_checkout_ref; }
+tfm "re-run: checkout at the ref but with local changes refused"        "is not clean" verify_rerun_dirty
 verify_rerun_unset() { base; d=$(mktemp -d); PANEL_PATH="$d/panel"; mkdir -p "$PANEL_PATH"; unset LARANODE_REF; _verify_checkout_ref; }
 t  "re-run without LARANODE_REF: the existing checkout is kept as it is"             verify_rerun_unset
 verify_as_panel_user() { bash -c "source '$INSTALLER'; declare -f _verify_checkout_ref" | grep -E '(^|[^_[:alnum:]])git ' | grep -vq '_as_panel_user' && return 1; return 0; }

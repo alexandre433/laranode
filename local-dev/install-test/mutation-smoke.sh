@@ -4,11 +4,18 @@
 # not a guard. Runs on Linux/CI in about a minute; never touches the real installer.
 #
 #   bash local-dev/install-test/mutation-smoke.sh
+#   SHARD=2/2 bash local-dev/install-test/mutation-smoke.sh   # every 2nd mutation from #2 (CI runs 2 shards)
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="${HERE}/../../laranode-scripts/bin/laranode-installer.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+SHARD="${SHARD:-}"   # k/n (CI matrix); empty = all
+SHARD_K=1; SHARD_N=1
+if [ -n "$SHARD" ]; then
+  [[ $SHARD =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] && [ "${BASH_REMATCH[1]}" -le "${BASH_REMATCH[2]}" ] \n    || { echo "SHARD must be k/n with 1 <= k <= n, got '$SHARD'" >&2; exit 2; }
+  SHARD_K=${BASH_REMATCH[1]}; SHARD_N=${BASH_REMATCH[2]}
+fi
 
 # name | sed expression applied to a copy of the installer
 MUTATIONS=(
@@ -120,7 +127,19 @@ MUTATIONS=(
   'clone through a symlinked PANEL_PATH|s#\[ ! -L "\$PANEL_PATH" \] || die#true || die#'
   'clone runs as root again|s#_as_panel_user git clone --quiet#git clone --quiet#'
   'clone HEAD not verified against the ref|s#|| die "checkout is not at#|| true "#'
-  'existing checkout not verified against LARANODE_REF|s#|| die "the existing checkout at#|| true "#'
+  'existing checkout not verified against LARANODE_REF|s#|| die "the existing checkout at \${PANEL_PATH} is not at#|| true "#'
+  # PR #11 r1: only a tag or a full commit id; the tree must be clean
+  'branch accepted as LARANODE_REF (tag-only lookup dropped)|s#rev-parse -q --verify "refs/tags/\${r}^{commit}"#rev-parse -q --verify "${r}^{commit}"#'
+  'short commit id accepted|s#die "LARANODE_REF .\${r}. is a short commit id#true "#'
+  'HEAD / moving refs accepted|s#die "LARANODE_REF .\${r}. is a moving reference#true "#'
+  'clone tree not checked clean|s#|| die "the checkout at \${PANEL_PATH} is not clean#|| true "#'
+  're-run tree not checked clean|s#|| die "the existing checkout at \${PANEL_PATH} is not clean#|| true "#'
+  # PR #11 r1: upgrade from a www-data install moves the tenant groups to the web user
+  'upgrade: updated sync not run again (old sync renders www-data grants)|s#^  if \[ -n "\$before" \] \&\& \[ "$(sha256sum < "$inst")" != "\$before" \]; then#  if false; then#'
+  'dedicated web user: www-data drop-in left in place|s#if grep -qE .\^\[\[:space:\]\]\*www-data\[\[:space:\]\]. "\$drop"; then#if false; then#'
+  'tenant groups never migrated|s#^  _migrate_tenant_groups$#  :#'
+  'www-data kept in tenant groups|s#gpasswd -d www-data "\$g" >/dev/null || die#true || die#'
+  'non-tenant group migrated (uid check dropped)|s#\[ "\$uid" -ge 1000 \] \&\& \[ "\$home" = "/home/\$g" \]#true#'
   # PR B G3: production env
   'APP_ENV not production|s#^  env_set APP_ENV production#  env_set APP_ENV local#'
   'APP_DEBUG left on|s#^  env_set APP_DEBUG false#  env_set APP_DEBUG true#'
@@ -132,8 +151,11 @@ MUTATIONS=(
 
 fail=0
 i=0
+ran=0
 for m in "${MUTATIONS[@]}"; do
   i=$((i + 1))
+  [ $(( (i - 1) % SHARD_N )) -eq $(( SHARD_K - 1 )) ] || continue
+  ran=$((ran + 1))
   name="${m%%|*}"; expr="${m#*|}"
   cp "$SRC" "$WORK/mut$i.sh"
   sed -i "$expr" "$WORK/mut$i.sh"
@@ -146,5 +168,7 @@ for m in "${MUTATIONS[@]}"; do
     echo "mutation $i caught ($(grep -c 'FAIL:' "$WORK/out$i.log") failing tests): $name"
   fi
 done
+echo "== mutations run: ${ran} of ${#MUTATIONS[@]} (shard ${SHARD_K}/${SHARD_N}) =="
+[ "$ran" -gt 0 ] || { echo "no mutation selected (SHARD='$SHARD')"; exit 2; }
 [ "$fail" -eq 0 ] && echo "ALL MUTATIONS CAUGHT" || echo "MUTATION SMOKE FAILED"
 exit "$fail"

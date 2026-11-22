@@ -11,7 +11,8 @@ set -euo pipefail
 if [ "${LARANODE_INSTALLER_TEST:-0}" != 1 ]; then
   unset APT_ALLOW_SERVICE_START LARANODE_ROLLBACK_DIR LARANODE_INSTALLER_PID LARANODE_INSTALLER_START \
         LARANODE_POLICY_RC_D LARANODE_APACHE_DIR LARANODE_APACHE_MODS_STATE LARANODE_OS_RELEASE_FILE \
-        LARANODE_PVE_DIR LARANODE_CLP_DIR LARANODE_CRON_DIR LARANODE_PROC_NET_DIR LARANODE_PROC_DIR         LARANODE_HOST_CONF LARANODE_PHP_POOL_DIR LARANODE_SUDOERS_DIR LARANODE_STASH_PARENT
+        LARANODE_PVE_DIR LARANODE_CLP_DIR LARANODE_CRON_DIR LARANODE_PROC_NET_DIR LARANODE_PROC_DIR \
+        LARANODE_HOST_CONF LARANODE_PHP_POOL_DIR LARANODE_SUDOERS_DIR LARANODE_STASH_PARENT
 fi
 
 export DEBIAN_FRONTEND=noninteractive
@@ -673,36 +674,52 @@ phase_packages() {
 # ---- G1: the clone is pinned to a ref -----------------------------------------------------
 # _resolve_ref — PANEL_REF = LARANODE_REF, else the installer's pinned ref. A fresh clone with
 # neither is refused: the repository's default branch moves, and "whatever is on main today"
-# is not a reviewed install. Only a plain ref name is accepted (it becomes a git argument).
+# is not a reviewed install. Only a release TAG or a FULL 40-character commit id pins an install:
+# a branch, HEAD/FETCH_HEAD, a remote ref or a short id moves or is ambiguous, and is refused.
+# Only a plain name is accepted (it becomes a git argument).
 _resolve_ref() {
   local r="${LARANODE_REF:-${LARANODE_PINNED_REF:-}}"
-  [ -n "$r" ] || die "No ref to install: set LARANODE_REF to the branch, tag or commit to install (e.g. LARANODE_REF=development)."
+  [ -n "$r" ] || die "No ref to install: set LARANODE_REF to the release tag or the full 40-character commit id to install (e.g. LARANODE_REF=v1.2.0)."
   [[ "$r" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]] && [[ "$r" != *..* ]] \
-    || die "LARANODE_REF '${r}' is not a plain branch, tag or commit name"
+    || die "LARANODE_REF '${r}' is not a plain tag or commit name"
+  case "$r" in
+    HEAD|FETCH_HEAD|ORIG_HEAD|MERGE_HEAD|*_HEAD|refs/*|origin/*)
+      die "LARANODE_REF '${r}' is a moving reference: pin a release tag or a full commit id" ;;
+  esac
+  if [[ "$r" =~ ^[0-9a-f]{7,39}$ ]]; then
+    die "LARANODE_REF '${r}' is a short commit id: give the full 40-character id"
+  fi
   PANEL_REF="$r"
 }
 
-# _ref_commit DIR REF — the commit REF names in the checkout DIR (tag, then origin branch, then
-# a commit id), read as the panel account. Empty when REF names nothing.
+# _ref_commit DIR REF — the commit REF names in the checkout DIR, read as the panel account: a
+# full 40-hex id must name exactly that commit, anything else only a TAG (never a branch, which
+# moves). Empty when REF names neither.
 _ref_commit() {
   local d="$1" r="$2" c=""
-  c=$(_as_panel_user git -C "$d" rev-parse -q --verify "refs/tags/${r}^{commit}" 2>/dev/null) \
-    || c=$(_as_panel_user git -C "$d" rev-parse -q --verify "refs/remotes/origin/${r}^{commit}" 2>/dev/null) \
-    || c=$(_as_panel_user git -C "$d" rev-parse -q --verify "${r}^{commit}" 2>/dev/null) || c=""
+  if [[ "$r" =~ ^[0-9a-f]{40}$ ]]; then
+    c=$(_as_panel_user git -C "$d" rev-parse -q --verify "${r}^{commit}" 2>/dev/null) || c=""
+    [ "$c" = "$r" ] || c=""
+  else
+    c=$(_as_panel_user git -C "$d" rev-parse -q --verify "refs/tags/${r}^{commit}" 2>/dev/null) || c=""
+  fi
   printf '%s' "$c"
 }
 
-# _head_is_ref DIR REF WANT — HEAD of DIR is WANT; a commit-id REF must also be a prefix of it
+# _head_is_ref DIR WANT — HEAD of DIR is exactly the commit WANT
 _head_is_ref() {
-  local d="$1" r="$2" want="$3" head=""
+  local d="$1" want="$2" head=""
   head=$(_as_panel_user git -C "$d" rev-parse -q --verify HEAD 2>/dev/null) || head=""
-  { [ -n "$want" ] && [ "$head" = "$want" ]; } || return 1
-  if [[ "$r" =~ ^[0-9a-f]{7,40}$ ]] \
-     && ! _as_panel_user git -C "$d" rev-parse -q --verify "refs/remotes/origin/${r}" >/dev/null 2>&1 \
-     && ! _as_panel_user git -C "$d" rev-parse -q --verify "refs/tags/${r}" >/dev/null 2>&1; then
-    [[ "$head" == "$r"* ]] || return 1
-  fi
-  return 0
+  [ -n "$want" ] && [ "$head" = "$want" ]
+}
+
+# _checkout_clean DIR — no modified, staged or untracked file in DIR (as the panel account). Within
+# the trust model laranode_ln owns the tree and could change it after this check anyway; the check
+# catches what lands BEFORE the install (a stray edit, a planted file), not a hostile panel user.
+_checkout_clean() {
+  local s
+  s=$(_as_panel_user git -C "$1" status --porcelain 2>/dev/null) || return 1
+  [ -z "$s" ]
 }
 
 # _clone_panel — clone LARANODE_REPO into PANEL_PATH at PANEL_REF and prove it: HEAD after the
@@ -714,11 +731,13 @@ _clone_panel() {
   local want=""
   _as_panel_user git clone --quiet -- "${LARANODE_REPO}" "${PANEL_PATH}" || die "git clone of ${LARANODE_REPO} failed"
   want=$(_ref_commit "$PANEL_PATH" "$PANEL_REF")
-  [ -n "$want" ] || die "LARANODE_REF '${PANEL_REF}' names no branch, tag or commit in ${LARANODE_REPO}"
+  [ -n "$want" ] || die "LARANODE_REF '${PANEL_REF}' is not a tag (or a full commit id) in ${LARANODE_REPO}: a branch moves, pin a tag or a full commit id"
   _as_panel_user git -c advice.detachedHead=false -C "$PANEL_PATH" checkout -q --detach "$want" \
     || die "git checkout of ${PANEL_REF} failed"
-  _head_is_ref "$PANEL_PATH" "$PANEL_REF" "$want" \
+  _head_is_ref "$PANEL_PATH" "$want" \
     || die "checkout is not at ${PANEL_REF} (${want}) after the clone: refusing to install it"
+  _checkout_clean "$PANEL_PATH" \
+    || die "the checkout at ${PANEL_PATH} is not clean (modified or untracked files) after the clone: refusing to use it"
   log "Panel checked out at ${PANEL_REF} (${want})"
 }
 
@@ -730,8 +749,11 @@ _verify_checkout_ref() {
   [ -d "${PANEL_PATH}/.git" ] || die "LARANODE_REF is set but ${PANEL_PATH} has no .git: cannot verify the checkout"
   local want=""
   want=$(_ref_commit "$PANEL_PATH" "$PANEL_REF")
-  _head_is_ref "$PANEL_PATH" "$PANEL_REF" "$want" \
+  [ -n "$want" ] || die "LARANODE_REF '${PANEL_REF}' is not a tag (or a full commit id) in ${PANEL_PATH}: a branch moves, pin a tag or a full commit id"
+  _head_is_ref "$PANEL_PATH" "$want" \
     || die "the existing checkout at ${PANEL_PATH} is not at LARANODE_REF '${PANEL_REF}': check it out as laranode_ln or unset LARANODE_REF"
+  _checkout_clean "$PANEL_PATH" \
+    || die "the existing checkout at ${PANEL_PATH} is not clean (modified or untracked files): commit, stash or remove them as laranode_ln, or unset LARANODE_REF"
 }
 
 # ---- G2/G7: the account the panel web stack runs as -----------------------------------------
@@ -773,6 +795,28 @@ _ensure_web_user() {
   if id -nG www-data 2>/dev/null | tr ' ' '\n' | grep -qx laranode_ln; then
     gpasswd -d www-data laranode_ln >/dev/null || die "could not remove www-data from group laranode_ln"
   fi
+  _migrate_tenant_groups
+}
+
+# _migrate_tenant_groups — an install that ran as www-data (before the dedicated web user) put
+# www-data in every tenant's {user}_ln group (laranode-user-manager.sh; homes are 770). On the
+# switch to WEB_USER, WEB_USER joins each of them (the tenant sites keep working) and www-data
+# (pveproxy's user) leaves. Only groups that are a laranode tenant: name {user}_ln, a user of the
+# same name with uid >= 1000 and home /home/{name}. laranode_ln (the panel group) is handled above.
+_migrate_tenant_groups() {
+  [ "$WEB_USER" != www-data ] || return 0
+  local g members entry uid home
+  while IFS=: read -r g _ _ members; do
+    { [[ "$g" =~ ^[a-z_][a-z0-9_-]*_ln$ ]] && [ "${#g}" -le 32 ]; } || continue
+    [ "$g" != laranode_ln ] || continue
+    entry=$(getent passwd "$g") || continue
+    IFS=: read -r _ _ uid _ _ home _ <<<"$entry"
+    { [[ "$uid" =~ ^[0-9]+$ ]] && [ "$uid" -ge 1000 ] && [ "$home" = "/home/$g" ]; } || continue
+    usermod -aG "$g" "$WEB_USER" || die "could not add ${WEB_USER} to tenant group ${g}"
+    if [[ ",${members}," == *",www-data,"* ]]; then
+      gpasswd -d www-data "$g" >/dev/null || die "could not remove www-data from tenant group ${g}"
+    fi
+  done < <(getent group)
 }
 
 # _write_host_conf — the root-owned record of the above, read by the sync script (it renders the
@@ -2031,15 +2075,26 @@ _stash_sync_script() {
 }
 
 _install_privileged_scripts() {
-  local sync="${LN_LIB_DEST}/bin/laranode-sync-scripts.sh" rc=0
+  local inst="${LN_LIB_DEST}/bin/laranode-sync-scripts.sh" rc=0 before=""   # inst: the root-owned installed copy
+  local sync="$inst"
   mkdir -p /usr/local/lib && chown root:root /usr/local/lib && chmod u=rwx,go=rx /usr/local/lib
   if [ ! -f "$sync" ]; then
     [ -n "$LN_SYNC_STASH" ] || _stash_sync_script
     sync="${LN_SYNC_STASH}/sync.sh"
+  else
+    before=$(sha256sum < "$inst")
   fi
   bash "$sync" "${PANEL_PATH}" || rc=$?
   if [ -n "$LN_SYNC_STASH" ]; then rm -rf "$LN_SYNC_STASH"; LN_SYNC_STASH=""; fi
   [ "$rc" -eq 0 ] || die "could not install the privileged scripts into ${LN_LIB_DEST}"
+  # An upgrade ran the PREVIOUSLY installed sync, which may predate what this installer set up
+  # (an old one renders the sudoers grants for www-data, not host.conf's web user). When that run
+  # replaced the installed sync, run the new ROOT-OWNED copy once more: the same file the next
+  # run would use, never the checkout's.
+  if [ -n "$before" ] && [ "$(sha256sum < "$inst")" != "$before" ]; then
+    log "laranode-sync-scripts.sh was updated: running the new installed copy once"
+    bash "$sync" "${PANEL_PATH}" || die "could not install the privileged scripts into ${LN_LIB_DEST} (updated sync)"   # sync = inst here
+  fi
 }
 
 # _install_sudoers — check what the sync installed. laranode-ufw only with UFW_ENABLED=1: where
@@ -2050,6 +2105,17 @@ _install_sudoers() {
   local drop sd; sd=$(_sudoers_dir)
   local -a need=(laranode-panel laranode-cron laranode-runtimes)
   if [ "${UFW_ENABLED:-1}" = 1 ]; then need+=(laranode-ufw); else rm -f "${sd}/laranode-ufw"; fi
+  # with the dedicated web user no laranode drop-in may still grant www-data (pveproxy's user):
+  # fail closed, the grant is removed before the install stops
+  if [ "${WEB_USER:-www-data}" != www-data ]; then
+    for drop in "${sd}"/laranode-*; do
+      [ -f "$drop" ] || continue
+      if grep -qE '^[[:space:]]*www-data[[:space:]]' "$drop"; then
+        rm -f -- "$drop"
+        die "sudoers drop-in ${drop##*/} still granted www-data, not ${WEB_USER}: removed it; run the installer again"
+      fi
+    done
+  fi
   for drop in "${need[@]}"; do
     [ -f "${sd}/${drop}" ] || die "sudoers drop-in ${drop} was not installed"
     visudo -c -f "${sd}/${drop}" >/dev/null || die "sudoers drop-in ${drop} failed syntax check"

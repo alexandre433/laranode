@@ -23,14 +23,22 @@ set -euo pipefail
 umask 022
 export LC_ALL=C PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-DEST=${LARANODE_LIB_DEST:-/usr/local/lib/laranode}
-SUDOERS_DIR=${LARANODE_SUDOERS_DIR:-/etc/sudoers.d}
+# Run as root, the environment must not move a trusted path: the overrides below are test
+# seams, honoured only with LARANODE_INSTALLER_TEST=1 (the harnesses), else the fixed paths.
+DEST=/usr/local/lib/laranode
+SUDOERS_DIR=/etc/sudoers.d
+HOST_CONF=/etc/laranode/host.conf
+PVE_DIR=/etc/pve
+if [ "${LARANODE_INSTALLER_TEST:-0}" = 1 ]; then
+  DEST=${LARANODE_LIB_DEST:-$DEST}
+  SUDOERS_DIR=${LARANODE_SUDOERS_DIR:-$SUDOERS_DIR}
+  HOST_CONF=${LARANODE_HOST_CONF:-$HOST_CONF}
+  PVE_DIR=${LARANODE_PVE_DIR:-$PVE_DIR}
+fi
 PANEL=${1:-${PANEL_PATH:-/home/laranode_ln/panel}}
 SRC="$PANEL/laranode-scripts"
 BASE_DROPINS="laranode-panel laranode-cron laranode-runtimes laranode-ufw"
 PANEL_USER=laranode_ln
-HOST_CONF=${LARANODE_HOST_CONF:-/etc/laranode/host.conf}
-PVE_DIR=${LARANODE_PVE_DIR:-/etc/pve}
 
 die() { echo "laranode-sync-scripts: $*" >&2; exit 1; }
 

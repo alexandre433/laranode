@@ -25,7 +25,7 @@ fresh() {   # fresh <name>: a private copy of the scripts tree + empty dest/sudo
     # the repo drop-ins name /usr/local/lib/laranode; point them at this case's dest
     sed -i "s|/usr/local/lib/laranode|$D|g" "$T"/panel/laranode-scripts/etc/sudoers.d/* "$T"/panel/laranode-scripts/bin/laranode-postgres-sudoers
 }
-run_sync() { LARANODE_LIB_DEST="$D" LARANODE_SUDOERS_DIR="$T/sudoers.d" bash "$SYNC" "$T/panel" 2>&1; }
+run_sync() { LARANODE_INSTALLER_TEST=1 LARANODE_LIB_DEST="$D" LARANODE_SUDOERS_DIR="$T/sudoers.d" bash "$SYNC" "$T/panel" 2>&1; }
 
 echo "== sync-scripts: clean tree publishes =="
 fresh clean
@@ -182,7 +182,7 @@ run_sync_hc() {
     [ -n "$HC_OWNER" ] && chown "$HC_OWNER" "$hc"
     [ -n "$HC_LINK" ] && { mv "$hc" "$hc.real"; ln -s "$hc.real" "$hc"; }
     [ "$pve" = pve ] && { pd="$T/pve"; mkdir -p "$pd"; }
-    LARANODE_HOST_CONF="$hc" LARANODE_PVE_DIR="$pd" LARANODE_LIB_DEST="$D" LARANODE_SUDOERS_DIR="$T/sudoers.d" \
+    LARANODE_INSTALLER_TEST=1 LARANODE_HOST_CONF="$hc" LARANODE_PVE_DIR="$pd" LARANODE_LIB_DEST="$D" LARANODE_SUDOERS_DIR="$T/sudoers.d" \
         bash "$SYNC" "$T/panel" 2>&1
 }
 HC_MODE=''; HC_OWNER=''; HC_LINK=''
@@ -307,6 +307,25 @@ race_case() {
     if [ "$leaks" -gt 0 ]; then bad "RACE: root copied root-only files through a swapped parent directory ($leaks of 60 syncs leaked)"
     else ok "race: 60 syncs against a swapping templates/ parent, no root-only byte copied ($published published; refusals: $(printf '%s' "$reasons" | tr '|' '\n' | sort | uniq -c | tr '\n' ';'))"; fi
 }
+# ---- PR #11 r1 nit: run as root, the sync must not let its environment move a trusted path ---
+# Outside test mode LARANODE_HOST_CONF / LARANODE_PVE_DIR / LARANODE_LIB_DEST / LARANODE_SUDOERS_DIR
+# are ignored. Here they point at a fake Proxmox (/etc/pve dir, no host.conf: honoured = refused)
+# and at private dest/sudoers dirs (honoured = written there); ignored = a normal sync of the real
+# paths (this host: no /etc/pve, so www-data, as the installer set it up).
+env_case() {
+    T="$W/envcase"; mkdir -p "$T/panel" "$T/pve"; chmod 755 "$T"
+    cp -a "$PANEL/laranode-scripts" "$T/panel/laranode-scripts"
+    local out rc
+    out=$(env -u LARANODE_INSTALLER_TEST LARANODE_HOST_CONF="$T/no-host.conf" LARANODE_PVE_DIR="$T/pve" \
+          LARANODE_LIB_DEST="$T/evil-dest" LARANODE_SUDOERS_DIR="$T/evil-sudoers" bash "$SYNC" "$T/panel" 2>&1); rc=$?
+    n=$((n + 1))
+    if [ -e "$T/evil-dest" ] || [ -e "$T/evil-sudoers" ]; then bad "outside test mode the sync wrote to an env-chosen path"
+    elif [ "$rc" -ne 0 ]; then bad "outside test mode the sync honoured LARANODE_PVE_DIR/LARANODE_HOST_CONF (rc=$rc): ${out##*$NL}"
+    else ok "outside test mode LARANODE_HOST_CONF / PVE_DIR / LIB_DEST / SUDOERS_DIR are ignored"; fi
+}
+echo "== sync-scripts: env path overrides ignored outside test mode =="
+env_case
+
 echo "== sync-scripts: a parent directory swapped during the run leaks nothing =="
 race_case
 
