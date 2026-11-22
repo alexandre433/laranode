@@ -121,4 +121,14 @@ return [
     // Pre-existing services shown on the Power page as "external, never managed".
     'sleep_external_candidates' => ['mysql', 'mariadb', 'postgresql', 'redis-server', 'nginx'],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Firewall page
+    |--------------------------------------------------------------------------
+    | Off on a Proxmox host (pve-firewall owns it): the installer writes
+    | LARANODE_FIREWALL_ENABLED=false there, unless LARANODE_PVE_UFW=1. The
+    | real gate is the laranode-ufw sudoers drop-in, which is then not installed.
+    */
+    'firewall_enabled' => (bool) env('LARANODE_FIREWALL_ENABLED', true),
+
 ];

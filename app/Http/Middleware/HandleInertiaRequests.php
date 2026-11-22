@@ -39,6 +39,9 @@ class HandleInertiaRequests extends Middleware
                 'success' => session('success'),
                 'error' => session('error'),
             ],
+            'features' => [
+                'firewall' => (bool) config('laranode.firewall_enabled', true),
+            ],
             'notifications' => [
                 'unreadCount' => $request->user()?->unreadNotifications()->count() ?? 0,
             ],

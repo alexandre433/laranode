@@ -9,7 +9,7 @@ import { IoLockClosedOutline } from "react-icons/io5";
 
 const SidebarNavi = ({ isCollapsed, setIsCollapsed }) => {
 
-    const { auth } = usePage().props;
+    const { auth, features } = usePage().props;
 
     const labelClass = `ml-2 text-sm tracking-wide truncate${isCollapsed ? ' hidden' : ''}`;
 
@@ -71,7 +71,7 @@ const SidebarNavi = ({ isCollapsed, setIsCollapsed }) => {
                     </Link>
                 </li>
 
-                {auth.user.role == 'admin' && (
+                {auth.user.role == 'admin' && features?.firewall !== false && (
                     <li>
                         <Link
                             href={route('firewall.index')}

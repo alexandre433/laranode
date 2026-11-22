@@ -6,6 +6,7 @@ use App\Http\Controllers\BackupController;
 use App\Http\Controllers\CronJobsController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DatabasesController;
+use App\Http\Controllers\DbServiceController;
 use App\Http\Controllers\FilemanagerController;
 use App\Http\Controllers\FirewallController;
 use App\Http\Controllers\NotificationPreferencesController;
@@ -13,9 +14,9 @@ use App\Http\Controllers\NotificationsController;
 use App\Http\Controllers\PHPManagerController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\StatsHistoryController;
-use App\Http\Controllers\DbServiceController;
 use App\Http\Controllers\WebsiteController;
 use App\Http\Middleware\AdminMiddleware;
+use App\Http\Middleware\FirewallEnabledMiddleware;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', function () {
@@ -69,7 +70,7 @@ Route::middleware(['auth'])->group(function () {
 });
 
 // Firewall [Admin]
-Route::middleware(['auth', AdminMiddleware::class])->group(function () {
+Route::middleware(['auth', AdminMiddleware::class, FirewallEnabledMiddleware::class])->group(function () {
     Route::get('/admin/firewall', [FirewallController::class, 'index'])->name('firewall.index');
     Route::post('/admin/firewall/toggle', [FirewallController::class, 'toggle'])->name('firewall.toggle');
     Route::post('/admin/firewall/safe-setup', [FirewallController::class, 'safeSetup'])->name('firewall.safe-setup');
