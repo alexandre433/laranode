@@ -1,9 +1,30 @@
 # Privileged scripts: trust model and layout
 
-The panel runs as `www-data`. Every privileged operation is a root script that `www-data`
-may start through `sudo`. A compromised web process controls every argument it passes, so
-the scripts, the directories they live in and every value they accept are part of the
-security boundary.
+The panel runs as the web user: `www-data`, or the dedicated system account `laranode_web` on a
+Proxmox host (there `www-data` is pveproxy's user and group `www-data` reads `/etc/pve/priv`).
+Every privileged operation is a root script that the web user may start through `sudo`. A
+compromised web process controls every argument it passes, so the scripts, the directories they
+live in and every value they accept are part of the security boundary.
+
+## The web user (`/etc/laranode/host.conf`)
+
+The installer records `web_user=` and `ufw=` in the root-owned `/etc/laranode/host.conf` (0644,
+written on every host; on a plain host it says `web_user=www-data`, `ufw=1`, i.e. what was always
+true). On Proxmox: the panel's own Apache runs `User/Group laranode_web` (conf `laranode-web-user`),
+the panel vhost hands PHP to its own pool `laranode-panel` (`/run/php/laranode-panel.sock`, user
+`laranode_web`), `laranode_web` (uid 1-999, never in group `www-data`) joins `laranode_ln`, and
+`www-data` is taken out of it. A Proxmox host with a pre-existing Apache or php8.4-fpm is refused
+(their `User` / pools are their owner's). `ufw=0` on Proxmox unless `LARANODE_PVE_UFW=1`: the
+`laranode-ufw` drop-in is not installed (removed if present) and the Firewall page is hidden
+(`LARANODE_FIREWALL_ENABLED=false`; UX only, the drop-in is the gate).
+
+Readers trust the file only as a regular, root-owned, not group/world-writable file with
+allowlisted values (`web_user=www-data|laranode_web`, `ufw=0|1`); anything else refuses:
+* `laranode-sync-scripts.sh` renders the allowlisted, staged drop-ins for the web user (a fixed
+  substitution of the two fixed grant prefixes, re-checked with `visudo`; no line may still name
+  `www-data`). On a Proxmox host it refuses to publish grants for `www-data`, with or without the file.
+* `lib/validate.sh` (every sudo-able script) sets `LN_WEB_USER` from it (fixed path, no
+  environment override) and dies on a Proxmox host whose web user would be `www-data`.
 
 ## Layout
 
@@ -127,8 +148,10 @@ application-profile name). Options (`-…`) never pass through.
   installer file itself, when started from the checkout, is the admin's choice (run it from a fresh
   download); the other templates (site vhost, php-fpm pool) still pass through the sync without a
   line allowlist (follow-up); a changed sync script takes effect one run later (a run uses the
-  installed copy). Pin the clone ref (follow-up).
-* On Proxmox hosts `www-data` is still the web user; a dedicated panel web user is a follow-up.
+  installed copy). The clone ref is pinned: `LARANODE_REF` (branch, tag or commit) is required for a
+  fresh clone, the clone runs as `laranode_ln`, and HEAD is verified (`git rev-parse`) against the
+  ref; a release process that sets a default pinned ref is a follow-up.
+* A Proxmox host with a pre-existing Apache/php8.4-fpm cannot get the dedicated web user: refused.
 * The queue worker runs as `laranode_ln`, but sudoers grants `www-data` only: a queued job that
   shells out through sudo would fail. No such job exists today.
 * `create-directory.sh` runs `chown -R -h` as root over a tenant tree; hard-link tricks are blocked
