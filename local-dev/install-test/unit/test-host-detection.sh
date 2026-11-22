@@ -1662,12 +1662,17 @@ t  "plain host (www-data): no tenant group is touched"                          
 # phase_webserver right before _apache_web_user (the User snippet) and the Apache reload.
 mtg_not_early() { ! bash -c "source '$INSTALLER'; declare -f _ensure_web_user phase_fetch_panel" | grep -q '_migrate_tenant_groups'; }
 t  "tenant groups are NOT migrated in _ensure_web_user / phase_fetch_panel (before the ref check)" mtg_not_early
-mtg_in_webserver() { local body a b
+# PR #12 r1: not even before a2ensite / apachectl configtest (a die there leaves Apache on www-data
+# with no rollback on an Apache we own): after the config test, right before the reload/restart.
+mtg_in_webserver() { local body a b c d
   body=$(bash -c "source '$INSTALLER'; declare -f phase_webserver")
   a=$(printf '%s\n' "$body" | grep -n '^ *_migrate_tenant_groups;*$' | head -1 | cut -d: -f1)
   b=$(printf '%s\n' "$body" | grep -n '^ *_apache_web_user;*$' | head -1 | cut -d: -f1)
-  [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ] && [ $((b - a)) -le 3 ]; }
-t  "phase_webserver migrates the tenant groups right before the Apache user switch" mtg_in_webserver
+  c=$(printf '%s\n' "$body" | grep -n 'apachectl configtest' | head -1 | cut -d: -f1)
+  d=$(printf '%s\n' "$body" | grep -n '_refresh_service apache2' | head -1 | cut -d: -f1)
+  [ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ -n "$d" ] && [ "$b" -lt "$c" ] && [ "$c" -lt "$a" ] && [ "$a" -lt "$d" ] \
+    && [ $((d - a)) -le 6 ]; }
+t  "phase_webserver migrates the tenant groups after the Apache config test, right before the reload" mtg_in_webserver
 mtg_after_ref() { local body a b
   body=$(bash -c "source '$INSTALLER'; declare -f main")
   a=$(printf '%s\n' "$body" | grep -n '^ *phase_fetch_panel;*$' | head -1 | cut -d: -f1)
