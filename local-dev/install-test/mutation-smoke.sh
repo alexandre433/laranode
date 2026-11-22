@@ -13,7 +13,8 @@ trap 'rm -rf "$WORK"' EXIT
 SHARD="${SHARD:-}"   # k/n (CI matrix); empty = all
 SHARD_K=1; SHARD_N=1
 if [ -n "$SHARD" ]; then
-  [[ $SHARD =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] && [ "${BASH_REMATCH[1]}" -le "${BASH_REMATCH[2]}" ] \n    || { echo "SHARD must be k/n with 1 <= k <= n, got '$SHARD'" >&2; exit 2; }
+  [[ $SHARD =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] && [ "${BASH_REMATCH[1]}" -le "${BASH_REMATCH[2]}" ] \
+    || { echo "SHARD must be k/n with 1 <= k <= n, got '$SHARD'" >&2; exit 2; }
   SHARD_K=${BASH_REMATCH[1]}; SHARD_N=${BASH_REMATCH[2]}
 fi
 
