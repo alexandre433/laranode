@@ -110,7 +110,7 @@ mut bin/laranode-sleep.sh 'sleep: caller PATH trusted' \
 # --- r2: sync-scripts sudoers allowlist (each bypass of review r1 + the new parse rules) ---
 S=bin/laranode-sync-scripts.sh
 mut $S 'sync: any line not matching a grant shape passes (NOPASSWD: ALL)' \
-    $'    done\n    return 1\n}\nsudoers_file_ok()' $'    done\n    return 0\n}\nsudoers_file_ok()'
+    $'    done\n    return 1\n}\n# render_for_web_user' $'    done\n    return 0\n}\n# render_for_web_user'
 mut $S 'sync: comma list after the script allowed' \
     '[[ $rest =~ ^laranode-[a-z0-9-]+\.sh(\ \"\")?$ ]] && return 0' '[[ $rest =~ ^laranode- ]] && return 0'
 mut $S 'sync: Defaults line may carry anything after the script' \
