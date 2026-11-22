@@ -48,7 +48,7 @@ did not install.
 
 ## Safety model
 
-1. **One privileged script**: `laranode-scripts/bin/laranode-sleep.sh <key> <action> [idle]`, the only
+1. **One privileged script**: `/usr/local/lib/laranode/bin/laranode-sleep.sh <key> <action> [idle]` (the root-owned copy, see `docs/security-sudo.md`), the only
    sleep-related entry in `/etc/sudoers.d/laranode-sleep`. `key` is one of `reverb|queue|hostdb|fpm`,
    `action` one of `enable|disable|wake|sleep`, `idle` an integer 1..1440. No unit names, no free-form shell.
 2. **Root-owned registry** `/etc/laranode/managed.d/<key>.conf`, written by

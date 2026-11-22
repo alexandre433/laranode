@@ -1,37 +1,26 @@
 #!/bin/bash
+set -euo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # before ANY command runs: dirname below must not come from the caller's PATH
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
+ln_need_root
+LN_ARGC=$#
 
 # Uninstall a PHP-FPM version
-# Usage: ./laranode-php-uninstall.sh {version}
-# Example: ./laranode-php-uninstall.sh 8.4
-
-if [ $# -lt 1 ]; then
-  echo "Usage: $0 {php version: example 8.4}"
-  exit 1
-fi
-
-PHP_VERSION=$1
+# Usage: laranode-php-uninstall.sh {version}      Example: laranode-php-uninstall.sh 8.4
+ln_argc 1 1 "$0 {php version: example 8.4}"
+ln_phpver "$1" PHP_VERSION
+# the panel itself (artisan, queue worker, scheduler, Reverb) runs on php8.4: removing it would
+# take the panel down and could not be undone from the panel
+[ "$PHP_VERSION" != 8.4 ] || ln_die "php8.4 runs the panel and cannot be uninstalled from it"
 
 echo "Uninstalling PHP $PHP_VERSION-FPM..."
 
-# Stop the service
-systemctl stop php${PHP_VERSION}-fpm
+systemctl stop "php${PHP_VERSION}-fpm"
+systemctl disable "php${PHP_VERSION}-fpm"
 
-# Disable the service
-systemctl disable php${PHP_VERSION}-fpm
-
-# Remove PHP packages
-apt-get remove -y php${PHP_VERSION}-* 
-
-# Purge configuration files
-apt-get purge -y php${PHP_VERSION}-*
-
-# Clean up
+# Remove PHP packages. The glob is expanded by apt (quoted here), never by the shell.
+apt-get remove -y "php${PHP_VERSION}-*"
+apt-get purge -y "php${PHP_VERSION}-*"
 apt-get autoremove -y
 
-if [ $? -eq 0 ]; then
-    echo "PHP $PHP_VERSION uninstalled successfully"
-    exit 0
-else
-    echo "Failed to uninstall PHP $PHP_VERSION"
-    exit 1
-fi
+echo "PHP $PHP_VERSION uninstalled successfully"

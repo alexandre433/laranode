@@ -1,16 +1,20 @@
 #!/bin/bash
 set -euo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # before ANY command runs: dirname below must not come from the caller's PATH
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
+ln_need_root
+LN_ARGC=$#
 
-# Usage: laranode-restore-db.sh <cnfFile> <dumpFile> <dbName>
-CNF_FILE="$1"
-DUMP_FILE="$2"
-DB_NAME="$3"
+# Usage: laranode-restore-db.sh <cnfFile> <dumpFile> <dbName> <dbUser>
+# The dump is replayed AS www-data with the database's OWN account (never the server's
+# root): a mysql client executes `\!` / `system` lines from its input, and a dump is
+# attacker-supplied text.
+ln_argc 4 4 "$0 <cnfFile> <dumpFile> <dbName> <dbUser>"
+ln_tmpfile "$1" CNF_FILE cnf
+ln_tmpfile "$2" DUMP_FILE restore
+ln_ident "$3" DB_NAME
+ln_dbuser "$4" DB_USER
 
-# Reject any value that could be smuggled as a CLI flag to zcat/mysql.
-for v in "$CNF_FILE" "$DUMP_FILE" "$DB_NAME"; do
-    case "$v" in -*) echo "Argument may not start with '-': $v" >&2; exit 1 ;; esac
-done
-
-[[ "$DB_NAME" =~ ^[A-Za-z0-9_]+$ ]] || { echo "Invalid db name: $DB_NAME" >&2; exit 1; }
-
-zcat -- "$DUMP_FILE" | mysql --defaults-extra-file="$CNF_FILE" -- "$DB_NAME"
+ln_as "$LN_WEB_USER" bash -c \
+    'set -o pipefail; zcat -- "$1" | mysql --defaults-extra-file="$2" --user="$3" -- "$4"' _ \
+    "$DUMP_FILE" "$CNF_FILE" "$DB_USER" "$DB_NAME"

@@ -67,6 +67,38 @@ MUTATIONS=(
   'inherited APT_ALLOW_SERVICE_START kept|s#unset APT_ALLOW_SERVICE_START #unset #'
   'inherited LARANODE_ROLLBACK_DIR kept|s#LARANODE_ROLLBACK_DIR LARANODE_INSTALLER_PID#LARANODE_INSTALLER_PID#'
   'inherited LARANODE_INSTALLER_PID kept|s#LARANODE_INSTALLER_PID LARANODE_INSTALLER_START#LARANODE_INSTALLER_START#'
+  # sudo review r1: root never runs PHP from the panel tree
+  'artisan runs as root again|s#^_artisan() { _as_panel_user /usr/bin/php8.4 artisan "\$@"; }#_artisan() { /usr/bin/php8.4 artisan "$@"; }#'
+  'composer runs as root again|s#_as_panel_user /usr/bin/php8.4 /usr/local/bin/composer#/usr/bin/php8.4 /usr/local/bin/composer#'
+  'settle makes bootstrap/cache web-writable again|s#^  _as_panel_user chmod 770 "\$h/logs"$#  _as_panel_user chmod 770 "$h/logs" "$p/bootstrap/cache"#'
+  'panel tree not chowned before the first PHP run|s#chown -R -h laranode_ln:laranode_ln "\$p"#:#'
+  'planted bootstrap caches kept|s# -delete$# -print#'
+  'tree never prepared before the first composer/artisan run|s#^  _prepare_panel_tree$#  :#'
+  # sudo review r3 F2: root-run steps never read the writable panel tree
+  'npm install runs as root again|s#_as_panel_user npm install#npm install#'
+  'npm run build runs as root again|s#_as_panel_user npm run build#npm run build#'
+  'node_modules chmod walked as root again|s#_as_panel_user find "${PANEL_PATH}/node_modules"#find "${PANEL_PATH}/node_modules"#'
+  'scheduler cron rendered from the panel tree again|s#local tpl="${LN_LIB_DEST}/templates/laranode-schedule.cron"#local tpl="${PANEL_PATH}/laranode-scripts/templates/laranode-schedule.cron"#'
+  'queue unit copied from the panel tree again|s#cp "${LN_LIB_DEST}/templates/laranode-queue-worker.service"#cp "${PANEL_PATH}/laranode-scripts/templates/laranode-queue-worker.service"#'
+  'reverb unit copied from the panel tree again|s#cp "${LN_LIB_DEST}/templates/laranode-reverb.service"#cp "${PANEL_PATH}/laranode-scripts/templates/laranode-reverb.service"#'
+  'panel vhost rendered from the panel tree again|s#local tmpl="${LN_LIB_DEST}/templates/apache-panel.template"#local tmpl="${PANEL_PATH}/laranode-scripts/templates/apache-panel.template"#'
+  'a re-run syncs with the checkout sync script, not the root-owned one|s#if \[ ! -f "$sync" \]; then#if true; then#'
+  'root-owned copy not published in phase_fetch_panel|s#^  _install_privileged_scripts$#  :#'
+  'settle chmods the tree as root again|s#_as_panel_user find "$h" -type d -exec chmod 750#find "$h" -type d -exec chmod 750#'
+  'storage chmod run as root again|s#_as_panel_user find "$p/storage" -type d#find "$p/storage" -type d#'
+  # sudo review r4: .env / .env.example / the sync script are never touched by root through a link
+  '_seed_env copies as root again (follows a planted .env.example link)|s#^  _as_panel_user bash -c "\$(declare -f _seed_env_inner).*#  ( umask 027; cp "${PANEL_PATH}/.env.example" "$env" ); chmod 640 "$env"#'
+  'env_set edits as root again (follows a planted .env link)|s#| _as_panel_user bash -c "\$(declare -f _env_set_inner)#| bash -c "$(declare -f _env_set_inner)#'
+  'env_set value passed in argv again|s#_env_set_inner \\"\\$@\\"" _ "\$k" "\$f"#_env_set_inner \\"\\$@\\"" _ "$k" "$f" "$v"#'
+  'settle chmods .env as root again|s#\[ -f "\$p/.env" \] \&\& _as_panel_user chmod 640#[ -f "$p/.env" ] \&\& chmod 640#'
+  'settle creates logs/ as root again|s#_as_panel_user mkdir -p "\$h/logs"#mkdir -p "$h/logs"#'
+  'first-install sync runs from the checkout again|s#^    sync="\${LN_SYNC_STASH}/sync.sh"#    sync="${PANEL_PATH}/laranode-scripts/bin/laranode-sync-scripts.sh"#'
+  'sync script not stashed before the chown|s#^  _stash_sync_script$#  :#'
+  'stash follows a link (cp without -P)|s#cp -P --no-preserve=all "\$src"#cp "$src"#'
+  'stash accepts a symlink|s#if \[ -L "\${LN_SYNC_STASH}/sync.sh" \] || \[ ! -f "\${LN_SYNC_STASH}/sync.sh" \]; then#if false; then#'
+  # sudo review r3 F3
+  'protected_hardlinks=0 accepted|s#\[ "$v" = 1 \] || die "fs.protected_hardlinks#true || die "fs.protected_hardlinks#'
+  'protected_hardlinks never checked by main|s#^  _require_protected_hardlinks$#  :#'
 )
 
 fail=0

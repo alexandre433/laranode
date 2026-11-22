@@ -2,13 +2,11 @@
 
 namespace App\Actions\Firewall;
 
-use Illuminate\Support\Facades\Process;
-
 class GetUfwRulesAction
 {
     public function execute(): array
     {
-        $proc = Process::run(['sudo', 'ufw', 'status', 'numbered']);
+        $proc = UfwCommand::run(['status-numbered']);
         if ($proc->failed()) {
             return [];
         }
@@ -16,7 +14,7 @@ class GetUfwRulesAction
         $lines = preg_split("/\r?\n/", trim($proc->output()));
         $rules = [];
         foreach ($lines as $line) {
-            if (!preg_match('/^\s*\[(\s*\d+)\]\s+(.+?)\s+(ALLOW|DENY)\s+(IN|OUT)\s+(.+)$/i', $line, $m)) {
+            if (! preg_match('/^\s*\[(\s*\d+)\]\s+(.+?)\s+(ALLOW|DENY)\s+(IN|OUT)\s+(.+)$/i', $line, $m)) {
                 continue;
             }
             $number = (int) trim($m[1]);
@@ -33,6 +31,7 @@ class GetUfwRulesAction
                 'from' => $from,
             ];
         }
+
         return $rules;
     }
 }

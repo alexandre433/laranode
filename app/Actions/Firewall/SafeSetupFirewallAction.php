@@ -2,7 +2,6 @@
 
 namespace App\Actions\Firewall;
 
-use Illuminate\Support\Facades\Process;
 use RuntimeException;
 
 /**
@@ -46,7 +45,7 @@ class SafeSetupFirewallAction
      */
     private function allow(array $spec): void
     {
-        $proc = Process::run(array_merge(['sudo', 'ufw', 'allow'], $spec));
+        $proc = UfwCommand::run(array_merge(['allow'], $spec));
         if ($proc->failed()) {
             throw new RuntimeException('UFW allow failed: '.$proc->errorOutput());
         }

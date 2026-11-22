@@ -17,8 +17,7 @@ class DeleteWebsiteService
     {
         $this->teardownRuntime(); // FIRST — clean shutdown before files deleted (FIXED: review fix #5)
         $this->deleteWebsiteFiles();
-        $this->disableWebsite();
-        $this->removeVhostFile();
+        $this->removeVhost();
         $this->syncPhpFpmPools();
 
         // TODO: delete databases associated with this website
@@ -57,21 +56,21 @@ class DeleteWebsiteService
         }
     }
 
-    private function disableWebsite(): void
+    /**
+     * Disable and delete the site's Apache vhost through one validated, root-owned script.
+     * (Replaces raw `sudo a2dissite` + `sudo rm /etc/apache2/sites-available/*.conf`, whose
+     * sudoers glob matched any path and any argument.)
+     */
+    private function removeVhost(): void
     {
-        $disableWebsite = Process::run('sudo a2dissite '.$this->website->url.'.conf');
+        $result = Process::run([
+            'sudo',
+            config('laranode.laranode_bin_path').'/laranode-remove-vhost.sh',
+            $this->website->url,
+        ]);
 
-        if ($disableWebsite->failed()) {
-            throw new DeleteWebsiteException('Failed to disable (a2dissite) website: '.$disableWebsite->errorOutput());
-        }
-    }
-
-    private function removeVhostFile(): void
-    {
-        $removeVhostFile = Process::run('sudo rm /etc/apache2/sites-available/'.$this->website->url.'.conf');
-
-        if ($removeVhostFile->failed()) {
-            throw new DeleteWebsiteException('Failed to remove vhost file: '.$removeVhostFile->errorOutput());
+        if ($result->failed()) {
+            throw new DeleteWebsiteException('Failed to remove vhost: '.$result->errorOutput());
         }
     }
 

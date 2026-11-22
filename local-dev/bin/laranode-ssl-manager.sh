@@ -7,6 +7,9 @@
 # Re-sync these deltas if the upstream script changes.
 
 set -e
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
+ln_need_root
+LN_ARGC=$#
 
 # Colors for output
 RED='\033[0;31m'
@@ -224,16 +227,24 @@ renew_ssl_certificates() {
 }
 
 # Main script logic
-case "$1" in
+case "${1:-}" in
     "generate")
-        if [ $# -lt 3 ]; then
-            echo "Usage: $0 generate <domain> <email> [document_root]"
-            exit 1
-        fi
-
-        domain=$2
+        ln_argc 3 4 "$0 generate <domain> <email> [document_root]"
+        ln_domain "$2" domain
+        email_re='^[A-Za-z0-9][A-Za-z0-9._%+-]{0,63}@[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\.[A-Za-z]{2,63}$'
+        [[ $3 =~ $email_re ]] || ln_die "invalid email"
         email=$3
-        document_root=$4
+        # the web root must be a hosted user's site: /home/<user>_ln/domains/<this domain>[/docroot]
+        document_root=${4:-}
+        if [ -n "$document_root" ]; then
+            [[ $document_root =~ ^/home/([a-z_][a-z0-9_-]*_ln)/domains/([^/]+)(/[A-Za-z0-9._/-]*)?$ ]] || ln_die "invalid document root"
+            [ "${BASH_REMATCH[2]}" = "$domain" ] || ln_die "document root does not belong to $domain"
+            ln_sysuser "${BASH_REMATCH[1]}" _ssl_user
+            ln_docroot "${BASH_REMATCH[3]:-/}" _ssl_docroot
+            real_root=$(realpath -e -- "$document_root" 2>/dev/null) || ln_die "document root not found"
+            case "$real_root" in "/home/$_ssl_user/domains/$domain"|"/home/$_ssl_user/domains/$domain/"*) : ;; *) ln_die "document root escapes the site" ;; esac
+            document_root=$real_root
+        fi
 
         check_certbot
         check_domain_accessibility "$domain"
@@ -242,27 +253,21 @@ case "$1" in
         ;;
 
     "remove")
-        if [ $# -ne 2 ]; then
-            echo "Usage: $0 remove <domain>"
-            exit 1
-        fi
-
-        domain=$2
+        ln_argc 2 2 "$0 remove <domain>"
+        ln_domain "$2" domain
         remove_ssl_certificate "$domain"
         ;;
 
     "status")
-        if [ $# -ne 2 ]; then
-            echo "Usage: $0 status <domain>"
-            exit 1
-        fi
-
-        domain=$2
-        status=$(check_ssl_status "$domain")
+        ln_argc 2 2 "$0 status <domain>"
+        ln_domain "$2" domain
+        # prints active|expired|inactive; the exit code of the probe is not the answer
+        status=$(check_ssl_status "$domain" || true)
         echo "$status"
         ;;
 
     "renew")
+        ln_argc 1 1 "$0 renew"
         renew_ssl_certificates
         ;;
 

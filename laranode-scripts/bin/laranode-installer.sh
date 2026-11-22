@@ -82,6 +82,18 @@ _proc_net() { echo "${LARANODE_PROC_NET_DIR:-/proc/net}"; }
 _proc_dir() { echo "${LARANODE_PROC_DIR:-/proc}"; }
 # _probe_available — listeners can be read (ss, or /proc/net/tcp).
 _probe_available() { _have_ss || [ -r "$(_proc_net)/tcp" ]; }
+
+# _require_protected_hardlinks — the privileged scripts run `chown -R -h` / `chmod` as root over a
+# tenant's home. A tenant could hard-link a file it cannot write (/etc/shadow, a root-owned
+# script) into its own tree and have root re-own it; fs.protected_hardlinks=1 makes the kernel
+# refuse to link a file the caller neither owns nor can write. That sysctl is the ONLY thing
+# stopping it (the scripts do not), so a host with it off is refused before anything changes,
+# and the installer never flips a kernel setting on a host it does not own.
+_require_protected_hardlinks() {
+  local f; f="$(_proc_dir)/sys/fs/protected_hardlinks"
+  local v; v=$(cat "$f" 2>/dev/null || true)
+  [ "$v" = 1 ] || die "fs.protected_hardlinks is '${v:-unreadable}', not 1: tenant hard links could make the root scripts re-own system files. Enable it (sysctl -w fs.protected_hardlinks=1, and persist it in /etc/sysctl.d/) and re-run."
+}
 # _proc_listen_inodes PORT — socket inode of every TCP LISTEN (state 0A) socket on PORT.
 _proc_listen_inodes() {
   local hex f; hex=$(printf '%04X' "$1")
@@ -233,14 +245,24 @@ choose() {
   echo "${_a:-$2}"
 }
 
-# env_set KEY VALUE FILE — add-or-replace a single .env assignment safely
-env_set() {
-  local k="$1" v="$2" f="$3"
+# env_set KEY VALUE FILE — add-or-replace a single .env assignment safely.
+# The panel .env lives in the tree laranode_ln owns. A root `sed -i` / `>>` there follows a
+# symlink laranode_ln planted (.env -> any file) and edits it as root, so the edit runs AS the
+# panel account (_env_set_inner, via _as_panel_user): through a link to a file it may not write,
+# the kernel refuses. The value travels on stdin, never in a process's argv.
+_env_set_inner() {   # runs as the panel user ONLY: _env_set_inner KEY FILE   (value on stdin)
+  local k="$1" f="$2" v="" e
+  IFS= read -r v || true
+  e=${v//\\/\\\\}; e=${e//&/\\&}; e=${e//#/\\#}
   if grep -qE "^${k}=" "$f"; then
-    sed -i "s#^${k}=.*#${k}=\"${v}\"#" "$f"
+    sed -i "s#^${k}=.*#${k}=\"${e}\"#" "$f"
   else
     printf '%s="%s"\n' "$k" "$v" >> "$f"
   fi
+}
+env_set() {
+  local k="$1" v="$2" f="$3"
+  printf '%s\n' "$v" | _as_panel_user bash -c "$(declare -f _env_set_inner); cd /; _env_set_inner \"\$@\"" _ "$k" "$f"
 }
 
 # persist_secret LINE — append to /root/.laranode-credentials (0600)
@@ -252,15 +274,18 @@ persist_secret() {
 
 # _seed_env — create the panel .env from .env.example when absent. It receives the DB
 # password right after, so it is never world-readable: created under umask 027 and
-# handed to the panel's group (www-data/laranode_ln) at 0640. An existing .env is
-# never touched.
+# is laranode_ln's own 0640 file (its group is www-data's). An existing .env is never touched.
+# The copy runs AS the panel account: a root `cp` (or chmod/chown/chgrp on the result) follows a
+# symlink laranode_ln planted (.env.example -> /root/.laranode-credentials, /etc/shadow) and
+# lands root-only content in a file laranode_ln can read. As laranode_ln the kernel refuses.
+_seed_env_inner() {   # runs as the panel user ONLY: _seed_env_inner SRC DEST
+  umask 027
+  cp "$1" "$2" && chmod 640 "$2"
+}
 _seed_env() {
   local env="${PANEL_PATH}/.env"
-  [ -f "$env" ] && return 0
-  ( umask 027; cp "${PANEL_PATH}/.env.example" "$env" )
-  chmod 640 "$env"
-  if getent group laranode_ln >/dev/null 2>&1; then chgrp laranode_ln "$env"; fi
-  return 0
+  { [ -e "$env" ] || [ -L "$env" ]; } && return 0
+  _as_panel_user bash -c "$(declare -f _seed_env_inner); cd /; _seed_env_inner \"\$@\"" _ "${PANEL_PATH}/.env.example" "$env"
 }
 
 # ------------------------------------------------------------------------------
@@ -623,6 +648,15 @@ phase_fetch_panel() {
   else
     echo "Repo already present at ${PANEL_PATH}, skipping clone."
   fi
+
+  # Everything root renders or installs from the panel later (vhost, systemd units, cron line,
+  # the privileged scripts) comes from the ROOT-OWNED copy in ${LN_LIB_DEST}, never from the
+  # checkout: laranode_ln writes that tree. Publish the copy now, before phase_webserver needs it.
+  # The sync reads the checkout AS laranode_ln, so the tree is handed to it first.
+  _stash_sync_script
+  _prepare_panel_tree
+  log "Installing the privileged scripts and templates (root-owned copy)"
+  _install_privileged_scripts
 }
 
 # ==============================================================================
@@ -1179,7 +1213,7 @@ phase_webserver() {
   [ -n "${PANEL_PATH:-}" ] || die "PANEL_PATH not set — preflight must run first"
 
   # Render the panel vhost from the template. NEVER writes 000-default.conf.
-  local tmpl="${PANEL_PATH}/laranode-scripts/templates/apache-panel.template"
+  local tmpl="${LN_LIB_DEST}/templates/apache-panel.template"   # root-owned copy, never the checkout
   local dest="${ad}/sites-available/laranode.conf"
   [ -f "$tmpl" ] || die "apache-panel.template missing at ${tmpl}"
   # A pre-existing Apache's own files are restored if anything below fails (modules
@@ -1379,15 +1413,42 @@ CONF
 # Phase 6 — Application provisioning
 # ==============================================================================
 
+# ── Root never executes PHP that lives in the panel tree ──────────────────────
+# Laravel `require`s bootstrap/cache/*.php, config/, vendor/ ... on every artisan call, and
+# composer runs the project's scripts. Part of the tree is writable by the web user
+# (storage/), and in the old layout bootstrap/cache was too: PHP planted there by www-data
+# would run as root on the next installer re-run. So composer and artisan run as the panel
+# account (laranode_ln), in the panel directory, never as root.
+_as_panel_user() {
+  runuser -u laranode_ln -- env HOME=/home/laranode_ln COMPOSER_HOME=/home/laranode_ln/.composer "$@"
+}
+_artisan() { _as_panel_user /usr/bin/php8.4 artisan "$@"; }
+
+# _prepare_panel_tree — before any PHP runs: the tree belongs to the panel account (a fresh
+# `git clone` as root, or a legacy layout), and the generated bootstrap caches are not
+# trusted: they are deleted and rebuilt by composer's package:discover.
+_prepare_panel_tree() {
+  local p="${PANEL_PATH}"
+  # the home itself too: a root-created home (a pre-made panel dir; `useradd -m` leaves an
+  # existing home alone) is 750 root, and the panel user could not even read composer.json
+  chown laranode_ln:laranode_ln /home/laranode_ln
+  chown -R -h laranode_ln:laranode_ln "$p"
+  if [ -d "$p/bootstrap/cache" ] && [ ! -L "$p/bootstrap/cache" ]; then
+    find "$p/bootstrap/cache" -maxdepth 1 -type f -name '*.php' -delete
+    _as_panel_user chmod 750 "$p/bootstrap/cache"
+  fi
+}
+
 phase_app() {
   log "App provisioning"
 
   [ -f "${PANEL_PATH}/composer.json" ] \
     || die "composer.json not found at ${PANEL_PATH} — repo clone missing or PANEL_PATH wrong"
   cd "${PANEL_PATH}"
+  _prepare_panel_tree
 
   log "Installing PHP dependencies (composer install)"
-  /usr/bin/php8.4 /usr/local/bin/composer install --no-interaction --optimize-autoloader
+  _as_panel_user /usr/bin/php8.4 /usr/local/bin/composer install --no-interaction --optimize-autoloader
 
   # .env — copy example only when absent; never clobber existing config.
   if [ ! -f "${PANEL_PATH}/.env" ]; then
@@ -1402,7 +1463,7 @@ phase_app() {
     log "APP_KEY already set — preserving (idempotent re-run)"
   else
     log "APP_KEY not set — generating"
-    /usr/bin/php8.4 artisan key:generate --force
+    _artisan key:generate --force
   fi
 
   # Resolve canonical panel hostname: LARANODE_APP_URL > public IP.
@@ -1441,23 +1502,21 @@ phase_app() {
     log "APP_URL already '${cur_app_url}' — preserving (re-run safe)"
   fi
 
-  log "Installing sudoers drop-ins for www-data"
-  local drop SRC
-  for drop in laranode-panel laranode-cron laranode-runtimes laranode-ufw; do
-    SRC="${PANEL_PATH}/laranode-scripts/etc/sudoers.d/${drop}"
-    visudo -c -f "${SRC}" >/dev/null \
-      || die "sudoers file ${drop} failed syntax check — aborting"
-    install -m 440 "${SRC}" "/etc/sudoers.d/${drop}"
-  done
-  rm -f /etc/sudoers.d/laranode-postgres
+  # The scripts www-data may run as root live in a ROOT-OWNED copy, never in the panel
+  # checkout (which laranode_ln writes). The panel finds them through .env.
+  # (the root-owned copy was published in phase_fetch_panel)
+  log "Checking the sudoers drop-ins for www-data"
+  _install_sudoers
+  env_set LARANODE_BIN_PATH "${LN_LIB_DEST}/bin" "${PANEL_PATH}/.env"
+  env_set LARANODE_TEMPLATES_PATH "${LN_LIB_DEST}/templates" "${PANEL_PATH}/.env"
 
   log "Running database migrations"
-  /usr/bin/php8.4 artisan migrate --force \
+  _artisan migrate --force \
     || die "artisan migrate --force failed — verify DB_* in .env and phase_database logs"
 
   # One-time installs (idempotent: non-zero on re-run is expected/tolerated).
-  /usr/bin/php8.4 artisan storage:link 2>/dev/null || true
-  /usr/bin/php8.4 artisan reverb:install --no-interaction 2>/dev/null || true
+  _artisan storage:link 2>/dev/null || true
+  _artisan reverb:install --no-interaction 2>/dev/null || true
 
   # REVERB_HOST / VITE_REVERB_HOST — set only when absent or 'localhost'.
   local cur_reverb=""
@@ -1489,15 +1548,15 @@ phase_app() {
   fi
 
   # GPU detection — best-effort.
-  /usr/bin/php8.4 artisan laranode:detect-gpu 2>/dev/null || true
+  _artisan laranode:detect-gpu 2>/dev/null || true
 
   # First-run seed sentinel: seed ONLY when the users table is empty.
   log "Checking first-run seed sentinel (users table row count)"
   local user_count=1
-  user_count="$(/usr/bin/php8.4 artisan tinker --execute="echo App\\Models\\User::count();" 2>/dev/null | tail -1 | tr -d ' \r\n')" || user_count=1
+  user_count="$(_artisan tinker --execute="echo App\\Models\\User::count();" 2>/dev/null | tail -1 | tr -d ' \r\n')" || user_count=1
   if [ "$user_count" = "0" ]; then
     log "Users table empty — running db:seed (first install)"
-    /usr/bin/php8.4 artisan db:seed --force || die "artisan db:seed --force failed"
+    _artisan db:seed --force || die "artisan db:seed --force failed"
   else
     log "Users table has ${user_count} row(s) — skipping seed (idempotent re-run)"
   fi
@@ -1507,14 +1566,15 @@ phase_app() {
   # crashes in arborist (peer set of vitest 4 vs vitest 5 add-ons: "reading edgesOut").
   # --legacy-peer-deps skips auto-installing peers; the ones the build needs are explicit
   # in package.json (e.g. @testing-library/dom).
-  npm install --legacy-peer-deps
+  # npm runs node build scripts (project code): as the panel user, never as root over its tree
+  _as_panel_user npm install --legacy-peer-deps
   # phase_services `find -type f -exec chmod 660` strips exec bits from npm
   # binaries on a previous install. Restore u+x on bin-script files so that
   # npm run build succeeds on idempotent re-runs. chmod -R silently skips
   # symlinks, so we target the actual files via find.
-  find "${PANEL_PATH}/node_modules" -type f -path "*/bin/*" \
+  _as_panel_user find "${PANEL_PATH}/node_modules" -type f -path "*/bin/*" \
     -exec chmod u+x {} \; 2>/dev/null || true
-  npm run build
+  _as_panel_user npm run build
 }
 
 # ==============================================================================
@@ -1683,7 +1743,7 @@ write_service_manifest() {
 # LARANODE_CRON_DIR is a test seam; default /etc/cron.d.
 _install_scheduler_cron() {
   local dir="${LARANODE_CRON_DIR:-/etc/cron.d}"
-  local tpl="${PANEL_PATH}/laranode-scripts/templates/laranode-schedule.cron"
+  local tpl="${LN_LIB_DEST}/templates/laranode-schedule.cron"   # root-owned copy, never the checkout
   [ -f "$tpl" ] || die "scheduler cron template missing: $tpl"
   mkdir -p "$dir"
   sed -e "s#__PANEL_USER__#laranode_ln#g" \
@@ -1694,22 +1754,101 @@ _install_scheduler_cron() {
   log "Scheduler cron installed: ${dir}/laranode-schedule"
 }
 
+# ── Privileged scripts, sudoers, permissions ──────────────────────────────────
+#
+# Threat: www-data (the PHP user) runs scripts as root through sudo. If www-data, or
+# laranode_ln (which www-data is grouped with), can write the script, its directory, a
+# template it reads or a parent directory, www-data owns root. So:
+#   * the scripts, their lib/ and templates/ are COPIED to LN_LIB_DEST, owned by root,
+#     mode 755/644, and sudoers names files only inside it;
+#   * the panel checkout stays laranode_ln's (that is how the panel is updated) but is not
+#     group-writable: only storage/ is. .env is 640. Composer/artisan run as laranode_ln,
+#     never as root (see _as_panel_user).
+# Updating the scripts after a `git pull` is a deliberate root step:
+#   sudo /usr/local/lib/laranode/bin/laranode-sync-scripts.sh      (see docs/security-sudo.md)
+LN_LIB_DEST=/usr/local/lib/laranode
+
+# First install only (no root-owned sync script yet): a re-run uses the ROOT-OWNED sync script,
+# never the one laranode_ln may have edited in the checkout (an updated sync script takes effect
+# from the run after the one that copied it). On a first install the sync script is taken from
+# the checkout ONCE, into a root-only temp dir, before the tree is handed to laranode_ln
+# (phase_fetch_panel), and that private copy is what runs: laranode_ln cannot swap it between the
+# copy and the run. `cp -P` never follows a link, and the copy must be a regular file.
+LN_SYNC_STASH=""
+_stash_sync_script() {
+  local src="${PANEL_PATH}/laranode-scripts/bin/laranode-sync-scripts.sh"
+  LN_SYNC_STASH=""
+  [ -f "${LN_LIB_DEST}/bin/laranode-sync-scripts.sh" ] && return 0
+  LN_SYNC_STASH=$(mktemp -d) || die "mktemp failed"
+  chmod 700 "$LN_SYNC_STASH"
+  cp -P --no-preserve=all "$src" "${LN_SYNC_STASH}/sync.sh" 2>/dev/null \
+    || { rm -rf "$LN_SYNC_STASH"; LN_SYNC_STASH=""; die "laranode-sync-scripts.sh missing from the panel checkout (laranode-scripts/bin)"; }
+  if [ -L "${LN_SYNC_STASH}/sync.sh" ] || [ ! -f "${LN_SYNC_STASH}/sync.sh" ]; then
+    rm -rf "$LN_SYNC_STASH"; LN_SYNC_STASH=""
+    die "laranode-sync-scripts.sh in the panel checkout is not a regular file"
+  fi
+}
+
+_install_privileged_scripts() {
+  local sync="${LN_LIB_DEST}/bin/laranode-sync-scripts.sh" rc=0
+  mkdir -p /usr/local/lib && chown root:root /usr/local/lib && chmod u=rwx,go=rx /usr/local/lib
+  if [ ! -f "$sync" ]; then
+    [ -n "$LN_SYNC_STASH" ] || _stash_sync_script
+    sync="${LN_SYNC_STASH}/sync.sh"
+  fi
+  bash "$sync" "${PANEL_PATH}" || rc=$?
+  if [ -n "$LN_SYNC_STASH" ]; then rm -rf "$LN_SYNC_STASH"; LN_SYNC_STASH=""; fi
+  [ "$rc" -eq 0 ] || die "could not install the privileged scripts into ${LN_LIB_DEST}"
+}
+
+_install_sudoers() {
+  local drop
+  for drop in laranode-panel laranode-cron laranode-runtimes laranode-ufw; do
+    [ -f "/etc/sudoers.d/${drop}" ] || die "sudoers drop-in ${drop} was not installed"
+    visudo -c -f "/etc/sudoers.d/${drop}" >/dev/null || die "sudoers drop-in ${drop} failed syntax check"
+  done
+  rm -f /etc/sudoers.d/laranode-postgres
+}
+
+_settle_permissions() {
+  local h=/home/laranode_ln p="${PANEL_PATH}"
+  _as_panel_user mkdir -p "$h/logs"   # a root `mkdir -p` through a planted dangling link would create a root dir elsewhere
+  chown -R laranode_ln:laranode_ln "$h"
+  # Every mode change below runs AS the panel user (it owns the whole tree after the chown):
+  # a root `find -exec chmod <path>` follows a symlink the panel account swaps in after find
+  # looked, and would re-mode an arbitrary file. As laranode_ln that chmod simply fails.
+  # group (www-data) may read and traverse, never write
+  _as_panel_user find "$h" -type d -exec chmod 750 {} +
+  _as_panel_user find "$h" -type f -exec chmod 640 {} +
+  # the web process writes inside the panel in ONE place (storage/) plus its own log dir.
+  # bootstrap/cache is NOT web-writable: Laravel `require`s it on every artisan run, and the
+  # caches are prebuilt by composer (package:discover) as the panel account.
+  _as_panel_user chmod 770 "$h/logs"
+  _as_panel_user find "$h/logs" -type f -exec chmod 660 {} +
+  if [ -d "$p/storage" ]; then
+    _as_panel_user find "$p/storage" -type d -exec chmod 770 {} +
+    _as_panel_user find "$p/storage" -type f -exec chmod 660 {} +
+  fi
+  [ -f "$p/.env" ] && _as_panel_user chmod 640 "$p/.env"
+  # the source copy of the scripts is only ever read (by the root sync): keep it that way
+  _as_panel_user find "$p/laranode-scripts/bin" -type f -name '*.sh' -exec chmod 750 {} + 2>/dev/null || true
+  # the root-owned copy
+  if [ -d "${LN_LIB_DEST}" ]; then
+    chown -R root:root "${LN_LIB_DEST}"
+    chmod 755 "${LN_LIB_DEST}"
+  fi
+}
+
 phase_services() {
   log "Installing systemd service units"
-  cp "${PANEL_PATH}/laranode-scripts/templates/laranode-queue-worker.service" \
+  # from the root-owned template copy: systemd runs a unit file with root's authority
+  cp "${LN_LIB_DEST}/templates/laranode-queue-worker.service" \
     /etc/systemd/system/laranode-queue-worker.service
-  cp "${PANEL_PATH}/laranode-scripts/templates/laranode-reverb.service" \
+  cp "${LN_LIB_DEST}/templates/laranode-reverb.service" \
     /etc/systemd/system/laranode-reverb.service
 
   log "Setting file permissions"
-  mkdir -p /home/laranode_ln/logs
-  chown -R laranode_ln:laranode_ln /home/laranode_ln
-  find /home/laranode_ln -type d -exec chmod 770 {} \;
-  find /home/laranode_ln -type f -exec chmod 660 {} \;
-  find /home/laranode_ln/panel/laranode-scripts/bin -type f -exec chmod 100 {} \;
-  find /home/laranode_ln/panel/storage \
-       /home/laranode_ln/panel/bootstrap \
-       -type d -exec chmod 775 {} \;
+  _settle_permissions
 
   log "Enabling and starting services"
   systemctl daemon-reload
@@ -1729,10 +1868,10 @@ phase_services() {
 # Power page). Installs the sudoers drop-in and registers ONLY what the manifest above
 # lists as managed:true, so pre-existing services are never manageable.
 _install_sleep_wake() {
-  local src="${PANEL_PATH}/laranode-scripts/etc/sudoers.d/laranode-sleep"
-  if [ -f "$src" ] && visudo -c -f "$src" >/dev/null 2>&1; then
-    install -m 440 "$src" /etc/sudoers.d/laranode-sleep
-    bash "${PANEL_PATH}/laranode-scripts/bin/laranode-managed-register.sh" reverb queue fpm hostdb \
+  local drop="${LN_LIB_DEST}/etc/sudoers.d/laranode-sleep"   # the root-owned copy
+  if [ -f "$drop" ] && visudo -c -f "$drop" >/dev/null 2>&1; then
+    install -o root -g root -m 440 "$drop" /etc/sudoers.d/laranode-sleep
+    bash "${LN_LIB_DEST}/bin/laranode-managed-register.sh" reverb queue fpm hostdb \
       || warn "sleep/wake registration failed; the feature stays unavailable"
     _reassert_sleep_wake
   else
@@ -1748,7 +1887,7 @@ _install_sleep_wake() {
 # bookkeeping (was_enabled/was_active) is kept by the script, so a later disable still
 # restores the original boot enablement. Best effort: a refusal only warns.
 _reassert_sleep_wake() {
-  local sleep_sh="${PANEL_PATH}/laranode-scripts/bin/laranode-sleep.sh"
+  local sleep_sh="${LN_LIB_DEST}/bin/laranode-sleep.sh"
   local dir="${LARANODE_MANAGED_DIR:-/etc/laranode}/sleep" k st idle
   [ -d "$dir" ] || return 0
   for k in reverb queue fpm hostdb; do
@@ -1790,7 +1929,7 @@ phase_summary() {
   echo "  All generated credentials saved to: /root/.laranode-credentials (chmod 600)"
   echo ""
   echo "  Final step — create the panel admin account:"
-  echo "    cd ${PANEL_PATH} && /usr/bin/php8.4 artisan laranode:create-admin"
+  echo "    cd ${PANEL_PATH} && sudo -u laranode_ln /usr/bin/php8.4 artisan laranode:create-admin"
   echo "========================================================================"
 }
 
@@ -1803,6 +1942,8 @@ main() {
   # until the plan has been shown and confirmed: the preflight reads listeners with `ss`, or
   # /proc/net/tcp when iproute2 is absent. preflight runs detect_os again; it is a pure read.
   detect_os
+  # the root scripts rely on this kernel setting: refuse a host that has it off
+  _require_protected_hardlinks
   # A guard left by an installer that was killed (SIGKILL / OOM / power loss) would silently
   # stop every later package install on this host from starting services.
   _policy_guard_clean_stale

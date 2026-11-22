@@ -2,8 +2,6 @@
 
 namespace App\Actions\Firewall;
 
-use Illuminate\Support\Facades\Process;
-
 /**
  * Returns the user-added UFW rules via `ufw show added`.
  *
@@ -18,7 +16,7 @@ class GetStagedUfwRulesAction
      */
     public function execute(): array
     {
-        $proc = Process::run(['sudo', 'ufw', 'show', 'added']);
+        $proc = UfwCommand::run(['show-added']);
         if ($proc->failed()) {
             return [];
         }

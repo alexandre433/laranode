@@ -1,23 +1,28 @@
 #!/bin/bash
 set -euo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # before ANY command runs: dirname below must not come from the caller's PATH
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
+ln_need_root
+LN_ARGC=$#
 
 # Usage: laranode-restore-files.sh <tarFile> <destDir> <sysUser>
-TAR_FILE="$1"
-DEST_DIR="$2"
-SYS_USER="$3"
+# The archive is read AS www-data and extracted AS the site user: whatever the archive
+# contains (absolute names, links, odd modes) can only land where that user may write.
+ln_argc 3 3 "$0 <tarFile> <destDir> <sysUser>"
+ln_sysuser "$3" SYS_USER
+ln_tmpfile "$1" TAR_FILE restore
+DEST_DIR=$2
+BASE="/home/$SYS_USER/domains"
+case "$DEST_DIR" in "$BASE/"*) : ;; *) ln_die "destination must be directly under $BASE" ;; esac
+LEAF=${DEST_DIR#"$BASE/"}
+[[ $LEAF =~ ^[A-Za-z0-9._-]{1,253}$ ]] && [ "$LEAF" != . ] && [ "$LEAF" != .. ] || ln_die "invalid destination"
+[ -d "$BASE" ] && [ ! -L "$BASE" ] || ln_die "$BASE is not a plain directory"
+[ ! -L "$DEST_DIR" ] || ln_die "destination is a symlink"
 
-# Reject any value that could be smuggled as a CLI flag to tar/chown.
-for v in "$TAR_FILE" "$DEST_DIR" "$SYS_USER"; do
-    case "$v" in -*) echo "Argument may not start with '-': $v" >&2; exit 1 ;; esac
-done
-# System user must be a plain account name (no path/colon).
-[[ "$SYS_USER" =~ ^[A-Za-z0-9_]+$ ]] || { echo "Invalid system user: $SYS_USER" >&2; exit 1; }
+ln_as "$SYS_USER" mkdir -p -- "$DEST_DIR"
+[ -d "$DEST_DIR" ] && [ ! -L "$DEST_DIR" ] || ln_die "destination is not a plain directory"
 
-mkdir -p -- "$DEST_DIR"
-# Harden extraction against ownership/permission abuse and path traversal.
 # GNU tar strips leading '/' and refuses members escaping the destination by default;
-# these flags additionally prevent restoring archived ownership/permissions or
-# clobbering existing directory metadata.
-tar --no-same-owner --no-same-permissions --no-overwrite-dir \
-    -xzf "$TAR_FILE" -C "$DEST_DIR"
-chown -R -- "$SYS_USER:$SYS_USER" "$DEST_DIR"
+# the flags also stop archived ownership/permissions and directory metadata being applied.
+ln_as "$LN_WEB_USER" cat -- "$TAR_FILE" \
+    | ln_as "$SYS_USER" tar --no-same-owner --no-same-permissions --no-overwrite-dir -xzf - -C "$DEST_DIR"

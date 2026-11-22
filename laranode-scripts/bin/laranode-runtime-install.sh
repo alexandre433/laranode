@@ -1,27 +1,15 @@
 #!/bin/bash
 set -euo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # before ANY command runs: dirname below must not come from the caller's PATH
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
+ln_need_root
+LN_ARGC=$#
 
 # laranode-runtime-install.sh <runtime>
 # Installs the given alternative PHP runtime binary.
 # Called via sudo by InstallRuntimeService.
-
-# ---- arg validation ----
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 <runtime>" >&2
-    exit 1
-fi
-
-RUNTIME="$1"
-
-# Reject leading-dash args
-case "$RUNTIME" in
-    -*) echo "Invalid runtime: $RUNTIME" >&2; exit 1 ;;
-esac
-
-if ! echo "$RUNTIME" | grep -qE '^(frankenphp|swoole)$'; then
-    echo "Invalid runtime '$RUNTIME'. Must be: frankenphp|swoole" >&2
-    exit 1
-fi
+ln_argc 1 1 "$0 <runtime>"
+ln_enum "$1" RUNTIME frankenphp swoole
 
 # ---- FrankenPHP ----
 if [ "$RUNTIME" = "frankenphp" ]; then
@@ -29,7 +17,6 @@ if [ "$RUNTIME" = "frankenphp" ]; then
     FRANKENPHP_SHA256="becd9efc79783a4946fb4802433dc00be32de7e025b60fcab53db4d283a136e9"
     FRANKENPHP_URL="https://github.com/dunglas/frankenphp/releases/download/${FRANKENPHP_VERSION}/frankenphp-linux-x86_64"
     FRANKENPHP_BIN="/usr/local/bin/frankenphp"
-    FRANKENPHP_TMP="/tmp/frankenphp"
 
     # Idempotent: if binary exists and --version works, skip re-download
     if [ -f "$FRANKENPHP_BIN" ]; then
@@ -37,10 +24,14 @@ if [ "$RUNTIME" = "frankenphp" ]; then
             echo "FrankenPHP ${FRANKENPHP_VERSION} already installed and functional. Skipping."
             exit 0
         else
-            # Binary exists but is corrupt — re-download
             echo "FrankenPHP binary exists but '--version' failed (corrupt?). Re-downloading..."
         fi
     fi
+
+    # A private root-owned scratch dir: a fixed /tmp name is a symlink trap for www-data.
+    WORK=$(mktemp -d /var/tmp/laranode-runtime.XXXXXX)
+    trap 'rm -rf -- "$WORK"' EXIT
+    FRANKENPHP_TMP="$WORK/frankenphp"
 
     echo "Downloading FrankenPHP ${FRANKENPHP_VERSION}..."
     curl -sfL -o "$FRANKENPHP_TMP" "$FRANKENPHP_URL"
@@ -48,12 +39,11 @@ if [ "$RUNTIME" = "frankenphp" ]; then
     echo "Verifying SHA-256 checksum..."
     if ! echo "${FRANKENPHP_SHA256}  ${FRANKENPHP_TMP}" | sha256sum -c -; then
         echo "SHA-256 mismatch — aborting install." >&2
-        rm -f "$FRANKENPHP_TMP"
         exit 1
     fi
 
-    mv "$FRANKENPHP_TMP" "$FRANKENPHP_BIN"
-    chmod 0755 "$FRANKENPHP_BIN"
+    chmod 0755 "$FRANKENPHP_TMP"
+    mv -f -- "$FRANKENPHP_TMP" "$FRANKENPHP_BIN"
 
     echo "Verifying FrankenPHP binary..."
     "$FRANKENPHP_BIN" --version
@@ -62,7 +52,5 @@ if [ "$RUNTIME" = "frankenphp" ]; then
 fi
 
 # ---- Swoole (v2 placeholder) ----
-if [ "$RUNTIME" = "swoole" ]; then
-    echo "Swoole runtime install not implemented in v1." >&2
-    exit 1
-fi
+echo "Swoole runtime install not implemented in v1." >&2
+exit 1

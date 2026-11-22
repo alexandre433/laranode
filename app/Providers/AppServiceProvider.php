@@ -13,6 +13,7 @@ use App\Observers\NotificationsObserver;
 use Illuminate\Notifications\DatabaseNotification;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Config;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Vite;
 use Illuminate\Support\ServiceProvider;
 use League\Flysystem\Filesystem;
@@ -62,9 +63,24 @@ class AppServiceProvider extends ServiceProvider
 
         DatabaseNotification::observe(NotificationsObserver::class);
 
+        if ($this->app->runningInConsole()) {
+            $this->warnWhenNoReverbApp();
+        }
+
         if (Auth::check()) {
             $user = Auth::user();
             Config::set('laranode.user_base_path', $user->homedir);
+        }
+    }
+
+    /**
+     * config/reverb.php drops apps without an id (that is what stops the websocket server crashing).
+     * With REVERB_APP_ID unset that leaves zero apps: live stats die without any error. Say so.
+     */
+    public function warnWhenNoReverbApp(): void
+    {
+        if (config('reverb.apps.apps') === []) {
+            Log::warning('Reverb has no application configured (REVERB_APP_ID is empty): live stats and websockets will not work.');
         }
     }
 }

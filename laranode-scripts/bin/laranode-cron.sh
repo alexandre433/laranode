@@ -30,35 +30,13 @@ done
 SUBCMD="${1:-}"
 SYSTEM_USER="${2:-}"
 
-# ── Validate SYSTEM_USER ──────────────────────────────────────────────────────
-if [ -z "$SYSTEM_USER" ]; then
-    echo "ERROR: SYSTEM_USER is required" >&2
-    exit 1
-fi
-
-# Must match safe identifier pattern (no flags, no special chars)
-if ! echo "$SYSTEM_USER" | grep -qE '^[a-zA-Z0-9_]+$'; then
-    echo "ERROR: invalid system user name: $SYSTEM_USER" >&2
-    exit 1
-fi
-
-# Must end in _ln (panel-owned accounts only)
-if ! echo "$SYSTEM_USER" | grep -qE '_ln$'; then
-    echo "ERROR: system user must end in _ln: $SYSTEM_USER" >&2
-    exit 1
-fi
-
-# Must not be root
-if [ "$SYSTEM_USER" = "root" ]; then
-    echo "ERROR: refusing to manage root crontab" >&2
-    exit 1
-fi
-
-# Must exist on the system
-if ! id "$SYSTEM_USER" >/dev/null 2>&1; then
-    echo "ERROR: system user does not exist: $SYSTEM_USER" >&2
-    exit 1
-fi
+# ── Validate SYSTEM_USER (existing hosted account, never root/system/panel user) ──
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # before ANY command runs: dirname below must not come from the caller's PATH
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
+LN_ARGC=$#
+ln_argc 2 3 "laranode-cron.sh <set|remove|list> <system_user> [tmp_file]"
+[[ $SYSTEM_USER == *_ln ]] || ln_die "system user must end in _ln"
+ln_sysuser "$SYSTEM_USER" SYSTEM_USER
 
 # ── Sub-commands ──────────────────────────────────────────────────────────────
 
@@ -71,7 +49,8 @@ case "$SUBCMD" in
             exit 1
         fi
 
-        if [ ! -f "$TMP_FILE" ]; then
+        ln_tmpfile "$TMP_FILE" TMP_FILE cron
+        if [ ! -f "$TMP_FILE" ] || [ -L "$TMP_FILE" ]; then
             echo "ERROR: tmp_file not found: $TMP_FILE" >&2
             exit 1
         fi

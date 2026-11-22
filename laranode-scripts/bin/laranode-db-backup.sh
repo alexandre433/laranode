@@ -1,29 +1,19 @@
 #!/bin/bash
 set -euo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # before ANY command runs: dirname below must not come from the caller's PATH
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
+ln_need_root
+LN_ARGC=$#
 
 # Usage: laranode-db-backup.sh <engine> <dbName> <dbUser> <cnfFile> <outFile>
-ENGINE="$1"
-DB_NAME="$2"
-DB_USER="$3"
-CNF_FILE="$4"
-OUT_FILE="$5"
+# Runs AS www-data with the database's own account; the dump file is created by www-data.
+ln_argc 5 5 "$0 <engine> <dbName> <dbUser> <cnfFile> <outFile>"
+ln_enum "$1" ENGINE mysql
+ln_ident "$2" DB_NAME
+ln_dbuser "$3" DB_USER
+ln_tmpfile "$4" CNF_FILE cnf
+ln_tmpfile "$5" OUT_FILE dbbackup
 
-# Reject any value that could be smuggled as a CLI flag to mysqldump/gzip.
-for v in "$ENGINE" "$DB_NAME" "$DB_USER" "$CNF_FILE" "$OUT_FILE"; do
-    case "$v" in -*) echo "Argument may not start with '-': $v" >&2; exit 1 ;; esac
-done
-
-# Strict identifier allowlist for values interpolated into the dump command.
-[[ "$DB_NAME" =~ ^[A-Za-z0-9_]+$ ]] || { echo "Invalid db name: $DB_NAME" >&2; exit 1; }
-[[ "$DB_USER" =~ ^[A-Za-z0-9_]+$ ]] || { echo "Invalid db user: $DB_USER" >&2; exit 1; }
-
-case "$ENGINE" in
-    mysql)
-        mysqldump --defaults-extra-file="$CNF_FILE" --user="$DB_USER" \
-            --single-transaction --quick --lock-tables=false -- "$DB_NAME" | gzip > "$OUT_FILE"
-        ;;
-    *)
-        echo "Unsupported engine: $ENGINE" >&2
-        exit 1
-        ;;
-esac
+ln_as "$LN_WEB_USER" bash -c \
+    'set -o pipefail; mysqldump --defaults-extra-file="$1" --user="$2" --single-transaction --quick --lock-tables=false -- "$3" | gzip > "$4"' _ \
+    "$CNF_FILE" "$DB_USER" "$DB_NAME" "$OUT_FILE"

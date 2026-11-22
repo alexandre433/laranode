@@ -207,6 +207,19 @@ run_scenario() {
     printf "   %-32s %s\n" "admin login" "$login"
     echo "$login" | grep -q yes || ok=0
 
+    # ── Sudo hardening gate (every full install) ────────────────────────────
+    # www-data holds NOPASSWD sudo on the privileged scripts, so (1) nothing it can
+    # write may sit on the path to those scripts or their templates, and (2) every
+    # script must refuse hostile arguments without touching the host. Both checks
+    # live in sudo-hardening/ and discover the script dir from `sudo -l -U www-data`.
+    # SKIP_SUDO_HARDENING=1 only for a scenario that deliberately has no panel.
+    if [ "${SKIP_SUDO_HARDENING:-0}" != 1 ]; then
+        echo "[post] sudo hardening: installed permissions"
+        docker exec "${cname}" bash /src/local-dev/install-test/sudo-hardening/assert-perms.sh || ok=0
+        echo "[post] sudo hardening: hostile arguments as www-data"
+        docker exec "${cname}" bash /src/local-dev/install-test/sudo-hardening/assert-hostile.sh || ok=0
+    fi
+
     # ── Scenario-specific extra assertions (optional) ──────────────────────
     if [ -n "${POST_ASSERT_FN:-}" ] && declare -f "${POST_ASSERT_FN}" >/dev/null 2>&1; then
         "${POST_ASSERT_FN}" "${cname}" || ok=0

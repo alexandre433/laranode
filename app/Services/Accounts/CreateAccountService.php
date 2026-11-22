@@ -42,14 +42,20 @@ class CreateAccountService
     private function createSystemUser(): void
     {
 
-        $createUser = Process::run([
+        $command = [
             'sudo',
             $this->laranodeBinPath . '/laranode-user-manager.sh',
             'create',
             $this->systemUsername,
             $this->validated['ssh_access'] ? 'yes' : 'no',
-            $this->validated['ssh_access'] ? $this->validated['password'] : null,
-        ]);
+        ];
+        // The password operand only exists when a shell login is allowed. (A PHP null here
+        // would reach the script as "", Symfony Process's rendering of null.)
+        if ($this->validated['ssh_access']) {
+            $command[] = $this->validated['password'];
+        }
+
+        $createUser = Process::run($command);
 
         if ($createUser->failed()) {
             throw new CreateAccountException('Failed to create system user: ' . $createUser->errorOutput());

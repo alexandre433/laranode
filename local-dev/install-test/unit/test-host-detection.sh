@@ -34,6 +34,7 @@ base() {
   _probe_available() { return 0; }
   pkg_installed() { return 1; }
   pg_cluster_count() { echo 0; }
+  _as_panel_user() { "$@"; }   # env_set/_seed_env edit AS laranode_ln (runuser): run as the test user here
   log() { :; }; warn() { :; }
 }
 expect() { [ "$2" = "$3" ] || { echo "expected $1='$3' got '$2'"; return 1; }; }
@@ -288,7 +289,7 @@ t "ufw absent: nothing runs (warning only)"            fw_no_ufw
 # ---- scheduler cron ----------------------------------------------------------
 echo "=== scheduler cron ==="
 TPL_SRC="${SCRIPT_DIR}/../../../laranode-scripts/templates/laranode-schedule.cron"
-cron_setup() { base; PANEL_PATH=$(mktemp -d); mkdir -p "$PANEL_PATH/laranode-scripts/templates"; cp "$TPL_SRC" "$PANEL_PATH/laranode-scripts/templates/"; export LARANODE_CRON_DIR=$(mktemp -d); }
+cron_setup() { base; PANEL_PATH=$(mktemp -d); LN_LIB_DEST=$(mktemp -d); mkdir -p "$LN_LIB_DEST/templates"; cp "$TPL_SRC" "$LN_LIB_DEST/templates/"; export LARANODE_CRON_DIR=$(mktemp -d); }
 cron_renders() {
   cron_setup; _install_scheduler_cron
   line=$(grep -v '^#' "$LARANODE_CRON_DIR/laranode-schedule")
@@ -296,7 +297,7 @@ cron_renders() {
     || { echo "got: $line"; return 1; }
   ! grep -q '__' "$LARANODE_CRON_DIR/laranode-schedule"
 }
-cron_missing_tpl() { cron_setup; rm "$PANEL_PATH/laranode-scripts/templates/laranode-schedule.cron"; _install_scheduler_cron; }
+cron_missing_tpl() { cron_setup; rm "$LN_LIB_DEST/templates/laranode-schedule.cron"; _install_scheduler_cron; }
 cron_filename_ok() { cron_setup; _install_scheduler_cron; case "$(ls "$LARANODE_CRON_DIR")" in *.*) return 1;; esac; }   # cron ignores names with dots
 cron_wired() { base; # phase_services must call it, and phase_packages must install the cron daemon
   body=$(declare -f phase_services); case "$body" in *_install_scheduler_cron*) ;; *) echo "phase_services does not install scheduler"; return 1;; esac
@@ -372,7 +373,7 @@ t "dollar-quote tags always start with a letter (300 draws each)" tag_letter_fir
 
 # ---- front-end install must survive registry drift (no committed lockfile) ------
 echo "=== npm install ==="
-npm_legacy_peers() { grep -qE '^[[:space:]]+npm install --legacy-peer-deps$' "$INSTALLER"; }
+npm_legacy_peers() { grep -qE '^[[:space:]]+_as_panel_user npm install --legacy-peer-deps$' "$INSTALLER"; }
 npm_dom_explicit() { grep -q '"@testing-library/dom"' "${SCRIPT_DIR}/../../../package.json"; }
 t "installer runs npm install --legacy-peer-deps (arborist edgesOut crash)"     npm_legacy_peers
 t "package.json lists @testing-library/dom explicitly (peer of RTL 16)"          npm_dom_explicit
@@ -468,17 +469,19 @@ t "needrestart cannot restart services during the install (NEEDRESTART_MODE=l)" 
 # ---- 7. secrets never world-readable -----------------------------------------------------------
 echo "=== .env / secrets permissions ==="
 seed_env_640() {
+  # r4: the copy and the 0640 happen AS the panel user (stubbed to run as the test user here), so
+  # the file is the panel account's own — no root chmod/chown/chgrp follows a planted link
   base; PANEL_PATH=$(mktemp -d); printf 'APP_KEY=\n' > "$PANEL_PATH/.env.example"
-  MLOG=$(mktemp); chmod() { echo "chmod $*" >> "$MLOG"; command chmod "$@"; }; chgrp() { echo "chgrp $*" >> "$MLOG"; }
-  getent() { return 0; }
+  _as_panel_user() { "$@"; }
   _seed_env
-  [ -f "$PANEL_PATH/.env" ] && grep -qx "chmod 640 $PANEL_PATH/.env" "$MLOG" && grep -qx "chgrp laranode_ln $PANEL_PATH/.env" "$MLOG"
+  [ -f "$PANEL_PATH/.env" ] && [ "$(stat -c %a "$PANEL_PATH/.env")" = 640 ]
 }
 seed_env_keeps_existing() { base; PANEL_PATH=$(mktemp -d); echo 'KEEP=1' > "$PANEL_PATH/.env"; : > "$PANEL_PATH/.env.example"; _seed_env; grep -qx 'KEEP=1' "$PANEL_PATH/.env"; }
 no_plain_env_cp() { base; ! declare -f _mysql_branch _pgsql_branch phase_app | grep -E 'cp .*\.env\.example'; }
 home_750() {
   base; PANEL_PATH=$(mktemp -d); mkdir "$PANEL_PATH/laranode-scripts"; MLOG=$(mktemp)
   useradd() { :; }; usermod() { :; }; chmod() { echo "chmod $*" >> "$MLOG"; }; id() { return 0; }
+  _prepare_panel_tree() { :; }; _install_privileged_scripts() { :; }; _stash_sync_script() { :; }
   phase_fetch_panel >/dev/null 2>&1
   grep -qx 'chmod 750 /home/laranode_ln' "$MLOG"
 }
@@ -639,8 +642,8 @@ wb_setup() {  # wb_setup <owned 0|1> <running 0|1> <port>
   AD=$(mktemp -d); mkdir -p "$AD/sites-available" "$AD/sites-enabled"
   cp "${FIX}/ports.conf" "$AD/ports.conf"; cp "$AD/ports.conf" "$AD/ports.conf.orig"
   export LARANODE_APACHE_DIR="$AD" LARANODE_POLICY_RC_D="$AD/policy-rc.d" LARANODE_APACHE_MODS_STATE="$AD/mods.state" LARANODE_ROLLBACK_DIR="$AD/rollback"
-  PANEL_PATH=$(mktemp -d); mkdir -p "$PANEL_PATH/laranode-scripts/templates"
-  printf '<VirtualHost *:__PORT__>\n    DocumentRoot __DOCROOT__\n</VirtualHost>\n' > "$PANEL_PATH/laranode-scripts/templates/apache-panel.template"
+  PANEL_PATH=$(mktemp -d); LN_LIB_DEST=$(mktemp -d); mkdir -p "$LN_LIB_DEST/templates"
+  printf '<VirtualHost *:__PORT__>\n    DocumentRoot __DOCROOT__\n</VirtualHost>\n' > "$LN_LIB_DEST/templates/apache-panel.template"
   APACHE_OWNED=$1; HTTP_PORT=$3; BIND_ADDR=""; IS_PROXMOX=0; IS_CLOUDPANEL=0
   [ "$2" = 1 ] && ACTIVE_UNITS="apache2" || ACTIVE_UNITS=""
   WLOG=$(mktemp); ENABLED_MODS=" "
@@ -1272,6 +1275,272 @@ t "an inherited LARANODE_ROLLBACK_DIR cannot point the rollback's rm -rf elsewhe
 t "an inherited APT_ALLOW_SERVICE_START=1 cannot unguard the base apt installs"             env_apt_flag_ignored
 t "the documented overrides (MANIFEST_FILE, PROBE_PROC, LARANODE_OS) are still honoured"    env_documented_overrides_kept
 
+
+# ---- root never executes PHP that lives in the panel tree --------------------
+# (www-data can write parts of the tree; Laravel `require`s bootstrap/cache/*.php on every
+# artisan call, so a root artisan/composer run would execute whatever was planted there)
+priv_artisan_via_runuser() { local out
+  out=$(bash -c "
+    source '$INSTALLER'
+    runuser() { printf 'runuser %s\n' \"\$*\"; }
+    _artisan migrate --force")
+  case "$out" in
+    'runuser -u laranode_ln -- env HOME=/home/laranode_ln'*' /usr/bin/php8.4 artisan migrate --force') : ;;
+    *) echo "unexpected command: $out"; return 1 ;;
+  esac; }
+priv_no_root_php_lines() { local bad
+  # every line that runs artisan or composer must go through the panel-user helpers
+  bad=$(grep -nE '(^|[^[:alnum:]_])/usr/bin/php8\.4 +(artisan|/usr/local/bin/composer)' "$INSTALLER" \
+        | grep -vE '_as_panel_user|sudo -u laranode_ln' || true)
+  [ -z "$bad" ] || { echo "root runs PHP in the panel tree:"; echo "$bad"; return 1; }
+  grep -qE '^[[:space:]]+(artisan|php8\.4 artisan|php artisan) ' "$INSTALLER" && return 1
+  return 0; }
+priv_settle_not_web_writable() { local body
+  body=$(bash -c "source '$INSTALLER'; declare -f _settle_permissions")
+  [ -n "$body" ] || return 1
+  case "$body" in *bootstrap/cache*) echo "settle touches bootstrap/cache"; return 1 ;; esac; }
+priv_prepare_wipes_caches() { local body
+  body=$(bash -c "source '$INSTALLER'; declare -f _prepare_panel_tree")
+  case "$body" in *'chown -R'*laranode_ln*) : ;; *) echo "tree not chowned to the panel user"; return 1 ;; esac
+  case "$body" in *bootstrap/cache*-delete*) : ;; *) echo "bootstrap/cache/*.php not deleted"; return 1 ;; esac; }
+priv_phase_app_prepares_first() { local body
+  body=$(bash -c "source '$INSTALLER'; declare -f phase_app")
+  # _prepare_panel_tree must precede the first composer/artisan call
+  local pre first
+  pre=$(printf '%s\n' "$body" | grep -n '_prepare_panel_tree' | head -1 | cut -d: -f1)
+  first=$(printf '%s\n' "$body" | grep -nE '_as_panel_user|_artisan' | head -1 | cut -d: -f1)
+  [ -n "$pre" ] && [ -n "$first" ] && [ "$pre" -lt "$first" ]; }
+t "artisan runs as laranode_ln (runuser), never as root"                      priv_artisan_via_runuser
+t "no composer/artisan line in the installer runs as root"                    priv_no_root_php_lines
+t "the permission settle leaves bootstrap/cache out of the web-writable set"  priv_settle_not_web_writable
+t "the tree is chowned to the panel user and bootstrap caches wiped"          priv_prepare_wipes_caches
+t "phase_app prepares the tree before any composer/artisan call"              priv_phase_app_prepares_first
+# a root-created /home/laranode_ln (the scenarios mkdir the panel dir before the installer, and
+# `useradd -m` leaves an existing home alone) is 750 root: laranode_ln could not even read
+# composer.json. The home itself must be handed to the panel user too, not only the panel tree.
+priv_prepare_chowns_home() { local out d
+  d=$(mktemp -d); mkdir -p "$d/bootstrap/cache"
+  out=$(bash -c "
+    source '$INSTALLER'
+    PANEL_PATH='$d'
+    chown() { printf 'chown %s\n' \"\$*\"; }
+    _prepare_panel_tree")
+  rm -rf "$d"
+  case "$out" in *'chown laranode_ln:laranode_ln /home/laranode_ln'$'\n'*|*'chown laranode_ln:laranode_ln /home/laranode_ln') : ;; *) echo "home not chowned; chown calls: $out"; return 1 ;; esac; }
+t "the panel home dir itself is handed to the panel user before composer runs"  priv_prepare_chowns_home
+
+# ---- r3 F2: root-run installer steps never read or execute the panel tree -----------------------
+# laranode_ln (the queue worker, compiled views, .env group) can write the checkout. A root step
+# that cp/sed/runs something FROM it hands laranode_ln root at the next install: www-data ->
+# laranode_ln -> root. Root renders only from the root-owned copy (LN_LIB_DEST, published by the
+# sync as a judged copy); node build scripts run as the panel user.
+# strip comment-only lines so prose that names a path cannot trip the check
+installer_code() { grep -vE '^[[:space:]]*#' "$INSTALLER"; }
+priv_no_root_read_of_panel_templates() { local bad
+  bad=$(installer_code | grep -nE 'PANEL_PATH}?/laranode-scripts/(templates|etc|lib)' || true)
+  [ -z "$bad" ] || { echo "a root step reads the writable panel tree:"; echo "$bad"; return 1; }; }
+priv_no_root_exec_of_panel_scripts() { local bad
+  # the only root use of a script from the panel tree is the first-install sync (fallback), inside
+  # _install_privileged_scripts and its existence check
+  bad=$(installer_code | grep -nE 'PANEL_PATH}?/laranode-scripts/bin/' | grep -vE 'laranode-sync-scripts.sh' || true)
+  [ -z "$bad" ] || { echo "a root step runs a script from the writable panel tree:"; echo "$bad"; return 1; }; }
+priv_npm_runs_as_panel_user() { local bad
+  bad=$(installer_code | grep -nE '(^|[;&|[:space:]])npm[[:space:]]+(install|run|ci|exec)' | grep -vE '_as_panel_user' || true)
+  [ -z "$bad" ] || { echo "npm runs as root over the panel tree:"; echo "$bad"; return 1; }
+  bad=$(installer_code | grep -nE 'find .*node_modules' | grep -vE '_as_panel_user' || true)
+  [ -z "$bad" ] || { echo "a root find/chmod walks node_modules:"; echo "$bad"; return 1; }; }
+priv_cron_renders_from_root_copy() { local d r out
+  d=$(mktemp -d); r=$(mktemp -d); mkdir -p "$d/p/laranode-scripts/templates" "$r/lib/templates" "$r/cron"
+  printf '%s\n' '* * * * * root /tmp/EVIL-from-the-writable-tree' > "$d/p/laranode-scripts/templates/laranode-schedule.cron"
+  printf '%s\n' '* * * * * __PANEL_USER__ __PHP__ __PANEL_PATH__/artisan schedule:run' > "$r/lib/templates/laranode-schedule.cron"
+  bash -c "
+    source '$INSTALLER'
+    PANEL_PATH='$d/p'; LN_LIB_DEST='$r/lib'; LARANODE_CRON_DIR='$r/cron'
+    log() { :; }
+    _install_scheduler_cron" >/dev/null 2>&1
+  out=$(cat "$r/cron/laranode-schedule" 2>/dev/null)
+  rm -rf "$d" "$r"
+  case "$out" in *EVIL*) echo "cron rendered from the writable panel tree: $out"; return 1 ;; esac
+  case "$out" in *'laranode_ln /usr/bin/php8.4 '*'artisan schedule:run'*) : ;; *) echo "cron not rendered from the root copy: $out"; return 1 ;; esac; }
+priv_units_and_vhost_from_root_copy() { local body
+  body=$(bash -c "source '$INSTALLER'; declare -f phase_services phase_webserver")
+  case "$body" in *'LN_LIB_DEST'*'templates/laranode-queue-worker.service'*) : ;; *) echo "queue unit not copied from the root-owned templates"; return 1 ;; esac
+  case "$body" in *'LN_LIB_DEST'*'templates/laranode-reverb.service'*) : ;; *) echo "reverb unit not copied from the root-owned templates"; return 1 ;; esac
+  case "$body" in *'LN_LIB_DEST'*'templates/apache-panel.template'*) : ;; *) echo "panel vhost not rendered from the root-owned templates"; return 1 ;; esac; }
+priv_root_copy_exists_before_root_templates() { local body
+  # phase_webserver (panel vhost) runs before phase_app: the root-owned copy must be published
+  # in phase_fetch_panel, right after the tree is handed to the panel user
+  body=$(bash -c "source '$INSTALLER'; declare -f phase_fetch_panel")
+  case "$body" in *'_prepare_panel_tree'*'_install_privileged_scripts'*) : ;; *) echo "phase_fetch_panel does not publish the root-owned copy"; return 1 ;; esac; }
+priv_sync_runs_from_root_copy_when_present() { local r out
+  r=$(mktemp -d); mkdir -p "$r/lib/bin"; : > "$r/lib/bin/laranode-sync-scripts.sh"
+  out=$(bash -c "
+    source '$INSTALLER'
+    PANEL_PATH='/nonexistent-panel'; LN_LIB_DEST='$r/lib'
+    mkdir() { :; }; chown() { :; }; chmod() { :; }
+    bash() { printf 'bash %s\n' \"\$*\"; }
+    _install_privileged_scripts")
+  rm -rf "$r"
+  case "$out" in "bash $r/lib/bin/laranode-sync-scripts.sh /nonexistent-panel") : ;; *) echo "sync not run from the root-owned copy: $out"; return 1 ;; esac; }
+t "no root step reads templates/etc/lib out of the writable panel tree"          priv_no_root_read_of_panel_templates
+t "no root step runs a panel-tree script other than the first-install sync"      priv_no_root_exec_of_panel_scripts
+t "npm install/build (and the node_modules chmod) run as the panel user"         priv_npm_runs_as_panel_user
+t "the scheduler cron line is rendered from the root-owned template copy"        priv_cron_renders_from_root_copy
+t "systemd units and the panel vhost come from the root-owned template copy"     priv_units_and_vhost_from_root_copy
+t "the root-owned copy is published before the web server phase needs it"        priv_root_copy_exists_before_root_templates
+t "a re-run syncs with the ROOT-OWNED sync script, not the one in the checkout"  priv_sync_runs_from_root_copy_when_present
+
+# every mode change over the panel tree runs as the panel user: a root `find -exec chmod <path>`
+# follows a symlink swapped in after find looked
+priv_settle_chmod_as_panel_user() { local body bad
+  body=$(bash -c "source '$INSTALLER'; declare -f _settle_permissions _prepare_panel_tree" | grep -vE '^[[:space:]]*#')
+  bad=$(printf '%s\n' "$body" | grep -E '(^|[^[:alnum:]_])(find|chmod)[[:space:]]' | grep -vE '_as_panel_user|LN_LIB_DEST|^[[:space:]]*(chmod 755|chown)' | grep -vE '^[[:space:]]*find .*-delete' || true)
+  [ -z "$bad" ] || { echo "root find/chmod over the panel tree:"; echo "$bad"; return 1; }; }
+t "the permission settle changes modes as the panel user, never as root"         priv_settle_chmod_as_panel_user
+
+# ---- r3 F3: fs.protected_hardlinks must be 1 --------------------------------------------------
+# `laranode-create-directory.sh` runs chown -R -h as root over a tenant tree; only the kernel
+# stops a tenant hard-linking a root-owned file into it. Not only a CI-container assert: the
+# installer itself refuses a host where it is off.
+phl_fixture() { local d; d=$(mktemp -d); mkdir -p "$d/sys/fs"; [ -z "${1:-}" ] || printf '%s\n' "$1" > "$d/sys/fs/protected_hardlinks"; echo "$d"; }
+phl_check() { local d rc; d=$(phl_fixture "$1")
+  bash -c "source '$INSTALLER'; LARANODE_PROC_DIR='$d'; _require_protected_hardlinks"; rc=$?; rm -rf "$d"; return $rc; }
+t  "protected_hardlinks=1: the installer goes on"                                phl_check 1
+tf "protected_hardlinks=0: the installer refuses"                                phl_check 0
+tf "protected_hardlinks=2 (not exactly 1): refused"                              phl_check 2
+tf "protected_hardlinks unreadable (file missing): refused"                      phl_check ""
+priv_main_requires_hardlinks() { local body a b
+  body=$(bash -c "source '$INSTALLER'; declare -f main")
+  a=$(printf '%s\n' "$body" | grep -n '_require_protected_hardlinks' | head -1 | cut -d: -f1)
+  b=$(printf '%s\n' "$body" | grep -nE '^[[:space:]]+(phase_packages|preflight);?$' | head -1 | cut -d: -f1)
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]; }
+t "main checks protected_hardlinks before preflight/any package work"            priv_main_requires_hardlinks
+# every script that root starts through sudo resolves its own directory (dirname) BEFORE validate.sh
+# sets a safe PATH: it must set PATH first (the container harness proves the same by running them)
+priv_scripts_reset_path_first() { local f bad="" l1 l2
+  for f in "$SCRIPT_DIR"/../../../laranode-scripts/bin/laranode-*.sh; do
+    case "${f##*/}" in laranode-installer.sh|laranode-sync-scripts.sh) continue ;; esac
+    l1=$(grep -nE '^[[:space:]]*(export )?PATH=' "$f" | head -1 | cut -d: -f1)
+    l2=$(grep -nE '^[^#]*dirname' "$f" | head -1 | cut -d: -f1)
+    # no dirname at all (managed-register): PATH must still be set, before the first `id`/command
+    [ -n "$l2" ] || l2=$(grep -nE '^\[ "\$\(id -u\)"' "$f" | head -1 | cut -d: -f1)
+    { [ -n "$l1" ] && [ -n "$l2" ] && [ "$l1" -le "$l2" ]; } || bad="$bad ${f##*/}"
+  done
+  [ -z "$bad" ] || { echo "PATH not reset before dirname in:$bad"; return 1; }; }
+t "every sudo-able script resets PATH before its first dirname"                   priv_scripts_reset_path_first
+
+# ---- r4: no root-run mutation/exec of ANY path derived from PANEL_PATH ---------------------------
+# r3 only grepped the literal `PANEL_PATH}/laranode-scripts/...`; `$p/...`, `.env`, `.env.example`
+# and `$sync` slipped past (a root `cp .env.example .env` followed a symlink laranode_ln planted).
+# Now: any root-run cp/mv/sed/chown/chmod/chgrp/install/tee/ln/rm/touch/mkdir/bash/source/find or
+# `>`/`>>` redirect on a PANEL_PATH-derived variable ($PANEL_PATH $p $h $env $sync $f $src) must run
+# through _as_panel_user, or be on the short allowlist below, each entry with its reason.
+# The bodies that run ONLY as the panel user (_env_set_inner, _seed_env_inner: reached only through
+# `_as_panel_user bash -c "$(declare -f ...)"`) are not root code and are removed before scanning.
+PANEL_USER_BODIES='_env_set_inner|_seed_env_inner'
+installer_root_code() { installer_code | awk -v re="^(${PANEL_USER_BODIES})[(][)] [{]" '$0 ~ re {skip=1} !skip {print} skip && /^}/ {skip=0}'; }
+# line fragments that may stay root-run on a panel-derived path, and why:
+ROOT_PANEL_ALLOW=(
+  'chown -R -h laranode_ln:laranode_ln "$p"'                 # -R never follows a link met while walking, -h hits the link itself
+  'chown -R laranode_ln:laranode_ln "$h"'                    # same; $h is /home/laranode_ln, which laranode_ln cannot replace
+  "find \"\$p/bootstrap/cache\" -maxdepth 1 -type f -name '*.php' -delete"   # -delete unlinks by name, follows nothing
+  'cp -P --no-preserve=all "$src" "${LN_SYNC_STASH}/sync.sh"'  # first-install stash into a root-only dir; -P copies a link as a link, then checked regular
+  'bash "$sync" "${PANEL_PATH}"'                             # $sync = root-owned copy or the private stash (priv_sync_* tests); PANEL_PATH is only an argument
+)
+priv_no_root_touch_of_panel_paths() { local tv cm rd bad a fixed=()
+  tv='\$\{?(PANEL_PATH|p|h|env|sync|f|src)\}?([^[:alnum:]_]|$)'
+  cm='(^|[;&|(`[:space:]])(cp|mv|sed|chown|chgrp|chmod|install|tee|ln|rm|touch|mkdir|truncate|dd|bash|source|find)[[:space:]]'
+  rd='>>?[[:space:]]*"?\$\{?(PANEL_PATH|p|h|env|sync|f|src)\}?([^[:alnum:]_]|$)'
+  for a in "${ROOT_PANEL_ALLOW[@]}"; do fixed+=(-e "$a"); done
+  bad=$({ installer_root_code | grep -nE "$cm" | grep -E "$tv"; installer_root_code | grep -nE "$rd"; } \
+          | grep -vE '_as_panel_user|runuser' | grep -vF "${fixed[@]}" || true)
+  [ -z "$bad" ] || { echo "root-run command on a panel-derived path (symlink-followable):"; echo "$bad"; return 1; }; }
+t 'no root-run cp/sed/chown/chmod/>/>>/bash on ANY PANEL_PATH-derived path ($p $env $sync ...)' priv_no_root_touch_of_panel_paths
+# the panel-user bodies must only ever be reached through _as_panel_user
+priv_panel_bodies_only_via_panel_user() { local bad
+  bad=$(installer_root_code | grep -nE '(_env_set_inner|_seed_env_inner)' | grep -vE '_as_panel_user' || true)
+  [ -z "$bad" ] || { echo "a panel-user-only body is called outside _as_panel_user:"; echo "$bad"; return 1; }; }
+t "_env_set_inner/_seed_env_inner run only through _as_panel_user"               priv_panel_bodies_only_via_panel_user
+
+# behaviour: with the panel-user hop stubbed to LOG, root itself runs no cp/chmod/chown/chgrp/sed
+priv_seed_env_runs_as_panel_user() { local d out
+  d=$(mktemp -d); printf 'A=1\n' > "$d/.env.example"
+  out=$(bash -c "
+    source '$INSTALLER'
+    PANEL_PATH='$d'
+    for c in cp chmod chown chgrp sed; do eval \"\$c() { echo ROOT-\$c \\\"\\\$*\\\"; }\"; done
+    _as_panel_user() { echo \"PANEL \$1 \$2\"; }
+    _seed_env")
+  rm -rf "$d"
+  case "$out" in *ROOT-*) echo "root ran: $out"; return 1 ;; esac
+  case "$out" in 'PANEL bash -c') : ;; *) echo "_seed_env did not hop to the panel user: $out"; return 1 ;; esac; }
+t "_seed_env copies AS the panel user; root runs no cp/chmod/chown/chgrp"         priv_seed_env_runs_as_panel_user
+priv_seed_env_result() { local d
+  d=$(mktemp -d); printf 'APP_KEY=\n' > "$d/.env.example"
+  bash -c "
+    source '$INSTALLER'
+    PANEL_PATH='$d'
+    _as_panel_user() { \"\$@\"; }
+    _seed_env" || { rm -rf "$d"; return 1; }
+  [ "$(stat -c %a "$d/.env")" = 640 ] && grep -qx 'APP_KEY=' "$d/.env"; local rc=$?; rm -rf "$d"; return $rc; }
+t "_seed_env still produces a 0640 .env from .env.example"                       priv_seed_env_result
+priv_seed_env_leaves_existing_link() { local d
+  d=$(mktemp -d); printf 'KEEP\n' > "$d/t"; ln -s "$d/t" "$d/.env"; : > "$d/.env.example"
+  bash -c "
+    source '$INSTALLER'
+    PANEL_PATH='$d'
+    _as_panel_user() { echo HOP; }
+    _seed_env" | grep -q HOP && { rm -rf "$d"; return 1; }
+  rm -rf "$d"; return 0; }
+t "_seed_env never reseeds over an existing .env, a symlink included"            priv_seed_env_leaves_existing_link
+priv_env_set_runs_as_panel_user() { local d out
+  d=$(mktemp -d); : > "$d/.env"
+  out=$(bash -c "
+    source '$INSTALLER'
+    for c in sed grep; do eval \"\$c() { echo ROOT-\$c; }\"; done
+    _as_panel_user() { echo \"PANEL \$* STDIN=\$(cat)\"; }
+    env_set DB_PASSWORD s3cr3t-pw '$d/.env'")
+  rm -rf "$d"
+  case "$out" in *ROOT-*) echo "root ran sed/grep on .env: $out"; return 1 ;; esac
+  case "$out" in 'PANEL bash -c '*' _ DB_PASSWORD '*'.env STDIN=s3cr3t-pw') : ;; *) echo "env_set did not hop with the value on stdin: $out"; return 1 ;; esac
+  case "${out%%STDIN=*}" in *s3cr3t-pw*) echo "the secret is in the argv: $out"; return 1 ;; esac; }
+t "env_set edits AS the panel user, value on stdin (never in argv)"              priv_env_set_runs_as_panel_user
+# first-install fallback: the sync that root runs is a private copy made before the chown, not the
+# checkout file laranode_ln could swap in between
+priv_sync_fallback_runs_private_copy() { local d r out
+  d=$(mktemp -d); r=$(mktemp -d); mkdir -p "$d/laranode-scripts/bin"; printf 'echo ORIGINAL\n' > "$d/laranode-scripts/bin/laranode-sync-scripts.sh"
+  out=$(bash -c "
+    source '$INSTALLER'
+    PANEL_PATH='$d'; LN_LIB_DEST='$r/lib'
+    chown() { :; }; chmod() { :; }
+    _stash_sync_script
+    printf 'echo SWAPPED\n' > '$d/laranode-scripts/bin/laranode-sync-scripts.sh'
+    _install_privileged_scripts" 2>&1)
+  rm -rf "$d" "$r"
+  case "$out" in *SWAPPED*) echo "root ran the swapped checkout file: $out"; return 1 ;; esac
+  case "$out" in *ORIGINAL*) : ;; *) echo "stash copy not run: $out"; return 1 ;; esac; }
+t "first install: root runs a private copy of the sync made before the chown"     priv_sync_fallback_runs_private_copy
+priv_sync_fallback_refuses_symlink() { local d out
+  d=$(mktemp -d); mkdir -p "$d/laranode-scripts/bin"; printf 'echo EVIL\n' > "$d/evil"
+  ln -s "$d/evil" "$d/laranode-scripts/bin/laranode-sync-scripts.sh"
+  out=$(bash -c "
+    source '$INSTALLER'
+    PANEL_PATH='$d'; LN_LIB_DEST='$d/nolib'
+    die() { echo \"DIED: \$*\"; exit 1; }
+    _stash_sync_script; echo SURVIVED" 2>&1)
+  rm -rf "$d"
+  case "$out" in *DIED*) : ;; *) echo "a symlinked sync script was stashed: $out"; return 1 ;; esac; }
+t "first install: a symlinked sync script in the checkout is refused"             priv_sync_fallback_refuses_symlink
+priv_fetch_stashes_before_chown() { local body a b
+  body=$(bash -c "source '$INSTALLER'; declare -f phase_fetch_panel")
+  a=$(printf '%s\n' "$body" | grep -n '_stash_sync_script' | head -1 | cut -d: -f1)
+  b=$(printf '%s\n' "$body" | grep -n '_prepare_panel_tree' | head -1 | cut -d: -f1)
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]; }
+t "phase_fetch_panel stashes the sync script before the tree is chowned"          priv_fetch_stashes_before_chown
+priv_settle_mkdir_as_panel_user() { local body
+  body=$(bash -c "source '$INSTALLER'; declare -f _settle_permissions" | grep -E '(^|[[:space:]])mkdir ' | grep -vE '_as_panel_user' || true)
+  [ -z "$body" ] || { echo "root mkdir in _settle_permissions: $body"; return 1; }; }
+t "_settle_permissions creates logs/ as the panel user"                          priv_settle_mkdir_as_panel_user
 echo ""
 echo "Results: passed=$PASS  failed=$FAIL"
 [ "$FAIL" -eq 0 ] && echo "ALL PASS" && exit 0

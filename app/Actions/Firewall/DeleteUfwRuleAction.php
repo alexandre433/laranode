@@ -2,7 +2,6 @@
 
 namespace App\Actions\Firewall;
 
-use Illuminate\Support\Facades\Process;
 use RuntimeException;
 
 class DeleteUfwRuleAction
@@ -14,13 +13,14 @@ class DeleteUfwRuleAction
             throw new RuntimeException('Empty rule id/spec');
         }
         if (ctype_digit($idOrSpec)) {
-            $cmd = 'yes | sudo ufw delete ' . (int) $idOrSpec;
+            $args = ['delete', (string) (int) $idOrSpec];
         } else {
-            $cmd = 'yes | sudo ufw delete ' . escapeshellarg($idOrSpec);
+            // e.g. "allow 22/tcp": the wrapper validates every token and answers ufw's prompt itself
+            $args = array_merge(['delete'], preg_split('/\s+/', $idOrSpec));
         }
-        $proc = Process::run(['bash', '-lc', $cmd]);
+        $proc = UfwCommand::run($args);
         if ($proc->failed()) {
-            throw new RuntimeException('UFW delete failed: ' . $proc->errorOutput());
+            throw new RuntimeException('UFW delete failed: '.$proc->errorOutput());
         }
     }
 }

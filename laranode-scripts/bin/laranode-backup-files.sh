@@ -1,15 +1,19 @@
 #!/bin/bash
 set -euo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # before ANY command runs: dirname below must not come from the caller's PATH
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
+ln_need_root
+LN_ARGC=$#
 
 # Usage: laranode-backup-files.sh <siteRoot> <outFile> <sysUser>
-SITE_ROOT="$1"
-OUT_FILE="$2"
-SYS_USER="$3"
+# The archive is read AS the site user and written AS www-data: root never opens a path
+# either of them controls (no symlink swap, no /etc/shadow into a www-data readable tar).
+ln_argc 3 3 "$0 <siteRoot> <outFile> <sysUser>"
+ln_sysuser "$3" SYS_USER
+ln_tmpfile "$2" OUT_FILE backup
+SITE_ROOT=$1
+case "$SITE_ROOT" in "/home/$SYS_USER/domains/"*) : ;; *) ln_die "site root must be /home/$SYS_USER/domains/<domain>" ;; esac
+ln_domain "${SITE_ROOT#"/home/$SYS_USER/domains/"}" DOMAIN
+ln_siteroot "$SYS_USER" "$DOMAIN" SITE_ROOT
 
-# Reject any value that could be smuggled as a CLI flag to tar/chown.
-for v in "$SITE_ROOT" "$OUT_FILE" "$SYS_USER"; do
-    case "$v" in -*) echo "Argument may not start with '-': $v" >&2; exit 1 ;; esac
-done
-
-tar -czf "$OUT_FILE" -C "$SITE_ROOT" .
-chown www-data:www-data -- "$OUT_FILE"
+ln_as "$SYS_USER" tar -czf - -C "$SITE_ROOT" . | ln_as "$LN_WEB_USER" tee -- "$OUT_FILE" >/dev/null

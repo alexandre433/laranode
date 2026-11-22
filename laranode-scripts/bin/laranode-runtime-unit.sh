@@ -1,81 +1,30 @@
 #!/bin/bash
 set -euo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # before ANY command runs: dirname below must not come from the caller's PATH
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
+ln_need_root
+LN_ARGC=$#
 
 # laranode-runtime-unit.sh <sub-command> <domain> <port> <system_user> <document_root> <template_dir>
 # Writes a systemd unit file for a Laranode runtime and reloads the daemon.
 # Called via sudo by SwitchRuntimeService.
+ln_argc 6 6 "$0 <sub-command> <domain> <port> <system_user> <document_root> <template_dir>"
+ln_enum "$1" SUBCMD write-unit
+ln_domain "$2" DOMAIN
+ln_port "$3" PORT
+ln_sysuser "$4" SYSTEM_USER
+ln_docroot "$5" DOCUMENT_ROOT
+ln_template_dir "$6" TEMPLATE_DIR
 
-# ---- arg validation ----
-if [ $# -ne 6 ]; then
-    echo "Usage: $0 <sub-command> <domain> <port> <system_user> <document_root> <template_dir>" >&2
-    exit 1
-fi
-
-SUBCMD="$1"
-DOMAIN="$2"
-PORT="$3"
-SYSTEM_USER="$4"
-DOCUMENT_ROOT="$5"
-TEMPLATE_DIR="$6"
-
-# Reject leading-dash args (ALL args — punch-list #6)
-for arg in "$SUBCMD" "$DOMAIN" "$PORT" "$SYSTEM_USER" "$DOCUMENT_ROOT" "$TEMPLATE_DIR"; do
-    case "$arg" in -*) echo "Invalid argument: $arg" >&2; exit 1 ;; esac
-done
-
-# Validate sub-command
-if ! echo "$SUBCMD" | grep -qE '^(write-unit)$'; then
-    echo "Invalid sub-command '$SUBCMD'. Must be: write-unit" >&2
-    exit 1
-fi
-
-# Validate domain — no leading dot, no consecutive dots, no path traversal
-# Must start with alphanumeric, contain only alphanumeric/dot/hyphen
-if ! echo "$DOMAIN" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9.-]+$'; then
-    echo "Invalid domain '$DOMAIN'." >&2
-    exit 1
-fi
-# Reject consecutive dots (e.g. ..evil.com)
-if echo "$DOMAIN" | grep -qE '\.\.'; then
-    echo "Invalid domain '$DOMAIN': consecutive dots not allowed." >&2
-    exit 1
-fi
-
-# Validate port — must be numeric and in range 9100–9499
-if ! echo "$PORT" | grep -qE '^[0-9]+$'; then
-    echo "Invalid port '$PORT': must be numeric." >&2
-    exit 1
-fi
-if [ "$PORT" -lt 9100 ] || [ "$PORT" -gt 9499 ]; then
-    echo "Port $PORT out of allowed range 9100–9499." >&2
-    exit 1
-fi
-
-# Validate system_user — must end in _ln
-if ! echo "$SYSTEM_USER" | grep -qE '_ln$'; then
-    echo "Invalid system_user '$SYSTEM_USER': must end in _ln." >&2
-    exit 1
-fi
-
-# ---- write-unit ----
 TEMPLATE_FILE="$TEMPLATE_DIR/laranode-frankenphp.service.template"
+[ -f "$TEMPLATE_FILE" ] || ln_die "template not found"
 UNIT_NAME="laranode-frankenphp-${DOMAIN}.service"
 UNIT_PATH="/etc/systemd/system/${UNIT_NAME}"
 
-if [ ! -f "$TEMPLATE_FILE" ]; then
-    echo "Template not found: $TEMPLATE_FILE" >&2
-    exit 1
-fi
-
-UNIT_CONTENT=$(cat "$TEMPLATE_FILE")
-UNIT_CONTENT=$(echo "$UNIT_CONTENT" | sed "s#{user}#${SYSTEM_USER}#g")
-UNIT_CONTENT=$(echo "$UNIT_CONTENT" | sed "s#{domain}#${DOMAIN}#g")
-UNIT_CONTENT=$(echo "$UNIT_CONTENT" | sed "s#{port}#${PORT}#g")
-UNIT_CONTENT=$(echo "$UNIT_CONTENT" | sed "s#{document_root}#${DOCUMENT_ROOT}#g")
-
-echo "$UNIT_CONTENT" > "$UNIT_PATH"
+ln_render "$TEMPLATE_FILE" user "$SYSTEM_USER" domain "$DOMAIN" port "$PORT" \
+    document_root "$DOCUMENT_ROOT" | ln_install_file "$UNIT_PATH" 644
 echo "Written unit file: $UNIT_PATH"
 
-# daemon-reload MUST happen before enable/start (FIXED: sequencing)
+# daemon-reload MUST happen before enable/start
 systemctl daemon-reload
 echo "daemon-reload complete."

@@ -29,7 +29,9 @@ class CreateWebsiteRequest extends FormRequest
 
         return [
             'url' => ['required', 'string', 'max:255', 'unique:websites,url', $domainRegex],
-            'document_root' => ['required', 'string', 'max:255'],
+            // same shape the privileged scripts accept (ln_docroot): a leading slash, no spaces or
+            // shell characters, no ".." segment
+            'document_root' => ['required', 'string', 'max:255', 'regex:/^\/[A-Za-z0-9._\/-]*\z/', 'not_regex:/(^|\/)\.\.(\/|$)/'],
             'php_version_id' => ['required', 'integer', 'exists:php_versions,id'],
         ];
     }

@@ -1,30 +1,16 @@
 #!/bin/bash
+set -euo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # before ANY command runs: dirname below must not come from the caller's PATH
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
+ln_need_root
+LN_ARGC=$#
 
-# Check if the correct number of arguments is provided
-if [ $# -ne 2 ]; then
-    echo "Usage: $0 {systemUser} {password}"
-    exit 1
-fi
+# Usage: laranode-update-sh-password.sh {systemUser} {password}
+ln_argc 2 2 "$0 {systemUser} {password}"
+ln_sysuser "$1" SYSTEM_USER
+ln_secret "$2" NEW_PASSWORD
 
-# Assign arguments to variables
-SYSTEM_USER="$1"
-NEW_PASSWORD="$2"
+# One validated line on chpasswd's stdin (never a shell, never a newline).
+printf '%s:%s\n' "$SYSTEM_USER" "$NEW_PASSWORD" | chpasswd
 
-# Check if the user exists
-if ! id "$SYSTEM_USER" &>/dev/null; then
-    echo "Error: User '$SYSTEM_USER' does not exist."
-    exit 2
-fi
-
-# Update the user's password
-echo "$SYSTEM_USER:$NEW_PASSWORD" | sudo chpasswd
-
-# Check if the password update was successful
-if [ $? -eq 0 ]; then
-    echo "Password for user '$SYSTEM_USER' has been updated successfully."
-else
-    echo "Failed to update password for user '$SYSTEM_USER'."
-    exit 3
-fi
-
-exit 0
+echo "Password for user '$SYSTEM_USER' has been updated successfully."

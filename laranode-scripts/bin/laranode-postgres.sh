@@ -12,39 +12,66 @@
 #   laranode-postgres.sh update-user-password <user>  (password via stdin)
 
 set -euo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # before ANY command runs: dirname below must not come from the caller's PATH
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
+ln_need_root
 
 # ---- helpers ----------------------------------------------------------------
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-# Validate identifier: only [a-zA-Z0-9_] allowed.
+# Validate identifier: only [a-zA-Z0-9_] allowed. (bash regex, not `echo | grep`:
+# grep tests line by line and let "ok<newline>evil" through.)
 assert_safe() {
     local val="$1"
-    if ! echo "$val" | grep -qE '^[a-zA-Z0-9_]+$'; then
-        die "Unsafe identifier: '$val' — only [a-zA-Z0-9_] allowed."
+    if ! [[ $val =~ ^[a-zA-Z0-9_]{1,63}$ ]]; then
+        die "Unsafe identifier — only [a-zA-Z0-9_] (max 63) allowed."
     fi
+}
+
+# Never touch an administrative role or a template/system database, whatever the caller says.
+assert_role() {
+    local lc=${1,,}
+    case "$lc" in postgres|pg_*|replicator|rdsadmin|root) die "Refusing reserved role." ;; esac
+}
+assert_dbname() {
+    local lc=${1,,}
+    case "$lc" in postgres|template0|template1) die "Refusing system database." ;; esac
 }
 
 # Validate an encoding name (e.g. UTF8, LATIN1, SQL_ASCII): only [a-zA-Z0-9_].
 assert_encoding() {
     local val="$1"
-    if ! echo "$val" | grep -qE '^[a-zA-Z0-9_]+$'; then
-        die "Unsafe encoding: '$val' — only [a-zA-Z0-9_] allowed."
+    if ! [[ $val =~ ^[a-zA-Z0-9_]{1,32}$ ]]; then
+        die "Unsafe encoding — only [a-zA-Z0-9_] allowed."
     fi
 }
 
 # Validate a locale (e.g. en_US.UTF-8, C, POSIX): only [a-zA-Z0-9_.@-].
 assert_locale() {
     local val="$1"
-    if ! echo "$val" | grep -qE '^[a-zA-Z0-9_.@-]+$'; then
-        die "Unsafe locale: '$val' — only [a-zA-Z0-9_.@-] allowed."
+    if ! [[ $val =~ ^[a-zA-Z0-9_.@-]{1,64}$ ]]; then
+        die "Unsafe locale — only [a-zA-Z0-9_.@-] allowed."
     fi
 }
 
 # Generate a random dollar-quote tag (lowercase alpha, 8 chars) to avoid
 # dollar-quoting breakout attacks.
 random_tag() {
-    head -c 16 /dev/urandom | base64 | tr -dc 'a-z' | head -c 8
+    head -c 64 /dev/urandom | base64 | tr -dc 'a-z' | head -c 8
+}
+
+# Read a password from stdin, never from argv; it must not be able to close its own quote.
+read_password() {   # <outvar> <tagvar>
+    local pw tag
+    pw=$(head -c 1024)
+    [ -n "$pw" ] || die "Password must not be empty."
+    [ "${#pw}" -le 256 ] || die "Password too long."
+    tag=$(random_tag)
+    [ "${#tag}" -ge 6 ] || die "Could not generate a quoting tag."
+    [[ $pw != *"\$${tag}\$"* ]] || die "Password rejected."
+    printf -v "$1" '%s' "$pw"
+    printf -v "$2" '%s' "$tag"
 }
 
 # Run SQL as the postgres superuser via stdin (never as a command argument).
@@ -67,7 +94,7 @@ libc_to_icu_locale() {
 
 cmd_create_db() {
     local name="$1" encoding="${2:-UTF8}" locale="${3:-en_US.UTF-8}"
-    assert_safe "$name"
+    assert_safe "$name"; assert_dbname "$name"
     assert_encoding "$encoding"
     assert_locale "$locale"
 
@@ -103,16 +130,10 @@ SQL
 
 cmd_create_user() {
     local user="$1"
-    assert_safe "$user"
+    assert_safe "$user"; assert_role "$user"
 
-    # Read password from stdin, never from argv.
-    local password
-    password=$(cat)
-
-    [ -n "$password" ] || die "Password must not be empty."
-
-    local tag
-    tag=$(random_tag)
+    local password tag
+    read_password password tag
 
     # Pass SQL via stdin to psql — password embedded as dollar-quoted literal.
     run_as_postgres --dbname=postgres <<SQL
@@ -123,8 +144,8 @@ SQL
 
 cmd_grant() {
     local user="$1" db="$2"
-    assert_safe "$user"
-    assert_safe "$db"
+    assert_safe "$user"; assert_role "$user"
+    assert_safe "$db"; assert_dbname "$db"
 
     run_as_postgres --dbname=postgres <<SQL
 GRANT CONNECT ON DATABASE "$db" TO "$user";
@@ -134,8 +155,8 @@ SQL
 
 cmd_revoke() {
     local user="$1" db="$2"
-    assert_safe "$user"
-    assert_safe "$db"
+    assert_safe "$user"; assert_role "$user"
+    assert_safe "$db"; assert_dbname "$db"
 
     run_as_postgres --dbname=postgres <<SQL
 REVOKE ALL PRIVILEGES ON DATABASE "$db" FROM "$user";
@@ -145,7 +166,7 @@ SQL
 
 cmd_drop_db() {
     local name="$1"
-    assert_safe "$name"
+    assert_safe "$name"; assert_dbname "$name"
 
     run_as_postgres --dbname=postgres <<SQL
 DROP DATABASE IF EXISTS "$name";
@@ -154,7 +175,7 @@ SQL
 
 cmd_drop_user() {
     local user="$1"
-    assert_safe "$user"
+    assert_safe "$user"; assert_role "$user"
 
     run_as_postgres --dbname=postgres <<SQL
 DROP ROLE IF EXISTS "$user";
@@ -163,16 +184,10 @@ SQL
 
 cmd_update_user_password() {
     local user="$1"
-    assert_safe "$user"
+    assert_safe "$user"; assert_role "$user"
 
-    # Read password from stdin, never from argv.
-    local password
-    password=$(cat)
-
-    [ -n "$password" ] || die "Password must not be empty."
-
-    local tag
-    tag=$(random_tag)
+    local password tag
+    read_password password tag
 
     run_as_postgres --dbname=postgres <<SQL
 ALTER ROLE "$user" PASSWORD \$${tag}\$${password}\$${tag}\$;
@@ -192,5 +207,5 @@ case "$ACTION" in
     drop-db)               cmd_drop_db "$@" ;;
     drop-user)             cmd_drop_user "$@" ;;
     update-user-password)  cmd_update_user_password "$@" ;;
-    *)                     die "Unknown action: '$ACTION'. Valid: create-db create-user grant revoke drop-db drop-user update-user-password" ;;
+    *)                     die "Unknown action. Valid: create-db create-user grant revoke drop-db drop-user update-user-password" ;;
 esac

@@ -14,6 +14,17 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Laranode templates directory
+    |--------------------------------------------------------------------------
+    |
+    | The privileged scripts only accept templates from the templates directory
+    | that sits next to them. In production that is the root-owned copy the
+    | installer makes (see docs/security-sudo.md); in development it is the repo.
+    */
+    'templates_path' => env('LARANODE_TEMPLATES_PATH', base_path('laranode-scripts/templates')),
+
+    /*
+    |--------------------------------------------------------------------------
     | Laranode PHP-FPM Pools
     |--------------------------------------------------------------------------
     |
@@ -21,7 +32,7 @@ return [
     | configuration template. This is used to create and delete PHP-FPM pools.
     |
     */
-    'php_fpm_pool_template' => base_path('laranode-scripts/templates/php-fpm-pool.template'),
+    'php_fpm_pool_template' => rtrim(env('LARANODE_TEMPLATES_PATH', base_path('laranode-scripts/templates')), '/').'/php-fpm-pool.template',
 
     /*
     |--------------------------------------------------------------------------
@@ -32,7 +43,7 @@ return [
     | host configuration template. This is used to create and delete Apache
     | virtual hosts.
     */
-    'apache_vhost_template' => base_path('laranode-scripts/templates/apache-vhost.template'),
+    'apache_vhost_template' => rtrim(env('LARANODE_TEMPLATES_PATH', base_path('laranode-scripts/templates')), '/').'/apache-vhost.template',
 
     /*
     |--------------------------------------------------------------------------
@@ -43,7 +54,7 @@ return [
     | Uses mod_proxy to forward traffic to the FrankenPHP process on loopback,
     | with a ProxyPass exception for ACME challenge renewals.
     */
-    'apache_vhost_frankenphp_template' => base_path('laranode-scripts/templates/apache-vhost-frankenphp.template'),
+    'apache_vhost_frankenphp_template' => rtrim(env('LARANODE_TEMPLATES_PATH', base_path('laranode-scripts/templates')), '/').'/apache-vhost-frankenphp.template',
 
     /*
     |--------------------------------------------------------------------------

@@ -1,24 +1,38 @@
 #!/bin/bash
+set -euo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # before ANY command runs: dirname below must not come from the caller's PATH
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd -P)/validate.sh"
+ln_need_root
+LN_ARGC=$#
 
-# Check if at least two arguments are provided (system user and path)
-if [ $# -lt 2 ]; then
-  echo "Usage: $0 {fullPathToCreate} {system_user}"
-  exit 1
-fi
-
+# Usage: laranode-create-directory.sh {fullPathToCreate} {system_user}
+# The path must live under /home/<user>/domains. Everything below runs AS the site user,
+# so a symlink the tenant plants cannot make root create or chown anything elsewhere.
+ln_argc 2 2 "$0 {fullPathToCreate} {system_user}"
+ln_sysuser "$2" SYSTEM_USER
 DIR_PATH=$1
-SYSTEM_USER=$2
+BASE="/home/$SYSTEM_USER/domains"
+[ "${#DIR_PATH}" -le 1024 ] && [[ $DIR_PATH =~ ^/[A-Za-z0-9._/-]+$ ]] || ln_die "invalid path"
+[[ $DIR_PATH =~ (^|/)\.\.(/|$) ]] && ln_die "invalid path"
+case "$DIR_PATH" in "$BASE"/*) : ;; *) ln_die "path must be inside $BASE" ;; esac
+[ -d "$BASE" ] && [ ! -L "$BASE" ] || ln_die "$BASE is not a plain directory"
 
-# Automatically append _ln to $USERNAME if not already present
-if echo "$SYSTEM_USER" | grep -qv '_ln$'; then
-    SYSTEM_USER+="_ln"
-fi
+# every existing ancestor must be a real directory (not a symlink out of the tree)
+probe=$DIR_PATH
+while [ "$probe" != "$BASE" ]; do
+    [ -L "$probe" ] && ln_die "refusing a symlink in the path"
+    if [ -e "$probe" ]; then
+        real=$(realpath -e -- "$probe") && case "$real" in "$BASE"/*) : ;; *) ln_die "path escapes $BASE" ;; esac
+        break
+    fi
+    probe=$(dirname "$probe")
+done
 
-
-# Create directory and apply permisisons
-mkdir -p "$DIR_PATH"
-find /home/$SYSTEM_USER/domains -type d -exec chmod 770 {} \;
-find /home/$SYSTEM_USER/domains -type f -exec chmod 660 {} \;
-chown -R $SYSTEM_USER:$SYSTEM_USER /home/$SYSTEM_USER
+ln_as "$SYSTEM_USER" mkdir -p -- "$DIR_PATH"
+# ownership first (coreutils chown -R walks with fd-relative fts and never follows links),
+# then the site user, now the owner of everything, sets the modes.
+chown -R -h -- "$SYSTEM_USER:$SYSTEM_USER" "$BASE"
+ln_as "$SYSTEM_USER" find "$BASE" -xdev -type d -exec chmod 770 {} +
+ln_as "$SYSTEM_USER" find "$BASE" -xdev -type f -exec chmod 660 {} +
 
 echo "Directory created successfully."
