@@ -245,14 +245,24 @@ choose() {
   echo "${_a:-$2}"
 }
 
-# env_set KEY VALUE FILE — add-or-replace a single .env assignment safely
-env_set() {
-  local k="$1" v="$2" f="$3"
+# env_set KEY VALUE FILE — add-or-replace a single .env assignment safely.
+# The panel .env lives in the tree laranode_ln owns. A root `sed -i` / `>>` there follows a
+# symlink laranode_ln planted (.env -> any file) and edits it as root, so the edit runs AS the
+# panel account (_env_set_inner, via _as_panel_user): through a link to a file it may not write,
+# the kernel refuses. The value travels on stdin, never in a process's argv.
+_env_set_inner() {   # runs as the panel user ONLY: _env_set_inner KEY FILE   (value on stdin)
+  local k="$1" f="$2" v="" e
+  IFS= read -r v || true
+  e=${v//\\/\\\\}; e=${e//&/\\&}; e=${e//#/\\#}
   if grep -qE "^${k}=" "$f"; then
-    sed -i "s#^${k}=.*#${k}=\"${v}\"#" "$f"
+    sed -i "s#^${k}=.*#${k}=\"${e}\"#" "$f"
   else
     printf '%s="%s"\n' "$k" "$v" >> "$f"
   fi
+}
+env_set() {
+  local k="$1" v="$2" f="$3"
+  printf '%s\n' "$v" | _as_panel_user bash -c "$(declare -f _env_set_inner); cd /; _env_set_inner \"\$@\"" _ "$k" "$f"
 }
 
 # persist_secret LINE — append to /root/.laranode-credentials (0600)
@@ -264,17 +274,18 @@ persist_secret() {
 
 # _seed_env — create the panel .env from .env.example when absent. It receives the DB
 # password right after, so it is never world-readable: created under umask 027 and
-# handed to the panel's group (www-data/laranode_ln) at 0640. An existing .env is
-# never touched.
+# is laranode_ln's own 0640 file (its group is www-data's). An existing .env is never touched.
+# The copy runs AS the panel account: a root `cp` (or chmod/chown/chgrp on the result) follows a
+# symlink laranode_ln planted (.env.example -> /root/.laranode-credentials, /etc/shadow) and
+# lands root-only content in a file laranode_ln can read. As laranode_ln the kernel refuses.
+_seed_env_inner() {   # runs as the panel user ONLY: _seed_env_inner SRC DEST
+  umask 027
+  cp "$1" "$2" && chmod 640 "$2"
+}
 _seed_env() {
   local env="${PANEL_PATH}/.env"
-  [ -f "$env" ] && return 0
-  ( umask 027; cp "${PANEL_PATH}/.env.example" "$env" )
-  chmod 640 "$env"
-  # owned by the panel account: artisan (key:generate) runs as laranode_ln and writes it
-  if id laranode_ln >/dev/null 2>&1; then chown laranode_ln "$env"; fi
-  if getent group laranode_ln >/dev/null 2>&1; then chgrp laranode_ln "$env"; fi
-  return 0
+  { [ -e "$env" ] || [ -L "$env" ]; } && return 0
+  _as_panel_user bash -c "$(declare -f _seed_env_inner); cd /; _seed_env_inner \"\$@\"" _ "${PANEL_PATH}/.env.example" "$env"
 }
 
 # ------------------------------------------------------------------------------
@@ -642,6 +653,7 @@ phase_fetch_panel() {
   # the privileged scripts) comes from the ROOT-OWNED copy in ${LN_LIB_DEST}, never from the
   # checkout: laranode_ln writes that tree. Publish the copy now, before phase_webserver needs it.
   # The sync reads the checkout AS laranode_ln, so the tree is handed to it first.
+  _stash_sync_script
   _prepare_panel_tree
   log "Installing the privileged scripts and templates (root-owned copy)"
   _install_privileged_scripts
@@ -1756,19 +1768,37 @@ _install_scheduler_cron() {
 #   sudo /usr/local/lib/laranode/bin/laranode-sync-scripts.sh      (see docs/security-sudo.md)
 LN_LIB_DEST=/usr/local/lib/laranode
 
+# First install only (no root-owned sync script yet): a re-run uses the ROOT-OWNED sync script,
+# never the one laranode_ln may have edited in the checkout (an updated sync script takes effect
+# from the run after the one that copied it). On a first install the sync script is taken from
+# the checkout ONCE, into a root-only temp dir, before the tree is handed to laranode_ln
+# (phase_fetch_panel), and that private copy is what runs: laranode_ln cannot swap it between the
+# copy and the run. `cp -P` never follows a link, and the copy must be a regular file.
+LN_SYNC_STASH=""
+_stash_sync_script() {
+  local src="${PANEL_PATH}/laranode-scripts/bin/laranode-sync-scripts.sh"
+  LN_SYNC_STASH=""
+  [ -f "${LN_LIB_DEST}/bin/laranode-sync-scripts.sh" ] && return 0
+  LN_SYNC_STASH=$(mktemp -d) || die "mktemp failed"
+  chmod 700 "$LN_SYNC_STASH"
+  cp -P --no-preserve=all "$src" "${LN_SYNC_STASH}/sync.sh" 2>/dev/null \
+    || { rm -rf "$LN_SYNC_STASH"; LN_SYNC_STASH=""; die "laranode-sync-scripts.sh missing from the panel checkout (laranode-scripts/bin)"; }
+  if [ -L "${LN_SYNC_STASH}/sync.sh" ] || [ ! -f "${LN_SYNC_STASH}/sync.sh" ]; then
+    rm -rf "$LN_SYNC_STASH"; LN_SYNC_STASH=""
+    die "laranode-sync-scripts.sh in the panel checkout is not a regular file"
+  fi
+}
+
 _install_privileged_scripts() {
-  local sync="${LN_LIB_DEST}/bin/laranode-sync-scripts.sh"
+  local sync="${LN_LIB_DEST}/bin/laranode-sync-scripts.sh" rc=0
   mkdir -p /usr/local/lib && chown root:root /usr/local/lib && chmod u=rwx,go=rx /usr/local/lib
   if [ ! -f "$sync" ]; then
-    # first install: the tree was just cloned by this installer and there is no root copy yet.
-    # A re-run uses the ROOT-OWNED sync script instead, never the one laranode_ln may have
-    # edited in the checkout (an updated sync script takes effect from the run after the one
-    # that copied it).
-    sync="${PANEL_PATH}/laranode-scripts/bin/laranode-sync-scripts.sh"
-    [ -f "$sync" ] || die "laranode-sync-scripts.sh missing from ${PANEL_PATH}/laranode-scripts/bin"
+    [ -n "$LN_SYNC_STASH" ] || _stash_sync_script
+    sync="${LN_SYNC_STASH}/sync.sh"
   fi
-  bash "$sync" "${PANEL_PATH}" \
-    || die "could not install the privileged scripts into ${LN_LIB_DEST}"
+  bash "$sync" "${PANEL_PATH}" || rc=$?
+  if [ -n "$LN_SYNC_STASH" ]; then rm -rf "$LN_SYNC_STASH"; LN_SYNC_STASH=""; fi
+  [ "$rc" -eq 0 ] || die "could not install the privileged scripts into ${LN_LIB_DEST}"
 }
 
 _install_sudoers() {
@@ -1782,7 +1812,7 @@ _install_sudoers() {
 
 _settle_permissions() {
   local h=/home/laranode_ln p="${PANEL_PATH}"
-  mkdir -p "$h/logs"
+  _as_panel_user mkdir -p "$h/logs"   # a root `mkdir -p` through a planted dangling link would create a root dir elsewhere
   chown -R laranode_ln:laranode_ln "$h"
   # Every mode change below runs AS the panel user (it owns the whole tree after the chown):
   # a root `find -exec chmod <path>` follows a symlink the panel account swaps in after find
@@ -1838,9 +1868,9 @@ phase_services() {
 # Power page). Installs the sudoers drop-in and registers ONLY what the manifest above
 # lists as managed:true, so pre-existing services are never manageable.
 _install_sleep_wake() {
-  local src="${LN_LIB_DEST}/etc/sudoers.d/laranode-sleep"
-  if [ -f "$src" ] && visudo -c -f "$src" >/dev/null 2>&1; then
-    install -o root -g root -m 440 "$src" /etc/sudoers.d/laranode-sleep
+  local drop="${LN_LIB_DEST}/etc/sudoers.d/laranode-sleep"   # the root-owned copy
+  if [ -f "$drop" ] && visudo -c -f "$drop" >/dev/null 2>&1; then
+    install -o root -g root -m 440 "$drop" /etc/sudoers.d/laranode-sleep
     bash "${LN_LIB_DEST}/bin/laranode-managed-register.sh" reverb queue fpm hostdb \
       || warn "sleep/wake registration failed; the feature stays unavailable"
     _reassert_sleep_wake

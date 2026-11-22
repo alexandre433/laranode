@@ -28,6 +28,8 @@ flunk() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 # ---- env_set ----------------------------------------------------------------
 echo "=== env_set ==="
 
+# env_set edits AS the panel user (runuser); here the hop is replaced by running as the test user
+_as_panel_user() { "$@"; }
 TMP=$(mktemp)
 printf 'EXISTING=old\nOTHER=keep\n' > "$TMP"
 

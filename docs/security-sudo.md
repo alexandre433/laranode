@@ -64,9 +64,16 @@ over the tree (a root `chmod <path>` follows a symlink swapped in after `find` l
 Root-run installer steps render only from the root-owned copy in `/usr/local/lib/laranode/templates`
 (the scheduler cron line, the systemd units, the panel vhost), never from the checkout.
 `phase_fetch_panel` publishes that copy (through the sync, which judges it) before `phase_webserver`
-needs it; a re-run uses the already installed, root-owned sync script, the first install falls back
-to the one in the fresh clone. A unit test fails when any root step reads or runs something under
-the panel tree.
+needs it; a re-run uses the already installed, root-owned sync script. The first install takes the
+sync script from the fresh clone ONCE, into a root-only temp dir, before the tree is handed to
+`laranode_ln` (`_stash_sync_script`; `cp -P`, must be a regular file), and runs that private copy.
+The panel `.env` is seeded from `.env.example` (`_seed_env`) and edited (`env_set`) AS `laranode_ln`
+(the value travels on stdin, not in argv): a root `cp`/`sed -i`/`>>` there follows a symlink
+`laranode_ln` planted (`.env.example -> /root/.laranode-credentials`, `.env -> any file`). A unit test
+fails when any root-run cp/mv/sed/chown/chmod/chgrp/install/tee/ln/rm/mkdir/bash/find or `>`/`>>` hits
+a path derived from `PANEL_PATH` (`$p`, `$env`, `$sync`, ...) outside `_as_panel_user` or a short
+reasoned allowlist; `sudo-hardening/assert-installer-env.sh` proves the two symlink cases in a real
+container.
 
 The installer also refuses a host with `fs.protected_hardlinks` other than 1 (see Known limits), and
 every sudo-able script resets `PATH` before its first command (`dirname`), not only inside

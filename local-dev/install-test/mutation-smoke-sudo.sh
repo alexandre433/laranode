@@ -133,6 +133,14 @@ mut $L 'ln_open9_under opens a FIFO (root hangs for ever)' \
 mut bin/laranode-installer.sh 'installer: settle step makes bootstrap/cache web-writable' \
     '  _as_panel_user chmod 770 "$h/logs"' '  _as_panel_user chmod 770 "$h/logs" "$p/bootstrap/cache"'
 
+# --- r4: the panel .env is seeded and edited AS the panel user (assert-installer-env.sh) -------
+mut bin/laranode-installer.sh 'installer: _seed_env copies .env.example as root (follows a planted link)' \
+    '  _as_panel_user bash -c "$(declare -f _seed_env_inner); cd /; _seed_env_inner \"\$@\"" _ "${PANEL_PATH}/.env.example" "$env"' \
+    '  ( umask 027; cp "${PANEL_PATH}/.env.example" "$env" ); chmod 640 "$env"'
+mut bin/laranode-installer.sh 'installer: env_set edits .env as root (follows a planted link)' \
+    '  printf '"'"'%s\n'"'"' "$v" | _as_panel_user bash -c "$(declare -f _env_set_inner)' \
+    '  printf '"'"'%s\n'"'"' "$v" | bash -c "$(declare -f _env_set_inner)'
+
 IMG=laranode-sudo-fast
 docker build -q -t "$IMG" - >/dev/null <<'DF'
 FROM debian:13

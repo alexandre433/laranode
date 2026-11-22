@@ -15,6 +15,7 @@
 #   (installed by Laranode). No manifest = nothing is registered (fail closed).
 #
 set -uo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin   # root-run by the installer: never trust the caller's PATH
 
 [ "$(id -u)" = 0 ] || { echo "ERROR: must run as root" >&2; exit 4; }
 [ $# -ge 1 ] || { echo "usage: $0 <reverb|queue|fpm|hostdb> ..." >&2; exit 2; }

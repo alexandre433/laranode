@@ -86,6 +86,16 @@ MUTATIONS=(
   'root-owned copy not published in phase_fetch_panel|s#^  _install_privileged_scripts$#  :#'
   'settle chmods the tree as root again|s#_as_panel_user find "$h" -type d -exec chmod 750#find "$h" -type d -exec chmod 750#'
   'storage chmod run as root again|s#_as_panel_user find "$p/storage" -type d#find "$p/storage" -type d#'
+  # sudo review r4: .env / .env.example / the sync script are never touched by root through a link
+  '_seed_env copies as root again (follows a planted .env.example link)|s#^  _as_panel_user bash -c "\$(declare -f _seed_env_inner).*#  ( umask 027; cp "${PANEL_PATH}/.env.example" "$env" ); chmod 640 "$env"#'
+  'env_set edits as root again (follows a planted .env link)|s#| _as_panel_user bash -c "\$(declare -f _env_set_inner)#| bash -c "$(declare -f _env_set_inner)#'
+  'env_set value passed in argv again|s#_env_set_inner \\"\\$@\\"" _ "\$k" "\$f"#_env_set_inner \\"\\$@\\"" _ "$k" "$f" "$v"#'
+  'settle chmods .env as root again|s#\[ -f "\$p/.env" \] \&\& _as_panel_user chmod 640#[ -f "$p/.env" ] \&\& chmod 640#'
+  'settle creates logs/ as root again|s#_as_panel_user mkdir -p "\$h/logs"#mkdir -p "$h/logs"#'
+  'first-install sync runs from the checkout again|s#^    sync="\${LN_SYNC_STASH}/sync.sh"#    sync="${PANEL_PATH}/laranode-scripts/bin/laranode-sync-scripts.sh"#'
+  'sync script not stashed before the chown|s#^  _stash_sync_script$#  :#'
+  'stash follows a link (cp without -P)|s#cp -P --no-preserve=all "\$src"#cp "$src"#'
+  'stash accepts a symlink|s#if \[ -L "\${LN_SYNC_STASH}/sync.sh" \] || \[ ! -f "\${LN_SYNC_STASH}/sync.sh" \]; then#if false; then#'
   # sudo review r3 F3
   'protected_hardlinks=0 accepted|s#\[ "$v" = 1 \] || die "fs.protected_hardlinks#true || die "fs.protected_hardlinks#'
   'protected_hardlinks never checked by main|s#^  _require_protected_hardlinks$#  :#'

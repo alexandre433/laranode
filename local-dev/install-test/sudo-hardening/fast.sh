@@ -83,6 +83,7 @@ sudo -n -l -U www-data | sed -n 1,12p
 rc=0
 bash "$HERE/assert-perms.sh"   || rc=1
 PANEL="$PANEL" bash "$HERE/assert-sync.sh" || rc=1
+INSTALLER="$INSTALLER" bash "$HERE/assert-installer-env.sh" || rc=1
 STUBS=1 bash "$HERE/assert-hostile.sh" "$@" || rc=1
 echo "fast harness exit: $rc"
 exit $rc
