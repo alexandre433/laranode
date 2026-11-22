@@ -28,17 +28,20 @@ SUDOERS_DIR=${LARANODE_SUDOERS_DIR:-/etc/sudoers.d}
 PANEL=${1:-${PANEL_PATH:-/home/laranode_ln/panel}}
 SRC="$PANEL/laranode-scripts"
 BASE_DROPINS="laranode-panel laranode-cron laranode-runtimes laranode-ufw"
+PANEL_USER=laranode_ln
 
 die() { echo "laranode-sync-scripts: $*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "must run as root"
+id -u "$PANEL_USER" >/dev/null 2>&1 || die "no $PANEL_USER account to read the checkout as"
 [ -d "$SRC/bin" ] && [ -d "$SRC/lib" ] && [ -d "$SRC/templates" ] && [ -d "$SRC/etc/sudoers.d" ] \
     || die "no laranode-scripts tree at $SRC"
 # the destination's parent must be root-owned and not writable by others
 parent=$(dirname "$DEST")
 [ "$(stat -c '%u' "$parent")" = 0 ] && [ $(( 0$(stat -c '%a' "$parent") & 022 )) -eq 0 ] \
     || die "$parent must be owned by root and not group/world writable"
-# never follow a link out of the source tree
+# a link inside the source tree is refused outright (the READ below is made as $PANEL_USER, so a
+# link swapped in after this scan still cannot hand root anything: see read_src)
 if find "$SRC/bin" "$SRC/lib" "$SRC/templates" "$SRC/etc" -type l | grep -q .; then
     die "symlinks inside $SRC are not allowed"
 fi
@@ -48,37 +51,63 @@ trap 'rm -rf -- "$STAGE"' EXIT
 chmod 755 "$STAGE"
 mkdir -p "$STAGE/bin" "$STAGE/lib" "$STAGE/templates" "$STAGE/etc/sudoers.d"
 
-# ---- bin: every laranode-*.sh, except the installer (run by hand from the tree) -------
-# stage_file <src> <dst> <mode>: copy WITHOUT following a symlink (cp -P opens the source
-# O_NOFOLLOW), then require a plain regular file. Everything is then checked and published
-# from the root-only COPY: the panel account cannot swap the source between check and use,
-# and a link swapped in after the symlink scan cannot make root copy /etc/shadow into the tree.
-stage_file() {
-    cp -P --no-preserve=all -- "$1" "$2" || die "cannot copy ${1##*/}"
-    [ -f "$2" ] && [ ! -L "$2" ] || die "${1##*/} is not a regular file"
+# ---- reading the checkout --------------------------------------------------------------
+# The checkout is writable by $PANEL_USER, which a compromised web process can reach. Root must
+# therefore never open a path inside it: a parent directory ($SRC/templates, $SRC itself, $PANEL)
+# swapped for a link to /etc after any check would make a root cp publish /etc/shadow, world
+# readable, into the script directory (a check on the LAST path component cannot see that).
+# So every directory listing and every file read is made AS $PANEL_USER: whatever it can read
+# is already its own, anything else fails with "permission denied" and the sync refuses.
+# Root only ever WRITES, to fixed names it validated, in a staging directory nobody else can
+# reach, and then judges (bash -n, sudoers allowlist, visudo -c) and publishes that copy.
+run_as_panel() { timeout 30 runuser -u "$PANEL_USER" -- "$@"; }
+
+# list_src <dir> <find -name glob>: the plain names directly under <dir>, NUL-separated, into SRC_NAMES
+list_src() {
+    SRC_NAMES=()
+    local name list="$STAGE/.list"
+    run_as_panel find "$1" -mindepth 1 -maxdepth 1 -name "$2" -printf '%f\0' > "$list" 2>/dev/null \
+        || die "cannot list $1 as $PANEL_USER"
+    while IFS= read -r -d '' name; do SRC_NAMES+=("$name"); done < "$list"
+    rm -f -- "$list"
+}
+# read_src <src> <dst> <mode>: copy a regular file the panel account can read (at most 2 MiB) into
+# the staging directory as a root-owned file. The destination name was validated by the caller.
+read_src() {
+    run_as_panel test -f "$1" || die "${1##*/} is not a regular file readable by $PANEL_USER"
+    run_as_panel cat -- "$1" | head -c 2097152 > "$2" || die "cannot read ${1##*/} as $PANEL_USER (or it is over 2 MiB)"
+    [ -f "$2" ] && [ ! -L "$2" ] || die "${1##*/} did not stage as a regular file"
     chown root:root -- "$2"; chmod "$3" -- "$2"
 }
+safe_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }
 
+# ---- bin: every laranode-*.sh, except the installer (run by hand from the tree) -------
 n=0
-for f in "$SRC"/bin/laranode-*.sh; do
-    b=${f##*/}
+list_src "$SRC/bin" 'laranode-*.sh'
+for b in "${SRC_NAMES[@]}"; do
     [ "$b" = laranode-installer.sh ] && continue
     [[ $b =~ ^laranode-[a-z0-9-]+\.sh$ ]] || die "unexpected script name: $b"
-    stage_file "$f" "$STAGE/bin/$b" 755
+    read_src "$SRC/bin/$b" "$STAGE/bin/$b" 755
     bash -n "$STAGE/bin/$b" || die "syntax error in $b"
     n=$((n + 1))
 done
-[ "$n" -gt 0 ] || die "no scripts found in $SRC/bin"
+[ "$n" -gt 0 ] || die "no scripts found in $SRC/bin (or $PANEL_USER cannot read them)"
 # the postgres sudoers snippet is data, kept for the pgsql branch
-[ -f "$SRC/bin/laranode-postgres-sudoers" ] && stage_file "$SRC/bin/laranode-postgres-sudoers" "$STAGE/bin/laranode-postgres-sudoers" 644
+if run_as_panel test -f "$SRC/bin/laranode-postgres-sudoers"; then
+    read_src "$SRC/bin/laranode-postgres-sudoers" "$STAGE/bin/laranode-postgres-sudoers" 644
+fi
 
-for f in "$SRC"/lib/*.sh; do
-    stage_file "$f" "$STAGE/lib/${f##*/}" 644
-    bash -n "$STAGE/lib/${f##*/}" || die "syntax error in lib/${f##*/}"
+list_src "$SRC/lib" '*.sh'
+for b in "${SRC_NAMES[@]}"; do
+    safe_name "$b" || die "unexpected lib file name: $b"
+    read_src "$SRC/lib/$b" "$STAGE/lib/$b" 644
+    bash -n "$STAGE/lib/$b" || die "syntax error in lib/$b"
 done
-for f in "$SRC"/templates/*; do
-    [ -f "$f" ] || continue
-    stage_file "$f" "$STAGE/templates/${f##*/}" 644
+list_src "$SRC/templates" '*'
+for b in "${SRC_NAMES[@]}"; do
+    safe_name "$b" || die "unexpected template file name: $b"
+    run_as_panel test -f "$SRC/templates/$b" || continue
+    read_src "$SRC/templates/$b" "$STAGE/templates/$b" 644
 done
 # ---- sudoers drop-ins: a strict ALLOWLIST, checked on the STAGED copy -------------------
 # The drop-in comes from the panel checkout (writable by laranode_ln). Copy it first into the
@@ -125,11 +154,11 @@ sudoers_file_ok() {   # <file>
     done <"$f"
 }
 
-for f in "$SRC"/etc/sudoers.d/*; do
-    [ -f "$f" ] || continue
-    d=${f##*/}
+list_src "$SRC/etc/sudoers.d" '*'
+for d in "${SRC_NAMES[@]}"; do
+    run_as_panel test -f "$SRC/etc/sudoers.d/$d" || continue
     [[ $d =~ ^laranode-[a-z0-9-]+$ ]] || die "unexpected sudoers drop-in name: $d"
-    stage_file "$f" "$STAGE/etc/sudoers.d/$d" 644
+    read_src "$SRC/etc/sudoers.d/$d" "$STAGE/etc/sudoers.d/$d" 644
     visudo -c -f "$STAGE/etc/sudoers.d/$d" >/dev/null || die "sudoers drop-in $d failed syntax check"
     sudoers_file_ok "$STAGE/etc/sudoers.d/$d" || die "sudoers drop-in $d grants more than a laranode script inside $DEST/bin"
 done

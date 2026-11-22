@@ -25,6 +25,7 @@ L=lib/validate.sh
 #   ln_sysuser first regex, ln_newuser dash/panel-user (useradd refuses), ln_install_file symlink
 #   (needs a symlink in a root-only dir), ln_siteroot symlink, restore-files user (BASE path check),
 #   file-permissions "..", symlink (fd prefix check), sync script owner (settle chown -R root)
+#   r3 sync: the `test -f` before each read (a FIFO/dir fails the read itself, bounded by `timeout`)
 #   r2 sync allowlist: a trailing backslash, a CR, a NUL byte (each line is also refused by the
 #   per-line grammar, or is inert inside a comment: defense in depth), the staged-copy symlink check
 #   (the source-tree symlink scan refuses first; the check only closes a race), _prepare_panel_tree
@@ -70,8 +71,14 @@ mut etc/sudoers.d/laranode-ufw 'sudoers: ufw binary grant back' '' 'www-data ALL
 mut bin/laranode-installer.sh 'installer: panel dirs left group-writable' 'find "$h" -type d -exec chmod 750 {} +' 'find "$h" -type d -exec chmod 770 {} +'
 mut bin/laranode-installer.sh 'installer: panel files group-writable' 'find "$h" -type f -exec chmod 640 {} +' 'find "$h" -type f -exec chmod 660 {} +'
 mut bin/laranode-installer.sh 'installer: .env group-writable' '[ -f "$p/.env" ] && chmod 640 "$p/.env"' '[ -f "$p/.env" ] && chmod 660 "$p/.env"'
-mut bin/laranode-sync-scripts.sh 'sync: script copy group-writable' 'stage_file "$f" "$STAGE/bin/$b" 755' 'stage_file "$f" "$STAGE/bin/$b" 775'
-mut bin/laranode-sync-scripts.sh 'sync: lib copy world-writable' 'stage_file "$f" "$STAGE/lib/${f##*/}" 644' 'stage_file "$f" "$STAGE/lib/${f##*/}" 666'
+mut bin/laranode-sync-scripts.sh 'sync: script copy group-writable' 'read_src "$SRC/bin/$b" "$STAGE/bin/$b" 755' 'read_src "$SRC/bin/$b" "$STAGE/bin/$b" 775'
+mut bin/laranode-sync-scripts.sh 'sync: lib copy world-writable' 'read_src "$SRC/lib/$b" "$STAGE/lib/$b" 644' 'read_src "$SRC/lib/$b" "$STAGE/lib/$b" 666'
+# --- r3 F1: the checkout is read AS the panel account, never as root -------------------------
+mut bin/laranode-sync-scripts.sh 'sync: every read/list runs as root (parent-dir swap leaks root-only files)'     'run_as_panel() { timeout 30 runuser -u "$PANEL_USER" -- "$@"; }' 'run_as_panel() { timeout 30 "$@"; }'
+mut bin/laranode-sync-scripts.sh 'sync: file bytes read as root'     'run_as_panel cat -- "$1" |' 'cat -- "$1" |'
+mut bin/laranode-sync-scripts.sh 'sync: directory listing made as root'     'run_as_panel find "$1" -mindepth 1' 'find "$1" -mindepth 1'
+mut bin/laranode-sync-scripts.sh 'sync: file size cap dropped'     '| head -c 2097152 > "$2"' '> "$2"'
+mut bin/laranode-sync-scripts.sh 'sync: hostile lib/template names accepted'     'safe_name() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }' 'safe_name() { true; }'
 mut etc/sudoers.d/laranode-panel 'sudoers: rm glob grant back' '' 'www-data ALL=(ALL) NOPASSWD: /usr/bin/rm /etc/apache2/sites-available/*.conf'
 mut etc/sudoers.d/laranode-panel 'sudoers: script from the writable panel tree' '' 'www-data ALL=(ALL) NOPASSWD: /home/laranode_ln/panel/laranode-scripts/bin/laranode-cron.sh'
 mut etc/sudoers.d/laranode-panel 'sudoers: any-args a2dissite back' '' 'www-data ALL=(ALL) NOPASSWD: /usr/sbin/a2dissite'
