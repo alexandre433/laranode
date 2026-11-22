@@ -50,9 +50,6 @@ HEAD1=$(runuser -u laranode_ln -- git -C /home/laranode_ln/panel rev-parse HEAD)
 [ "$HEAD1" = "$TAGGED" ] || fail "clone HEAD $HEAD1 is not the tagged commit $TAGGED"
 if runuser -u laranode_ln -- git -C /home/laranode_ln/panel symbolic-ref -q HEAD >/dev/null 2>&1; then fail "clone is on a branch, not detached"; fi
 echo "PASS: real clone at the lightweight tag: detached HEAD = tagged commit"
-echo "[rerun] === tree state after run 1 (what a re-run with LARANODE_REF would see) ==="
-runuser -u laranode_ln -- git -C /home/laranode_ln/panel status --porcelain | head -3   # raw: every file shows M here, the installer re-modes the tree 640/750
-runuser -u laranode_ln -- git -C /home/laranode_ln/panel diff --summary | head -3
 # PR #12 r1: the installer own build/permission steps must leave the checkout clean, or a re-run
 # with LARANODE_REF could never pass
 dirty=$(runuser -u laranode_ln -- git -c core.fileMode=false -C /home/laranode_ln/panel status --porcelain)
