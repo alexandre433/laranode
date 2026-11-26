@@ -25,6 +25,7 @@ vi.mock('react-icons/tb', () => ({
     TbBrandMysql: () => <span data-testid="icon-TbBrandMysql">TbBrandMysql</span>,
     TbChartBar: () => <span>TbChartBar</span>,
     TbWorldWww: () => <span>TbWorldWww</span>,
+    TbServer2: () => <span>TbServer2</span>,
 }));
 vi.mock('react-icons/md', () => ({
     MdSecurity: () => <span>MdSecurity</span>,
@@ -43,6 +44,7 @@ global.route = (name) => {
         'firewall.index': '/firewall',
         'operations.index': '/operations',
         'analytics.index': '/analytics',
+        'redis.index': '/admin/redis',
         'databases.index': '/databases',
         'cron-jobs.index': '/cron-jobs',
         'php.index': '/php',
@@ -211,4 +213,10 @@ test('Power link is admin-only: hidden for a normal user', () => {
     render(<SidebarNavi {...defaultProps} />);
 
     expect(screen.queryByRole('link', { name: /^power$/i })).not.toBeInTheDocument();
+});
+
+test('Redis link is admin-only: hidden for a normal user (the route is admin-gated)', () => {
+    render(<SidebarNavi {...defaultProps} />);
+
+    expect(screen.queryByRole('link', { name: /redis/i })).not.toBeInTheDocument();
 });

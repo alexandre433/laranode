@@ -13,6 +13,7 @@ use App\Http\Controllers\NotificationPreferencesController;
 use App\Http\Controllers\NotificationsController;
 use App\Http\Controllers\PHPManagerController;
 use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\RedisMonitorController;
 use App\Http\Controllers\StatsHistoryController;
 use App\Http\Controllers\WebsiteController;
 use App\Http\Middleware\AdminMiddleware;
@@ -148,5 +149,11 @@ Route::middleware('auth')->group(function () {
 
 // Analytics [Admin | User]
 Route::get('/analytics', [AnalyticsController::class, 'index'])->middleware(['auth'])->name('analytics.index');
+
+// Redis monitor [Admin]
+Route::middleware(['auth', AdminMiddleware::class])->group(function () {
+    Route::get('/admin/redis', [RedisMonitorController::class, 'index'])->name('redis.index');
+    Route::get('/admin/redis/data', [RedisMonitorController::class, 'data'])->name('redis.data');
+});
 
 require __DIR__.'/auth.php';
