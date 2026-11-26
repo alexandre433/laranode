@@ -30,6 +30,8 @@ return Application::configure(basePath: dirname(__DIR__))
             \App\Models\UserSiteStat::class,
         ]])->daily();
         $schedule->job(new \App\Jobs\RunScheduledBackupsJob)->everyMinute();
+        // Redis monitor (no-op unless REDIS_MONITOR_ENABLED=true): ssh pull + live loop run here, never in the web process.
+        $schedule->command('redis-monitor:tick')->everyMinute()->withoutOverlapping(5)->runInBackground();
 
         $schedule->call(new \App\Actions\SSL\SendSslExpiryNotificationsAction)
             ->dailyAt('08:00')
