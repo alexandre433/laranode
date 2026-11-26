@@ -157,10 +157,32 @@ class SystemStatsService
         $result = [];
 
         foreach ($activeEngines as $engineKey => $serviceName) {
-            $result[$engineKey] = $this->getServiceStatus($serviceName);
+            $result[$engineKey] = $this->getServiceStatus($this->statusUnit($serviceName));
         }
 
         return $result;
+    }
+
+    /**
+     * `postgresql.service` is a oneshot wrapper (`active (exited)`): it has no PID, memory or CPU, so the
+     * dashboard card shows only `--`. Show the real server unit (`postgresql@<ver>-<cluster>`) instead.
+     * Only the status display uses this; service control keeps the unit name from EngineManager.
+     */
+    private function statusUnit(string $service): string
+    {
+        if ($service !== 'postgresql') {
+            return $service;
+        }
+
+        $out = Process::run(['systemctl', 'list-units', 'postgresql@*.service', '--state=running', '--plain', '--no-legend'])->output();
+        foreach (preg_split('/\R/', trim($out)) ?: [] as $line) {
+            $unit = strtok(trim($line), ' ');
+            if ($unit !== false && preg_match('/^postgresql@[\w.\-]+\.service$/', $unit)) {
+                return $unit;
+            }
+        }
+
+        return $service;
     }
 
     /**
