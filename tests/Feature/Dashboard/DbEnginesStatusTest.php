@@ -107,3 +107,47 @@ test('getAllStats has dbEngines key and no top-level mysql key', function () use
     expect($result)->toHaveKey('dbEngines')
         ->and($result)->not->toHaveKey('mysql');
 });
+
+test('postgres card reads the running postgresql@ver-cluster unit, not the active(exited) wrapper', function () {
+    $statusCalls = [];
+    Process::fake(function (\Illuminate\Process\PendingProcess $process) use (&$statusCalls) {
+        $cmd = $process->command;
+        if (is_array($cmd) && ($cmd[1] ?? '') === 'is-active') {
+            return in_array($cmd[2] ?? '', ['postgresql'], true)
+                ? Process::result(output: 'active')
+                : Process::result(output: 'inactive', exitCode: 3);
+        }
+        if (is_array($cmd) && ($cmd[1] ?? '') === 'list-units') {
+            return Process::result(output: "postgresql@17-main.service loaded active running PostgreSQL Cluster 17-main\n");
+        }
+        if (is_array($cmd) && ($cmd[1] ?? '') === 'status') {
+            $statusCalls[] = $cmd[2];
+        }
+
+        return Process::result(output: '');
+    });
+
+    (new SystemStatsService)->getDbEnginesStatus();
+
+    expect($statusCalls)->toContain('postgresql@17-main.service')
+        ->and($statusCalls)->not->toContain('postgresql');
+});
+
+test('postgres card falls back to the wrapper when no versioned unit is listed', function () {
+    $statusCalls = [];
+    Process::fake(function (\Illuminate\Process\PendingProcess $process) use (&$statusCalls) {
+        $cmd = $process->command;
+        if (is_array($cmd) && ($cmd[1] ?? '') === 'is-active') {
+            return ($cmd[2] ?? '') === 'postgresql' ? Process::result(output: 'active') : Process::result(output: 'inactive', exitCode: 3);
+        }
+        if (is_array($cmd) && ($cmd[1] ?? '') === 'status') {
+            $statusCalls[] = $cmd[2];
+        }
+
+        return Process::result(output: '');
+    });
+
+    (new SystemStatsService)->getDbEnginesStatus();
+
+    expect($statusCalls)->toBe(['postgresql']);
+});
